@@ -81,6 +81,17 @@ CDC apply-changes, and append-flow write paths.
 - **Quarantine tables** do not receive column masks in this version (masking
   rejected rows would hide the very values operators need to triage them, and
   the mask map is keyed to the main table's columns).
+- **SCD type 2 snapshot targets are not supported.** Column comments/masks on
+  an `apply_changes_from_snapshot` target with `scd_type: 2` raise an error at
+  runtime. An SCD2 table carries DLT-managed `__START_AT` / `__END_AT` system
+  columns typed to the snapshot *version*; unlike the regular CDC path, the
+  snapshot config has no `sequence_by` to derive that type from (it is decided
+  at runtime by the snapshot source), so a complete explicit schema cannot be
+  built. Rather than emit a schema missing those columns (which would break
+  table creation) or silently drop a mask, the pipeline fails closed. Use
+  **SCD type 1** for column policies on a snapshot target, or apply the
+  `COMMENT` / `MASK` with a separate `ALTER TABLE` after the table is created.
+  SCD1 snapshot targets are unaffected.
 
 ## Related
 

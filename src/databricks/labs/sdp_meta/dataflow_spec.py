@@ -8,6 +8,7 @@ from typing import List
 from pyspark.sql import DataFrame
 from pyspark.sql.functions import col, lit, row_number
 from pyspark.sql.session import SparkSession
+from pyspark.sql.types import ArrayType, MapType, StructType
 from pyspark.sql.window import Window
 
 logger = logging.getLogger("sdp-meta")
@@ -384,6 +385,44 @@ class DataflowSpecUtils:
     }
 
     @staticmethod
+    def _type_to_ddl(data_type):
+        """Render a ``DataType`` to a DDL type string preserving nullability.
+
+        ``DataType.simpleString()`` flattens *nested* nullability: it renders
+        a non-nullable struct field, an ``ArrayType(..., containsNull=False)``
+        or a ``MapType(..., valueContainsNull=False)`` exactly like their
+        nullable counterparts. This recursive renderer keeps the nullability
+        that Spark DDL can express — a struct field's ``NOT NULL`` at any
+        nesting depth (top-level, or inside an array / map / struct) — so the
+        emitted DDL round-trips faithfully.
+
+        Note the one nullability flag Spark DDL genuinely *cannot* express:
+        ``ArrayType.containsNull`` / ``MapType.valueContainsNull``. There is no
+        DDL syntax for element / value nullability (``array<string not null>``
+        is a parse error), and ``DataType.sql`` / ``catalogString`` omit it
+        too. Those flags therefore stay widened to nullable — a safe widening
+        (the declared schema never claims non-null where the data allows
+        nulls); only the element type itself is recursed into so a struct
+        nested inside an array/map still keeps its ``NOT NULL`` fields.
+        """
+        if isinstance(data_type, StructType):
+            rendered = []
+            for f in data_type.fields:
+                piece = f"{f.name}:{DataflowSpecUtils._type_to_ddl(f.dataType)}"
+                if not f.nullable:
+                    piece += " NOT NULL"
+                rendered.append(piece)
+            return f"struct<{','.join(rendered)}>"
+        if isinstance(data_type, ArrayType):
+            return f"array<{DataflowSpecUtils._type_to_ddl(data_type.elementType)}>"
+        if isinstance(data_type, MapType):
+            return (
+                f"map<{DataflowSpecUtils._type_to_ddl(data_type.keyType)},"
+                f"{DataflowSpecUtils._type_to_ddl(data_type.valueType)}>"
+            )
+        return data_type.simpleString()
+
+    @staticmethod
     def build_schema_ddl(struct_schema, column_comments=None, column_masks=None):
         """Render a StructType into a SQL DDL-string schema, splicing in UC
         column ``COMMENT`` and ``MASK`` clauses.
@@ -441,7 +480,7 @@ class DataflowSpecUtils:
             # so a column whose name contains a backtick still renders a valid
             # delimited identifier rather than corrupting the DDL.
             escaped_name = field.name.replace("`", "``")
-            parts = [f"`{escaped_name}` {field.dataType.simpleString()}"]
+            parts = [f"`{escaped_name}` {DataflowSpecUtils._type_to_ddl(field.dataType)}"]
             if not field.nullable:
                 parts.append("NOT NULL")
             if field.name in column_comments:

@@ -309,6 +309,48 @@ class DataFlowSpecTests(SDPFrameworkTestCase):
             self.spark.conf.unset(conf)
         shutil.rmtree(tmp_dir)
 
+    def test_bronze_empty_mask_value_not_persisted(self):
+        """An empty mask value (``{"id": ""}``) is dropped before the spec is
+        persisted so the stored ``columnMasks`` is clean; non-empty siblings
+        survive. (A bare ``MASK`` is invalid DDL and is also skipped by the
+        renderer, but it must not reach the persisted spec at all.)"""
+        with open(self.onboarding_json_file) as f:
+            onboarding = json.load(f)
+        onboarding[0]["bronze_column_masks"] = {
+            "id": "",  # empty -> must be dropped
+            "name": "main.bronze.mask_name USING COLUMNS (name)",
+        }
+        tmp_dir = tempfile.mkdtemp()
+        cp_file = os.path.join(tmp_dir, "onboarding_empty_mask.json")
+        with open(cp_file, "w") as f:
+            json.dump(onboarding, f)
+
+        opm = copy.deepcopy(self.onboarding_bronze_silver_params_map)
+        opm["onboarding_file_path"] = cp_file
+        del opm["silver_dataflowspec_table"]
+        del opm["silver_dataflowspec_path"]
+        OnboardDataflowspec(self.spark, opm).onboard_bronze_dataflow_spec()
+        self.spark.sql("CREATE DATABASE if not exists " + opm["database"])
+
+        self.spark.conf.set("layer", "bronze")
+        self.spark.conf.set("bronze.group", "A1")
+        self.spark.conf.set("bronze.dataflowspecTable",
+                            f"{opm['database']}.{opm['bronze_dataflowspec_table']}")
+        specs = list(DataflowSpecUtils.get_bronze_dataflow_spec(self.spark))
+        masks = [json.loads(s.columnMasks) if s.columnMasks else None for s in specs]
+        # The non-empty mask survives, keyed only by "name".
+        self.assertIn(
+            {"name": "main.bronze.mask_name USING COLUMNS (name)"}, masks
+        )
+        # The empty "id" entry must NOT be persisted anywhere.
+        for persisted in masks:
+            if persisted is not None:
+                self.assertNotIn("id", persisted)
+
+        for conf in ["layer", "bronze.group", "bronze.dataflowspecTable"]:
+            self.spark.conf.unset(conf)
+        shutil.rmtree(tmp_dir)
+
     def test_build_schema_ddl_comments_and_masks(self):
         """build_schema_ddl renders NOT NULL, escaped COMMENT and MASK in the
         canonical ``name type [NOT NULL] [COMMENT] [MASK]`` order."""
@@ -459,6 +501,95 @@ class DataFlowSpecTests(SDPFrameworkTestCase):
         for field in schema.fields:
             reparsed = _parse_datatype_string(field.dataType.simpleString())
             self.assertEqual(reparsed, field.dataType)
+
+    def test_type_to_ddl_preserves_nested_struct_nullability(self):
+        """_type_to_ddl preserves non-default nullability that Spark DDL can
+        express — a struct field's NOT NULL at any nesting depth (top-level,
+        inside an array, inside a map value) — so the DDL round-trips
+        faithfully, unlike ``simpleString()`` which flattens it to nullable."""
+        from pyspark.sql.types import (
+            StructType, StructField, StringType, IntegerType, TimestampType,
+            ArrayType, MapType, _parse_datatype_string,
+        )
+        addr = StructType([
+            StructField("city", StringType(), False),   # NOT NULL
+            StructField("zip", StringType(), True),
+        ])
+        events = ArrayType(
+            StructType([
+                StructField("ts", TimestampType(), False),  # NOT NULL nested
+                StructField("val", IntegerType(), True),
+            ]),
+            True,
+        )
+        props = MapType(
+            StringType(),
+            StructType([StructField("v", StringType(), False)]),  # NOT NULL
+            True,
+        )
+        for dt in (addr, events, props):
+            ddl = DataflowSpecUtils._type_to_ddl(dt)
+            self.assertIn("NOT NULL", ddl)
+            self.assertEqual(
+                _parse_datatype_string(ddl), dt,
+                f"{dt} did not round-trip through {ddl!r}",
+            )
+        # simpleString would drop the nested NOT NULL entirely.
+        self.assertNotIn("NOT NULL", addr.simpleString())
+
+    def test_build_schema_ddl_preserves_nested_struct_nullability(self):
+        """End-to-end: the DDL emitted for a column whose type carries a
+        non-null nested struct field keeps that NOT NULL (fidelity), while the
+        top-level COMMENT still attaches."""
+        from pyspark.sql.types import (
+            StructType, StructField, StringType, _parse_datatype_string,
+        )
+        addr = StructType([
+            StructField("city", StringType(), False),
+            StructField("zip", StringType(), True),
+        ])
+        schema = StructType([StructField("addr", addr, True)])
+        ddl = DataflowSpecUtils.build_schema_ddl(schema, {"addr": "postal address"}, {})
+        self.assertEqual(
+            ddl,
+            "`addr` struct<city:string NOT NULL,zip:string> "
+            "COMMENT 'postal address'",
+        )
+        # The struct type portion round-trips with the nested NOT NULL intact.
+        self.assertEqual(
+            _parse_datatype_string("struct<city:string NOT NULL,zip:string>"),
+            addr,
+        )
+
+    def test_type_to_ddl_array_map_element_nullability_widens_safely(self):
+        """Spark DDL cannot express ``ArrayType.containsNull`` /
+        ``MapType.valueContainsNull`` (``array<string not null>`` is a parse
+        error), so those flags widen to nullable — a SAFE widening (never
+        claims non-null where nulls are allowed). The element/value TYPE is
+        still recursed into, so a struct nested inside a non-null-element
+        array keeps its NOT NULL fields."""
+        from pyspark.sql.types import (
+            StructType, StructField, StringType, ArrayType, MapType,
+            _parse_datatype_string,
+        )
+        arr = ArrayType(StringType(), containsNull=False)
+        self.assertEqual(DataflowSpecUtils._type_to_ddl(arr), "array<string>")
+        # widened but valid (round-trips to the nullable-element form)
+        self.assertEqual(
+            _parse_datatype_string("array<string>"),
+            ArrayType(StringType(), True),
+        )
+        mp = MapType(StringType(), StringType(), valueContainsNull=False)
+        self.assertEqual(DataflowSpecUtils._type_to_ddl(mp), "map<string,string>")
+        # a struct nested inside a containsNull=False array still keeps NOT NULL
+        arr_of_struct = ArrayType(
+            StructType([StructField("v", StringType(), False)]),
+            containsNull=False,
+        )
+        self.assertEqual(
+            DataflowSpecUtils._type_to_ddl(arr_of_struct),
+            "array<struct<v:string NOT NULL>>",
+        )
 
     def test_get_dataflow_spec_positive(self):
         opm = copy.deepcopy(self.onboarding_bronze_silver_params_map)

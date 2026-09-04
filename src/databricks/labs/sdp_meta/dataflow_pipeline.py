@@ -692,6 +692,32 @@ class DataflowPipeline:
         # error ("no schema available") and comments are silently skipped on
         # this path.
         struct_schema = self._resolve_policy_schema()
+        # Fail closed for SCD2 snapshot targets. An SCD2 table carries
+        # DLT-managed ``__START_AT`` / ``__END_AT`` system columns typed to
+        # the snapshot *version*. Unlike the regular CDC path
+        # (``modify_schema_for_cdc_changes``), ``ApplyChangesFromSnapshot``
+        # has no ``sequence_by`` from which to derive that version dtype — it
+        # is determined at runtime by the ``next_snapshot_and_version``
+        # return / snapshot source — so we cannot build a complete explicit
+        # schema. Passing an explicit DDL schema that omits those system
+        # columns can break target-table creation, and silently dropping a
+        # mask is a security regression. So when column comments/masks would
+        # produce an explicit schema (``struct_schema is not None``) on an
+        # SCD2 snapshot target, we raise rather than emit an incomplete
+        # schema. SCD1 snapshot targets have no such system columns and keep
+        # working. See docs/docs/guides/column-policies.md.
+        if struct_schema is not None and str(self.applyChangesFromSnapshot.scd_type) == "2":
+            raise ValueError(
+                "column_comments / column_masks are not supported on an SCD2 "
+                f"apply_changes_from_snapshot target ({self._get_target_table_name()}). "
+                "SCD2 snapshot targets require DLT-managed __START_AT / __END_AT "
+                "system columns whose type is the snapshot version and cannot be "
+                "derived here (apply_changes_from_snapshot has no sequence_by), so "
+                "an explicit schema carrying the policies would omit them and break "
+                "target-table creation. Use SCD type 1 for column policies on a "
+                "snapshot target, or apply the COMMENT / MASK with a separate ALTER "
+                "TABLE after the pipeline creates the table."
+            )
         self.create_streaming_table(struct_schema, target_path)
         target_cl = self.dataflowSpec.targetDetails.get('catalog', None)
         target_db_name = self.dataflowSpec.targetDetails['database']

@@ -1556,7 +1556,7 @@ class OnboardDataflowspec:
                 onboarding_row, "bronze_column_comments"
             )
             bronze_column_masks = self.__get_column_policy_json(
-                onboarding_row, "bronze_column_masks"
+                onboarding_row, "bronze_column_masks", cleaner=validate_column_masks
             )
             bronze_row = (
                 bronze_data_flow_spec_id,
@@ -1595,7 +1595,7 @@ class OnboardDataflowspec:
 
         return data_flow_spec_rows_df
 
-    def __get_column_policy_json(self, onboarding_row, key):
+    def __get_column_policy_json(self, onboarding_row, key, cleaner=None):
         """Return the ``*_column_comments`` / ``*_column_masks`` value as a
         JSON string, or ``None`` when absent/empty.
 
@@ -1606,14 +1606,23 @@ class OnboardDataflowspec:
         still surfaces a struct whose fields (contributed by other rows) are
         all ``None`` — those phantom keys are dropped here so each row keeps
         only its own entries. A plain JSON string is passed through unchanged.
-        Validation already happened in pre-flight
-        (:func:`identifiers.validate_column_comments` /
-        ``validate_column_masks``)."""
+
+        When ``cleaner`` is supplied it is the field's validator
+        (:func:`identifiers.validate_column_masks`), re-run here so the
+        *persisted* spec matches what pre-flight accepted — in particular
+        empty mask values are dropped rather than stored (they would render
+        an invalid bare ``MASK`` and are safely skipped by the renderer, but
+        should not be persisted). Without a cleaner, only phantom ``None``
+        keys are dropped (comments keep empty values, which render a valid
+        ``COMMENT ''``)."""
         if key not in onboarding_row or onboarding_row[key] is None:
             return None
         value = onboarding_row[key]
         if hasattr(value, "asDict"):
             value = value.asDict(recursive=True)
+        if cleaner is not None:
+            cleaned = cleaner(value)
+            return json.dumps(cleaned) if cleaned else None
         if isinstance(value, dict):
             value = {k: v for k, v in value.items() if v is not None}
             return json.dumps(value) if value else None
@@ -2619,7 +2628,7 @@ class OnboardDataflowspec:
                 onboarding_row, "silver_column_comments"
             )
             silver_column_masks = self.__get_column_policy_json(
-                onboarding_row, "silver_column_masks"
+                onboarding_row, "silver_column_masks", cleaner=validate_column_masks
             )
             silver_row = (
                 silver_data_flow_spec_id,

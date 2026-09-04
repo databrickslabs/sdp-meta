@@ -3116,15 +3116,18 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
     # ------------------------------------------------------------------
 
     @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
-    def test_apply_changes_from_snapshot_applies_column_policies(self, mock_dlt):
-        """Snapshot CDC wires the declared schema so comments/masks apply to
-        the target table (previously always passed None)."""
+    def test_apply_changes_from_snapshot_scd1_applies_column_policies(self, mock_dlt):
+        """SCD1 snapshot CDC wires the declared schema so comments/masks apply
+        to the target table (SCD1 has no __START_AT/__END_AT system columns, so
+        an explicit schema is complete and safe)."""
         from pyspark.sql.types import StructType, StructField, StringType
         mock_dlt.create_streaming_table = MagicMock()
         mock_dlt.create_auto_cdc_from_snapshot_flow = MagicMock()
         self.spark.conf.set("spark.databricks.unityCatalog.enabled", "True")
         self.addCleanup(self.spark.conf.unset, "spark.databricks.unityCatalog.enabled")
         spec = BronzeDataflowSpec(**copy.deepcopy(DataflowPipelineTests.bronze_dataflow_spec_acs_map))
+        # bronze_dataflow_spec_acs_map is SCD2; make this an SCD1 target.
+        spec.applyChangesFromSnapshot = json.dumps({"keys": ["id"], "scd_type": "1"})
         spec.columnComments = json.dumps({"id": "the id"})
         spec.columnMasks = json.dumps({"id": "cat.s.mask_id"})
         view_name = f"{spec.targetDetails['table']}_inputview"
@@ -3138,14 +3141,15 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
         self.assertIn("MASK cat.s.mask_id", kwargs["schema"])
 
     @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
-    def test_apply_changes_from_snapshot_unknown_mask_fails_closed(self, mock_dlt):
-        """A snapshot-CDC mask on an absent column fails closed."""
+    def test_apply_changes_from_snapshot_scd1_unknown_mask_fails_closed(self, mock_dlt):
+        """An SCD1 snapshot-CDC mask on an absent column fails closed."""
         from pyspark.sql.types import StructType, StructField, StringType
         mock_dlt.create_streaming_table = MagicMock()
         mock_dlt.create_auto_cdc_from_snapshot_flow = MagicMock()
         self.spark.conf.set("spark.databricks.unityCatalog.enabled", "True")
         self.addCleanup(self.spark.conf.unset, "spark.databricks.unityCatalog.enabled")
         spec = BronzeDataflowSpec(**copy.deepcopy(DataflowPipelineTests.bronze_dataflow_spec_acs_map))
+        spec.applyChangesFromSnapshot = json.dumps({"keys": ["id"], "scd_type": "1"})
         spec.columnMasks = json.dumps({"ssn": "cat.s.mask_ssn"})
         view_name = f"{spec.targetDetails['table']}_inputview"
         pipeline = DataflowPipeline(self.spark, spec, view_name, None)
@@ -3154,6 +3158,48 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
         ).jsonValue()
         with self.assertRaisesRegex(ValueError, "not present in the derived"):
             pipeline.apply_changes_from_snapshot()
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_apply_changes_from_snapshot_scd2_policies_fail_closed(self, mock_dlt):
+        """Column comments/masks on an SCD2 snapshot target fail closed: the
+        DLT-managed __START_AT/__END_AT system columns cannot be typed here (no
+        sequence_by), so an explicit schema would omit them and break table
+        creation. Rather than emit an incomplete schema or drop a mask, the
+        pipeline raises. (bronze_dataflow_spec_acs_map is SCD2.)"""
+        from pyspark.sql.types import StructType, StructField, StringType
+        mock_dlt.create_streaming_table = MagicMock()
+        mock_dlt.create_auto_cdc_from_snapshot_flow = MagicMock()
+        self.spark.conf.set("spark.databricks.unityCatalog.enabled", "True")
+        self.addCleanup(self.spark.conf.unset, "spark.databricks.unityCatalog.enabled")
+        spec = BronzeDataflowSpec(**copy.deepcopy(DataflowPipelineTests.bronze_dataflow_spec_acs_map))
+        self.assertEqual(json.loads(spec.applyChangesFromSnapshot)["scd_type"], "2")
+        spec.columnComments = json.dumps({"id": "the id"})
+        spec.columnMasks = json.dumps({"id": "cat.s.mask_id"})
+        view_name = f"{spec.targetDetails['table']}_inputview"
+        pipeline = DataflowPipeline(self.spark, spec, view_name, None)
+        pipeline.schema_json = StructType(
+            [StructField("id", StringType(), True)]
+        ).jsonValue()
+        with self.assertRaisesRegex(ValueError, "SCD2 apply_changes_from_snapshot"):
+            pipeline.apply_changes_from_snapshot()
+        # No table is created when we fail closed.
+        mock_dlt.create_streaming_table.assert_not_called()
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_apply_changes_from_snapshot_scd2_no_policies_unaffected(self, mock_dlt):
+        """SCD2 snapshot WITHOUT column policies is unaffected by the guard —
+        it still creates the streaming table with an inferred (None) schema,
+        exactly as before the feature."""
+        mock_dlt.create_streaming_table = MagicMock()
+        mock_dlt.create_auto_cdc_from_snapshot_flow = MagicMock()
+        self.spark.conf.set("spark.databricks.unityCatalog.enabled", "True")
+        self.addCleanup(self.spark.conf.unset, "spark.databricks.unityCatalog.enabled")
+        spec = BronzeDataflowSpec(**copy.deepcopy(DataflowPipelineTests.bronze_dataflow_spec_acs_map))
+        view_name = f"{spec.targetDetails['table']}_inputview"
+        pipeline = DataflowPipeline(self.spark, spec, view_name, None)
+        pipeline.apply_changes_from_snapshot()
+        _, kwargs = mock_dlt.create_streaming_table.call_args
+        self.assertIsNone(kwargs["schema"])
 
     # ------------------------------------------------------------------
     # Multi-source AUTO CDC runtime tests (issue #294)
