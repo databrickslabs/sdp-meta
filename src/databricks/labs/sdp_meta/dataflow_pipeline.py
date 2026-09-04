@@ -683,30 +683,29 @@ class DataflowPipeline:
 
     def apply_changes_from_snapshot(self):
         target_path = None if self.uc_enabled else self.dataflowSpec.targetDetails["path"]
-        # Wire in the declared (Bronze ``schema_json``) / derived (Silver
-        # transform) schema so column comments/masks are applied to the
-        # snapshot-CDC target table. ``_resolve_policy_schema`` returns
-        # ``None`` when the feature is unused, so ``_apply_column_policies``
-        # (inside ``create_streaming_table``) preserves the previous
-        # ``create_streaming_table(None, ...)`` behaviour — masks otherwise
-        # error ("no schema available") and comments are silently skipped on
-        # this path.
-        struct_schema = self._resolve_policy_schema()
-        # Fail closed for SCD2 snapshot targets. An SCD2 table carries
-        # DLT-managed ``__START_AT`` / ``__END_AT`` system columns typed to
-        # the snapshot *version*. Unlike the regular CDC path
-        # (``modify_schema_for_cdc_changes``), ``ApplyChangesFromSnapshot``
-        # has no ``sequence_by`` from which to derive that version dtype — it
-        # is determined at runtime by the ``next_snapshot_and_version``
-        # return / snapshot source — so we cannot build a complete explicit
-        # schema. Passing an explicit DDL schema that omits those system
-        # columns can break target-table creation, and silently dropping a
-        # mask is a security regression. So when column comments/masks would
-        # produce an explicit schema (``struct_schema is not None``) on an
-        # SCD2 snapshot target, we raise rather than emit an incomplete
-        # schema. SCD1 snapshot targets have no such system columns and keep
-        # working. See docs/docs/guides/column-policies.md.
-        if struct_schema is not None and str(self.applyChangesFromSnapshot.scd_type) == "2":
+        # Fail closed for SCD2 snapshot targets when column policies are
+        # CONFIGURED. An SCD2 table carries DLT-managed ``__START_AT`` /
+        # ``__END_AT`` system columns typed to the snapshot *version*. Unlike
+        # the regular CDC path (``modify_schema_for_cdc_changes``),
+        # ``ApplyChangesFromSnapshot`` has no ``sequence_by`` from which to
+        # derive that version dtype — it is determined at runtime by the
+        # ``next_snapshot_and_version`` return / snapshot source — so we cannot
+        # build a complete explicit schema. Emitting an explicit schema that
+        # omits those system columns can break target-table creation, and
+        # silently dropping a mask is a security regression.
+        #
+        # The check is based on whether policies are CONFIGURED, not on
+        # whether a schema was resolved: ``_resolve_policy_schema`` returns
+        # ``None`` for an inferred-schema Bronze target, so a comments-only +
+        # inferred-schema SCD2 target would otherwise slip past (comments
+        # merely warned/skipped) and the table would still be created,
+        # violating the "SCD2 snapshot with policies must raise and create no
+        # table" contract. We therefore reject BEFORE ``create_streaming_table``
+        # whenever comments and/or masks are configured for this target. SCD1
+        # snapshot targets have no such system columns and keep working; SCD2
+        # with no policies is unaffected. See docs/docs/guides/column-policies.md.
+        has_policies = bool(self._get_column_comments()) or bool(self._get_column_masks())
+        if has_policies and str(self.applyChangesFromSnapshot.scd_type) == "2":
             raise ValueError(
                 "column_comments / column_masks are not supported on an SCD2 "
                 f"apply_changes_from_snapshot target ({self._get_target_table_name()}). "
@@ -718,6 +717,15 @@ class DataflowPipeline:
                 "snapshot target, or apply the COMMENT / MASK with a separate ALTER "
                 "TABLE after the pipeline creates the table."
             )
+        # Wire in the declared (Bronze ``schema_json``) / derived (Silver
+        # transform) schema so column comments/masks are applied to the
+        # snapshot-CDC target table. ``_resolve_policy_schema`` returns
+        # ``None`` when the feature is unused, so ``_apply_column_policies``
+        # (inside ``create_streaming_table``) preserves the previous
+        # ``create_streaming_table(None, ...)`` behaviour — a masks-only
+        # inferred-schema SCD1 target still fails closed via
+        # ``_apply_column_policies(None)``.
+        struct_schema = self._resolve_policy_schema()
         self.create_streaming_table(struct_schema, target_path)
         target_cl = self.dataflowSpec.targetDetails.get('catalog', None)
         target_db_name = self.dataflowSpec.targetDetails['database']

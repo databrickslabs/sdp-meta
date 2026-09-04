@@ -408,7 +408,12 @@ class DataflowSpecUtils:
         if isinstance(data_type, StructType):
             rendered = []
             for f in data_type.fields:
-                piece = f"{f.name}:{DataflowSpecUtils._type_to_ddl(f.dataType)}"
+                # Backtick-delimit + double embedded backticks, exactly like
+                # top-level field names, so a nested field name containing a
+                # backtick / space / comma / colon still renders well-formed
+                # DDL rather than corrupting the struct definition.
+                escaped_name = f.name.replace("`", "``")
+                piece = f"`{escaped_name}`:{DataflowSpecUtils._type_to_ddl(f.dataType)}"
                 if not f.nullable:
                     piece += " NOT NULL"
                 rendered.append(piece)

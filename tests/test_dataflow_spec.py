@@ -492,7 +492,7 @@ class DataFlowSpecTests(SDPFrameworkTestCase):
             "`id` bigint NOT NULL COMMENT 'primary key', "
             "`tags` array<string> MASK cat.s.mask_tags, "
             "`attrs` map<string,int>, "
-            "`addr` struct<city:string,zip:string>",
+            "`addr` struct<`city`:string,`zip`:string>",
         )
         # The nested type strings must round-trip through Spark's own DDL
         # parser (confirming ``simpleString()`` produces valid, equivalent
@@ -552,7 +552,7 @@ class DataFlowSpecTests(SDPFrameworkTestCase):
         ddl = DataflowSpecUtils.build_schema_ddl(schema, {"addr": "postal address"}, {})
         self.assertEqual(
             ddl,
-            "`addr` struct<city:string NOT NULL,zip:string> "
+            "`addr` struct<`city`:string NOT NULL,`zip`:string> "
             "COMMENT 'postal address'",
         )
         # The struct type portion round-trips with the nested NOT NULL intact.
@@ -588,7 +588,39 @@ class DataFlowSpecTests(SDPFrameworkTestCase):
         )
         self.assertEqual(
             DataflowSpecUtils._type_to_ddl(arr_of_struct),
-            "array<struct<v:string NOT NULL>>",
+            "array<struct<`v`:string NOT NULL>>",
+        )
+
+    def test_type_to_ddl_escapes_nested_struct_field_names(self):
+        """Nested struct field names containing a backtick / space / comma /
+        colon are backtick-delimited (embedded backticks doubled), exactly
+        like top-level names, so the emitted DDL stays well-formed and
+        round-trips faithfully."""
+        from pyspark.sql.types import (
+            StructType, StructField, StringType, IntegerType, ArrayType,
+            _parse_datatype_string,
+        )
+        weird = StructType([
+            StructField("a`b", StringType(), False),      # embedded backtick
+            StructField("has space", IntegerType(), True),
+            StructField("c,d:e", StringType(), True),      # comma + colon
+        ])
+        ddl = DataflowSpecUtils._type_to_ddl(weird)
+        self.assertEqual(
+            ddl,
+            "struct<`a``b`:string NOT NULL,`has space`:int,`c,d:e`:string>",
+        )
+        # Round-trips back to the exact same StructType (well-formed DDL).
+        self.assertEqual(_parse_datatype_string(ddl), weird)
+        # And through the full column renderer, nested inside an array.
+        schema = StructType([StructField("payload", ArrayType(weird), True)])
+        col_ddl = DataflowSpecUtils.build_schema_ddl(
+            schema, {"payload": "the payload"}, {}
+        )
+        self.assertEqual(
+            col_ddl,
+            "`payload` array<struct<`a``b`:string NOT NULL,"
+            "`has space`:int,`c,d:e`:string>> COMMENT 'the payload'",
         )
 
     def test_get_dataflow_spec_positive(self):

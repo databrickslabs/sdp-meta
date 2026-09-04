@@ -3186,6 +3186,52 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
         mock_dlt.create_streaming_table.assert_not_called()
 
     @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_apply_changes_from_snapshot_scd2_comments_only_inferred_schema_fails_closed(self, mock_dlt):
+        """SCD2 snapshot guard cannot be bypassed by comments-only on an
+        INFERRED-schema Bronze target. ``_resolve_policy_schema`` returns None
+        for inferred Bronze, so a guard keyed on the resolved schema would let
+        comments-only slip past (comments merely warned/skipped) and STILL
+        create the table. The guard is keyed on configured policies instead, so
+        it raises BEFORE any table is created."""
+        mock_dlt.create_streaming_table = MagicMock()
+        mock_dlt.create_auto_cdc_from_snapshot_flow = MagicMock()
+        self.spark.conf.set("spark.databricks.unityCatalog.enabled", "True")
+        self.addCleanup(self.spark.conf.unset, "spark.databricks.unityCatalog.enabled")
+        spec = BronzeDataflowSpec(**copy.deepcopy(DataflowPipelineTests.bronze_dataflow_spec_acs_map))
+        self.assertEqual(json.loads(spec.applyChangesFromSnapshot)["scd_type"], "2")
+        # comments ONLY, no masks; inferred Bronze schema (schema stays None).
+        spec.columnComments = json.dumps({"id": "the id"})
+        spec.columnMasks = None
+        view_name = f"{spec.targetDetails['table']}_inputview"
+        pipeline = DataflowPipeline(self.spark, spec, view_name, None)
+        # Inferred schema: schema_json is None, so _resolve_policy_schema()
+        # would return None -- the previous (bypassable) condition.
+        self.assertIsNone(pipeline.schema_json)
+        self.assertIsNone(pipeline._resolve_policy_schema())
+        with self.assertRaisesRegex(ValueError, "SCD2 apply_changes_from_snapshot"):
+            pipeline.apply_changes_from_snapshot()
+        mock_dlt.create_streaming_table.assert_not_called()
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_apply_changes_from_snapshot_scd2_masks_only_inferred_schema_fails_closed(self, mock_dlt):
+        """SCD2 snapshot guard also fires for masks-only on an inferred-schema
+        Bronze target, raising the SCD2 error (not the generic 'no schema
+        available' mask error) and creating no table."""
+        mock_dlt.create_streaming_table = MagicMock()
+        mock_dlt.create_auto_cdc_from_snapshot_flow = MagicMock()
+        self.spark.conf.set("spark.databricks.unityCatalog.enabled", "True")
+        self.addCleanup(self.spark.conf.unset, "spark.databricks.unityCatalog.enabled")
+        spec = BronzeDataflowSpec(**copy.deepcopy(DataflowPipelineTests.bronze_dataflow_spec_acs_map))
+        spec.columnComments = None
+        spec.columnMasks = json.dumps({"id": "cat.s.mask_id"})
+        view_name = f"{spec.targetDetails['table']}_inputview"
+        pipeline = DataflowPipeline(self.spark, spec, view_name, None)
+        self.assertIsNone(pipeline.schema_json)
+        with self.assertRaisesRegex(ValueError, "SCD2 apply_changes_from_snapshot"):
+            pipeline.apply_changes_from_snapshot()
+        mock_dlt.create_streaming_table.assert_not_called()
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
     def test_apply_changes_from_snapshot_scd2_no_policies_unaffected(self, mock_dlt):
         """SCD2 snapshot WITHOUT column policies is unaffected by the guard —
         it still creates the streaming table with an inferred (None) schema,
