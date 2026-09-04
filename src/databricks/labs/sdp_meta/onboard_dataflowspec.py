@@ -1528,7 +1528,10 @@ class OnboardDataflowspec:
                     data_quality_expectations = self.__get_data_quality_expecations(
                         bronze_data_quality_expectations_json
                     )
-                    if onboarding_row["bronze_quarantine_table"]:
+                    if (
+                        "bronze_quarantine_table" in onboarding_row
+                        and onboarding_row["bronze_quarantine_table"]
+                    ):
                         quarantine_target_details, quarantine_table_properties = self.__get_quarantine_details(
                             env, "bronze", onboarding_row
                         )
@@ -1757,12 +1760,18 @@ class OnboardDataflowspec:
         quarantine_table_cluster_by_auto = self.__get_cluster_by_auto(
             onboarding_row, f"{layer}_quarantine_table_cluster_by_auto"
         )
+        quarantine_table = (
+            onboarding_row[f"{layer}_quarantine_table"]
+            if f"{layer}_quarantine_table" in onboarding_row
+            else None
+        )
         if (
             f"{layer}_database_quarantine_{env}" in onboarding_row
             and onboarding_row[f"{layer}_database_quarantine_{env}"]
+            and quarantine_table
         ):
             quarantine_target_details = {"database": onboarding_row[f"{layer}_database_quarantine_{env}"],
-                                         "table": onboarding_row[f"{layer}_quarantine_table"],
+                                         "table": quarantine_table,
                                          "partition_columns": quarantine_table_partition_columns,
                                          "cluster_by": quarantine_table_cluster_by,
                                          "cluster_by_auto": quarantine_table_cluster_by_auto
@@ -2586,14 +2595,24 @@ class OnboardDataflowspec:
                     data_quality_expectations = self.__get_data_quality_expecations(
                         silver_data_quality_expectations_json
                     )
-                silver_quarantine_target_details, silver_quarantine_table_properties = self.__get_quarantine_details(
-                    env, "silver", onboarding_row
-                )
-                silver_quarantine_cluster_by = self.__get_cluster_by_properties(
-                    onboarding_row,
-                    silver_quarantine_table_properties,
-                    "silver_quarantine_cluster_by"
-                )
+                    # Mirror bronze: DQE without a quarantine table yields an
+                    # empty quarantine target (a quarantine DB with no table
+                    # name is not a valid quarantine target), not a crash on a
+                    # missing ``silver_quarantine_table`` column (issue #3).
+                    silver_quarantine_target_details = {}
+                    if (
+                        "silver_quarantine_table" in onboarding_row
+                        and onboarding_row["silver_quarantine_table"]
+                    ):
+                        (
+                            silver_quarantine_target_details,
+                            silver_quarantine_table_properties,
+                        ) = self.__get_quarantine_details(env, "silver", onboarding_row)
+                        silver_quarantine_cluster_by = self.__get_cluster_by_properties(
+                            onboarding_row,
+                            silver_quarantine_table_properties,
+                            "silver_quarantine_cluster_by"
+                        )
             append_flows, append_flow_schemas = self.get_append_flows_json(
                 onboarding_row, layer="silver", env=env
             )
