@@ -66,6 +66,26 @@ Declarative Pipeline table. (Column masks cannot be expressed through a
 masks are applied to the main target table across the standard, data-quality,
 CDC apply-changes, and append-flow write paths.
 
+### Combined `bronze_silver` topology
+
+Silver column comments/masks are supported in **both** pipeline topologies:
+
+- the **split** topology (a bronze pipeline, then a separate silver pipeline), and
+- the **combined** `bronze_silver` topology (one pipeline that builds bronze and
+  silver in the same run — e.g. the multi-source AUTO CDC demo).
+
+A silver table derives its schema from its transform applied to the upstream
+bronze table. In a combined run the bronze table is *produced in the same run*
+and does not yet exist in Unity Catalog when the graph is built, so SDP-META
+does **not** read it to resolve the silver policy schema. Instead it derives the
+silver schema from the bronze dataflowspec's declared schema in-process (the
+`bronze_schema` you supply via `source_schema_path`), applying the silver
+`selectExp` / `whereClause` to it. This means a bronze table feeding a silver
+table with masks/comments **must have a declared schema** in a combined run
+(bronze without a declared schema falls back to reading the physical table,
+which only exists in the split topology). The split topology continues to read
+the already-materialised bronze table as before.
+
 ## Rules & limitations
 
 - **Masks are Unity Catalog only.** On a non-UC pipeline, masks are silently

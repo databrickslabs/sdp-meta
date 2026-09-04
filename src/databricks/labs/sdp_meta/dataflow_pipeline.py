@@ -28,13 +28,23 @@ class DataflowPipeline:
 
     def __init__(self, spark, dataflow_spec, view_name, view_name_quarantine=None,
                  custom_transform_func: Optional[Callable] = None,
-                 next_snapshot_and_version: Optional[Callable] = None):
-        """Initialize Constructor."""
+                 next_snapshot_and_version: Optional[Callable] = None,
+                 source_schema_map: Optional[dict] = None):
+        """Initialize Constructor.
+
+        ``source_schema_map`` maps an upstream source table's fully-qualified
+        name to its declared schema (a StructType-JSON string). It is populated
+        by :meth:`invoke_dlt_pipeline` for the combined ``bronze_silver``
+        topology so a silver spec can derive its schema from the bronze spec's
+        declared schema in-process — without reading the not-yet-materialised
+        bronze table (issue #1).
+        """
         logger.info(
             f"""dataflowSpec={dataflow_spec} ,
                 view_name={view_name},
                 view_name_quarantine={view_name_quarantine}"""
         )
+        self.source_schema_map = source_schema_map or {}
         if isinstance(dataflow_spec, BronzeDataflowSpec) or isinstance(dataflow_spec, SilverDataflowSpec):
             self.__initialize_dataflow_pipeline(
                 spark, dataflow_spec, view_name, view_name_quarantine, custom_transform_func, next_snapshot_and_version
@@ -585,6 +595,27 @@ class DataflowPipeline:
             input_df = self.custom_transform_func(input_df, self.dataflowSpec)
         return input_df
 
+    def _get_inprocess_source_schema(self, source_fqn):
+        """Return the upstream source's declared schema as a ``StructType`` when
+        it was threaded in-process via ``source_schema_map`` (combined
+        ``bronze_silver`` runs), else ``None``.
+
+        This lets ``get_silver_schema`` derive the silver schema from the
+        bronze dataflowspec's declared schema instead of a live
+        ``spark.readStream.table(<bronze fqn>)`` — the bronze table is produced
+        in the SAME run and does not exist in UC at graph-construction time, so
+        a physical read raises ``TABLE_OR_VIEW_NOT_FOUND`` (issue #1).
+        """
+        schema_map = getattr(self, "source_schema_map", None)
+        if not schema_map:
+            return None
+        schema_json = schema_map.get(source_fqn)
+        if not schema_json:
+            return None
+        if isinstance(schema_json, str):
+            schema_json = json.loads(schema_json)
+        return StructType.fromJson(schema_json)
+
     def get_silver_schema(self):
         """Get Silver table Schema."""
         silver_dataflow_spec: SilverDataflowSpec = self.dataflowSpec
@@ -595,12 +626,32 @@ class DataflowPipeline:
         source_table = source_details["table"]
         select_exp = silver_dataflow_spec.selectExp
         where_clause = silver_dataflow_spec.whereClause
-        raw_delta_table_stream = self.spark.readStream.table(
-            f"{source_cl_name}{source_database}.{source_table}"
-        ).selectExpr(*select_exp) if self.uc_enabled else self.spark.readStream.load(
-            path=source_details.get("path"),
-            format="delta"
-        ).selectExpr(*select_exp)
+        source_fqn = f"{source_cl_name}{source_database}.{source_table}"
+        # In a combined ``bronze_silver`` run the upstream bronze table is
+        # produced in the SAME pipeline run and does not yet exist in UC at
+        # graph-construction time. When the bronze dataflowspec's declared
+        # schema was threaded in-process (see ``invoke_dlt_pipeline``), derive
+        # the silver schema from it — applying the same ``selectExpr`` /
+        # ``where`` transform against an empty frame — instead of issuing a live
+        # ``spark.readStream.table(<bronze fqn>)`` that would raise
+        # TABLE_OR_VIEW_NOT_FOUND. This removes the bronze→silver ordering
+        # dependency entirely (issue #1). The split bronze-then-silver topology
+        # (no in-process schema) keeps reading the already-materialised bronze
+        # table below, exactly as before.
+        source_struct = self._get_inprocess_source_schema(source_fqn)
+        if source_struct is not None:
+            raw_delta_table_stream = self.spark.createDataFrame(
+                [], source_struct
+            ).selectExpr(*select_exp)
+        elif self.uc_enabled:
+            raw_delta_table_stream = self.spark.readStream.table(
+                source_fqn
+            ).selectExpr(*select_exp)
+        else:
+            raw_delta_table_stream = self.spark.readStream.load(
+                path=source_details.get("path"),
+                format="delta"
+            ).selectExpr(*select_exp)
         raw_delta_table_stream = self.__apply_where_clause(where_clause, raw_delta_table_stream)
         return raw_delta_table_stream.schema
 
@@ -1221,14 +1272,51 @@ class DataflowPipeline:
                 bronze_next_snapshot_and_version
             )
             silver_dataflowspec_list = DataflowSpecUtils.get_silver_dataflow_spec(spark)
+            # Thread each bronze target's declared schema into the silver flow
+            # so silver column-policy schema resolution never depends on the
+            # bronze table already existing in UC (issue #1). In a combined run
+            # the bronze table is produced in this same run, so a live read of
+            # it at graph-construction time raises TABLE_OR_VIEW_NOT_FOUND.
+            source_schema_map = DataflowPipeline._build_bronze_target_schema_map(
+                bronze_dataflowspec_list
+            )
             DataflowPipeline._launch_dlt_flow(
                 spark, "silver", silver_dataflowspec_list, silver_custom_transform_func,
-                silver_next_snapshot_and_version
+                silver_next_snapshot_and_version, source_schema_map=source_schema_map
             )
 
     @staticmethod
+    def _build_bronze_target_schema_map(bronze_dataflowspec_list):
+        """Map each bronze target's fully-qualified table name to its declared
+        schema (StructType-JSON string), for in-process silver schema
+        resolution during a combined ``bronze_silver`` run.
+
+        Keyed to match how ``get_silver_schema`` builds the silver source FQN
+        (``catalog.database.table``, catalog omitted when absent). Bronze specs
+        with no declared schema are skipped — silver schema resolution then
+        falls back to the live table read (which, in the split topology, works
+        because the bronze table already exists).
+        """
+        schema_map = {}
+        for spec in bronze_dataflowspec_list:
+            if not isinstance(spec, BronzeDataflowSpec):
+                continue
+            schema = getattr(spec, "schema", None)
+            if not schema:
+                continue
+            target_details = spec.targetDetails
+            if not target_details:
+                continue
+            catalog = target_details.get('catalog', None)
+            catalog_prefix = f"{catalog}." if catalog is not None else ''
+            key = f"{catalog_prefix}{target_details['database']}.{target_details['table']}"
+            schema_map[key] = schema
+        return schema_map
+
+    @staticmethod
     def _launch_dlt_flow(
-        spark, layer, dataflowspec_list, custom_transform_func=None, next_snapshot_and_version: Callable = None
+        spark, layer, dataflowspec_list, custom_transform_func=None, next_snapshot_and_version: Callable = None,
+        source_schema_map=None
     ):
         for dataflowSpec in dataflowspec_list:
             logger.info("Printing Dataflow Spec")
@@ -1270,7 +1358,8 @@ class DataflowPipeline:
                 target_view_name,
                 quarantine_input_view_name,
                 custom_transform_func,
-                next_snapshot_and_version
+                next_snapshot_and_version,
+                source_schema_map=source_schema_map
             )
             dlt_data_flow.run_dlt()
 
