@@ -1785,8 +1785,10 @@ class OnboardDataflowspec:
                 quarantine_target_details["catalog"] = quarantine_catalog
             if f"{layer}_quarantine_table_comment" in onboarding_row:
                 quarantine_target_details["comment"] = onboarding_row[f"{layer}_quarantine_table_comment"]
-        if not self.uc_enabled and f"{layer}_quarantine_table_path_{env}" in onboarding_row:
-            quarantine_target_details["path"] = onboarding_row[f"{layer}_quarantine_table_path_{env}"]
+            # Path stays nested under the valid-table branch so the helper never
+            # returns a lone ``{"path": ...}`` for a missing quarantine table.
+            if not self.uc_enabled and f"{layer}_quarantine_table_path_{env}" in onboarding_row:
+                quarantine_target_details["path"] = onboarding_row[f"{layer}_quarantine_table_path_{env}"]
 
         return quarantine_target_details, quarantine_table_properties
 
@@ -2595,24 +2597,28 @@ class OnboardDataflowspec:
                     data_quality_expectations = self.__get_data_quality_expecations(
                         silver_data_quality_expectations_json
                     )
-                    # Mirror bronze: DQE without a quarantine table yields an
-                    # empty quarantine target (a quarantine DB with no table
-                    # name is not a valid quarantine target), not a crash on a
-                    # missing ``silver_quarantine_table`` column (issue #3).
-                    silver_quarantine_target_details = {}
-                    if (
-                        "silver_quarantine_table" in onboarding_row
-                        and onboarding_row["silver_quarantine_table"]
-                    ):
-                        (
-                            silver_quarantine_target_details,
-                            silver_quarantine_table_properties,
-                        ) = self.__get_quarantine_details(env, "silver", onboarding_row)
-                        silver_quarantine_cluster_by = self.__get_cluster_by_properties(
-                            onboarding_row,
-                            silver_quarantine_table_properties,
-                            "silver_quarantine_cluster_by"
-                        )
+                # Quarantine construction is reachable whenever the DQE column
+                # exists, independent of its truthiness -- this preserves the
+                # prior silver behavior (a defined quarantine table must still
+                # build a target even when the DQE value is falsy). The gate
+                # itself mirrors bronze: DQE without a quarantine table yields an
+                # empty quarantine target (a quarantine DB with no table name is
+                # not a valid quarantine target), not a crash on a missing
+                # ``silver_quarantine_table`` column (issue #3).
+                silver_quarantine_target_details = {}
+                if (
+                    "silver_quarantine_table" in onboarding_row
+                    and onboarding_row["silver_quarantine_table"]
+                ):
+                    (
+                        silver_quarantine_target_details,
+                        silver_quarantine_table_properties,
+                    ) = self.__get_quarantine_details(env, "silver", onboarding_row)
+                    silver_quarantine_cluster_by = self.__get_cluster_by_properties(
+                        onboarding_row,
+                        silver_quarantine_table_properties,
+                        "silver_quarantine_cluster_by"
+                    )
             append_flows, append_flow_schemas = self.get_append_flows_json(
                 onboarding_row, layer="silver", env=env
             )

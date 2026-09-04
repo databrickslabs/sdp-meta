@@ -510,23 +510,32 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
         self.assertEqual(bronze_dataflowSpec_df.count(), 3)
         self.assertEqual(silver_dataflowSpec_df.count(), 3)
 
-    def _write_onboarding_without_quarantine(self, tmp_dir):
-        """Copy the resource onboarding file, dropping every quarantine field.
+    def _write_onboarding_dropping_keys(self, tmp_dir, drop_keys):
+        """Copy the resource onboarding file, dropping exactly ``drop_keys``.
 
         ``spark.read.json`` only materializes a column when *some* row supplies
-        it, so once every ``*_quarantine_table`` (and its sibling quarantine
-        database/catalog/path fields) is removed the columns vanish from the
-        inferred schema entirely. This reproduces issue #3: a file that still
-        carries ``*_data_quality_expectations_json_<env>`` (DQE present) but no
-        ``*_quarantine_table`` column anywhere. Returns the new file path.
+        it, so removing a key from *every* row makes that column vanish from the
+        inferred schema entirely -- the issue #3 trigger. Crucially this drops
+        ONLY the named keys (the layer-specific ``*_quarantine_table``) and
+        RETAINS the sibling quarantine fields (``*_database_quarantine_*``,
+        ``*_catalog_quarantine_*``, ``*_quarantine_table_path_*``) so the real
+        crash path is actually reached on the pre-fix code:
+
+        * bronze crashes at the direct ``onboarding_row["bronze_quarantine_table"]``
+          index whenever bronze DQE is truthy;
+        * silver crashes inside ``__get_quarantine_details`` only when
+          ``silver_database_quarantine_<env>`` is present and truthy (that gate
+          guards the direct ``silver_quarantine_table`` index), so the DB field
+          must be retained.
+
+        Returns the new onboarding file path.
         """
         with open(self.onboarding_json_file) as f:
             rows = json.load(f)
         for row in rows:
-            for key in list(row.keys()):
-                if "quarantine" in key:
-                    del row[key]
-        out_file = os.path.join(tmp_dir, "onboarding_no_quarantine.json")
+            for key in drop_keys:
+                row.pop(key, None)
+        out_file = os.path.join(tmp_dir, "onboarding_dropped.json")
         with open(out_file, "w") as f:
             json.dump(rows, f)
         return out_file
@@ -536,45 +545,82 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
 
         Before the fix, ``onboard_bronze_dataflow_spec`` indexed
         ``onboarding_row["bronze_quarantine_table"]`` directly whenever bronze
-        DQE was present, raising ``PySparkValueError`` when the column was
-        absent from the file. It must now onboard cleanly and leave an empty
+        DQE was truthy, raising ``PySparkValueError: 'bronze_quarantine_table'
+        is not in list`` when the column was absent. The sibling
+        ``bronze_database_quarantine_*`` fields are retained so this exercises
+        the real bronze failure path. It must now onboard cleanly with an empty
         ``quarantineTargetDetails``.
         """
         tmp_dir = tempfile.mkdtemp(prefix="sdp_meta_i3_bronze_")
         try:
             params = copy.deepcopy(self.onboarding_bronze_silver_params_map)
-            params["onboarding_file_path"] = self._write_onboarding_without_quarantine(tmp_dir)
+            params["onboarding_file_path"] = self._write_onboarding_dropping_keys(
+                tmp_dir, ["bronze_quarantine_table"]
+            )
             OnboardDataflowspec(self.spark, params).onboard_bronze_dataflow_spec()
             bronze_df = self.read_dataflowspec(params["database"], params["bronze_dataflowspec_table"])
             self.assertEqual(bronze_df.count(), 3)
             for row in bronze_df.collect():
-                # Every bronze row in the fixture carries DQE but no
+                # Every bronze row carries DQE (+ a quarantine DB) but no
                 # quarantine table -> empty quarantine target, not a crash.
-                self.assertFalse(row.quarantineTargetDetails)
+                self.assertEqual(row.quarantineTargetDetails, {})
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
     def test_silver_dqe_without_quarantine_table_onboards(self):
         """Issue #3: silver DQE with no quarantine table must not crash.
 
-        ``onboard_silver_dataflow_spec`` used to call ``__get_quarantine_details``
-        unconditionally whenever silver DQE was present (asymmetric with
-        bronze), which indexed the missing ``silver_quarantine_table`` column.
-        It must now onboard cleanly and leave an empty ``quarantineTargetDetails``.
+        ``onboard_silver_dataflow_spec`` calls ``__get_quarantine_details``
+        whenever the silver DQE column exists; the helper indexed
+        ``onboarding_row["silver_quarantine_table"]`` inside the truthy
+        ``silver_database_quarantine_<env>`` gate. This fixture drops only
+        ``silver_quarantine_table`` (retaining ``silver_database_quarantine_*``)
+        and drives the silver layer directly so the failure is specific to
+        silver (not masked by the bronze crash). It must now onboard cleanly
+        with an empty ``quarantineTargetDetails``.
         """
         tmp_dir = tempfile.mkdtemp(prefix="sdp_meta_i3_silver_")
         try:
             params = copy.deepcopy(self.onboarding_bronze_silver_params_map)
-            params["onboarding_file_path"] = self._write_onboarding_without_quarantine(tmp_dir)
-            OnboardDataflowspec(self.spark, params).onboard_dataflow_specs()
+            params["onboarding_file_path"] = self._write_onboarding_dropping_keys(
+                tmp_dir, ["silver_quarantine_table"]
+            )
+            OnboardDataflowspec(self.spark, params).onboard_silver_dataflow_spec()
             silver_df = self.read_dataflowspec(params["database"], params["silver_dataflowspec_table"])
             self.assertEqual(silver_df.count(), 3)
             for row in silver_df.collect():
-                # Every silver row in the fixture carries DQE but no
+                # Every silver row carries DQE (+ a quarantine DB) but no
                 # quarantine table -> empty quarantine target, not a crash.
-                self.assertFalse(row.quarantineTargetDetails)
+                self.assertEqual(row.quarantineTargetDetails, {})
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_dqe_with_quarantine_table_still_populates_target(self):
+        """Regression guard for the WITH-quarantine-table path (issue #3).
+
+        The presence-safe gates must not suppress a legitimately defined
+        quarantine target. Onboard the unmodified resource file (whose bronze
+        and silver rows both define quarantine tables) and assert the target is
+        populated with the expected database/table for both layers.
+        """
+        onboarder = OnboardDataflowspec(self.spark, self.onboarding_bronze_silver_params_map)
+        onboarder.onboard_dataflow_specs()
+
+        bronze_df = self.read_dataflowspec(
+            self.onboarding_bronze_silver_params_map["database"],
+            self.onboarding_bronze_silver_params_map["bronze_dataflowspec_table"],
+        )
+        bronze_100 = bronze_df.filter(bronze_df.dataFlowId == "100").collect()[0]
+        self.assertEqual(bronze_100.quarantineTargetDetails["database"], "bronze")
+        self.assertEqual(bronze_100.quarantineTargetDetails["table"], "customers_cdc_quarantine")
+
+        silver_df = self.read_dataflowspec(
+            self.onboarding_bronze_silver_params_map["database"],
+            self.onboarding_bronze_silver_params_map["silver_dataflowspec_table"],
+        )
+        silver_100 = silver_df.filter(silver_df.dataFlowId == "100").collect()[0]
+        self.assertEqual(silver_100.quarantineTargetDetails["database"], "silver")
+        self.assertEqual(silver_100.quarantineTargetDetails["table"], "customers_cdc_quarantine")
 
     def read_dataflowspec(self, database, table):
         return self.spark.read.table(f"{database}.{table}")
