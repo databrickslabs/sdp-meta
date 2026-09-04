@@ -228,6 +228,238 @@ class DataFlowSpecTests(SDPFrameworkTestCase):
             self.spark.conf.unset(conf)
         shutil.rmtree(tmp_dir)
 
+    def _write_onboarding_with_column_policies(self):
+        """Write a temp onboarding file with column comments + masks on the
+        first record (data_flow_id 100, A1).
+
+        Comments are free text; masks use the canonical
+        ``<catalog>.<schema>.<function> [USING COLUMNS (...)]`` clause spliced
+        after ``MASK``. The functions/columns need not exist because these
+        tests only verify JSON round-tripping through the onboarding spec.
+        """
+        with open(self.onboarding_json_file) as f:
+            onboarding = json.load(f)
+        onboarding[0]["bronze_column_comments"] = {"id": "bronze primary key"}
+        onboarding[0]["bronze_column_masks"] = {
+            "id": "main.bronze.mask_id USING COLUMNS (id)"
+        }
+        onboarding[0]["silver_column_comments"] = {"id": "silver primary key"}
+        onboarding[0]["silver_column_masks"] = {
+            "id": "main.silver.mask_id USING COLUMNS (id)"
+        }
+        tmp_dir = tempfile.mkdtemp()
+        cp_file = os.path.join(tmp_dir, "onboarding_column_policy.json")
+        with open(cp_file, "w") as f:
+            json.dump(onboarding, f)
+        return tmp_dir, cp_file
+
+    def test_bronze_column_policies_onboarded_and_roundtrips(self):
+        """bronze_column_comments/masks onboard into BronzeDataflowSpec as JSON
+        strings; the sibling record without them stays None."""
+        tmp_dir, cp_file = self._write_onboarding_with_column_policies()
+        opm = copy.deepcopy(self.onboarding_bronze_silver_params_map)
+        opm["onboarding_file_path"] = cp_file
+        del opm["silver_dataflowspec_table"]
+        del opm["silver_dataflowspec_path"]
+        OnboardDataflowspec(self.spark, opm).onboard_bronze_dataflow_spec()
+        self.spark.sql("CREATE DATABASE if not exists " + opm["database"])
+
+        self.spark.conf.set("layer", "bronze")
+        self.spark.conf.set("bronze.group", "A1")
+        self.spark.conf.set("bronze.dataflowspecTable",
+                            f"{opm['database']}.{opm['bronze_dataflowspec_table']}")
+        specs = list(DataflowSpecUtils.get_bronze_dataflow_spec(self.spark))
+        comments = [json.loads(s.columnComments) if s.columnComments else None for s in specs]
+        masks = [json.loads(s.columnMasks) if s.columnMasks else None for s in specs]
+        self.assertIn({"id": "bronze primary key"}, comments)
+        self.assertIn({"id": "main.bronze.mask_id USING COLUMNS (id)"}, masks)
+        # Second A1 record carries neither -> None (phantom struct keys from
+        # spark.read.json unification are dropped at ingestion).
+        self.assertIn(None, comments)
+        self.assertIn(None, masks)
+
+        for conf in ["layer", "bronze.group", "bronze.dataflowspecTable"]:
+            self.spark.conf.unset(conf)
+        shutil.rmtree(tmp_dir)
+
+    def test_silver_column_policies_onboarded_and_roundtrips(self):
+        """silver_column_comments/masks onboard into SilverDataflowSpec as JSON
+        strings; the sibling record without them stays None."""
+        tmp_dir, cp_file = self._write_onboarding_with_column_policies()
+        opm = copy.deepcopy(self.onboarding_bronze_silver_params_map)
+        opm["onboarding_file_path"] = cp_file
+        del opm["bronze_dataflowspec_table"]
+        del opm["bronze_dataflowspec_path"]
+        self.spark.sql("CREATE DATABASE if not exists " + opm["database"])
+        OnboardDataflowspec(self.spark, opm).onboard_silver_dataflow_spec()
+
+        self.spark.conf.set("layer", "silver")
+        self.spark.conf.set("silver.group", "A1")
+        self.spark.conf.set("silver.dataflowspecTable",
+                            f"{opm['database']}.{opm['silver_dataflowspec_table']}")
+        specs = list(DataflowSpecUtils.get_silver_dataflow_spec(self.spark))
+        comments = [json.loads(s.columnComments) if s.columnComments else None for s in specs]
+        masks = [json.loads(s.columnMasks) if s.columnMasks else None for s in specs]
+        self.assertIn({"id": "silver primary key"}, comments)
+        self.assertIn({"id": "main.silver.mask_id USING COLUMNS (id)"}, masks)
+        self.assertIn(None, comments)
+        self.assertIn(None, masks)
+
+        for conf in ["layer", "silver.group", "silver.dataflowspecTable"]:
+            self.spark.conf.unset(conf)
+        shutil.rmtree(tmp_dir)
+
+    def test_build_schema_ddl_comments_and_masks(self):
+        """build_schema_ddl renders NOT NULL, escaped COMMENT and MASK in the
+        canonical ``name type [NOT NULL] [COMMENT] [MASK]`` order."""
+        from pyspark.sql.types import (
+            StructType, StructField, StringType, IntegerType, DecimalType,
+        )
+        schema = StructType([
+            StructField("id", IntegerType(), False),
+            StructField("ssn", StringType(), True),
+            StructField("amt", DecimalType(10, 2), True),
+        ])
+        ddl = DataflowSpecUtils.build_schema_ddl(
+            schema,
+            {"ssn": "person's ssn"},
+            {"ssn": "cat.sec.mask_ssn USING COLUMNS (id)"},
+        )
+        self.assertEqual(
+            ddl,
+            "`id` int NOT NULL, "
+            "`ssn` string COMMENT 'person''s ssn' "
+            "MASK cat.sec.mask_ssn USING COLUMNS (id), "
+            "`amt` decimal(10,2)",
+        )
+
+    def test_build_schema_ddl_returns_none_when_unused(self):
+        """No comments/masks, or a None schema, returns None so callers fall
+        back to the original schema unchanged."""
+        from pyspark.sql.types import StructType, StructField, StringType
+        schema = StructType([StructField("id", StringType(), True)])
+        self.assertIsNone(DataflowSpecUtils.build_schema_ddl(schema, {}, {}))
+        self.assertIsNone(DataflowSpecUtils.build_schema_ddl(schema, None, None))
+        self.assertIsNone(DataflowSpecUtils.build_schema_ddl(None, {"id": "x"}, {}))
+
+    def test_build_schema_ddl_mask_on_unknown_column_raises(self):
+        """A mask targeting a column absent from the schema fails closed."""
+        from pyspark.sql.types import StructType, StructField, StringType
+        schema = StructType([StructField("id", StringType(), True)])
+        with self.assertRaisesRegex(ValueError, "not present in the derived schema"):
+            DataflowSpecUtils.build_schema_ddl(schema, {}, {"ssn": "cat.s.f"})
+
+    def test_build_schema_ddl_comment_on_unknown_column_skipped(self):
+        """A comment on an absent column is skipped (warn), not fatal, and the
+        known columns still render."""
+        from pyspark.sql.types import StructType, StructField, StringType
+        schema = StructType([StructField("id", StringType(), True)])
+        ddl = DataflowSpecUtils.build_schema_ddl(
+            schema, {"id": "the id", "ghost": "no such column"}, {}
+        )
+        self.assertEqual(ddl, "`id` string COMMENT 'the id'")
+
+    def test_build_schema_ddl_preserves_scd2_trailing_columns(self):
+        """Appended SCD2 __START_AT/__END_AT columns render (with no policy)
+        in schema order after the masked business columns."""
+        from pyspark.sql.types import (
+            StructType, StructField, StringType, TimestampType,
+        )
+        schema = StructType([
+            StructField("id", StringType(), True),
+            StructField("__START_AT", TimestampType(), True),
+            StructField("__END_AT", TimestampType(), True),
+        ])
+        ddl = DataflowSpecUtils.build_schema_ddl(schema, {}, {"id": "cat.s.f"})
+        self.assertEqual(
+            ddl,
+            "`id` string MASK cat.s.f, "
+            "`__START_AT` timestamp, `__END_AT` timestamp",
+        )
+
+    def test_build_schema_ddl_backslash_comment_cannot_break_out(self):
+        """A backslash-containing comment must not be able to terminate the
+        string literal and inject SQL (backslashes are doubled BEFORE the
+        single quotes, since Databricks SQL treats ``\\'`` as an escaped
+        quote)."""
+        from pyspark.sql.types import StructType, StructField, StringType
+        schema = StructType([StructField("id", StringType(), True)])
+        # A naive ``.replace("'", "''")`` would render
+        # ``COMMENT '\''; DROP TABLE x; --'`` where ``\'`` escapes the quote
+        # and the literal terminates early. Doubling backslashes first yields
+        # a single, self-contained literal.
+        ddl = DataflowSpecUtils.build_schema_ddl(
+            schema, {"id": "\\'; DROP TABLE x; --"}, {}
+        )
+        self.assertEqual(ddl, "`id` string COMMENT '\\\\''; DROP TABLE x; --'")
+        # The rendered literal must be balanced: exactly two delimiting
+        # quotes once every doubled (``''``) quote is stripped, so the
+        # payload cannot escape the COMMENT string.
+        body = ddl[len("`id` string COMMENT "):]
+        self.assertTrue(body.startswith("'") and body.endswith("'"))
+        self.assertEqual(body.replace("''", "").count("'"), 2)
+        # Every backslash in the source survives doubled — none is left able
+        # to escape the closing quote.
+        self.assertIn("\\\\", ddl)
+
+    def test_build_schema_ddl_escapes_backtick_in_field_name(self):
+        """A field whose name contains a backtick renders a valid delimited
+        identifier (embedded backticks doubled), not corrupt DDL."""
+        from pyspark.sql.types import StructType, StructField, StringType
+        schema = StructType([StructField("a`b", StringType(), True)])
+        ddl = DataflowSpecUtils.build_schema_ddl(schema, {"a`b": "weird"}, {})
+        self.assertEqual(ddl, "`a``b` string COMMENT 'weird'")
+
+    def test_build_schema_ddl_empty_mask_value_skipped(self):
+        """An empty mask value renders no bare ``MASK`` (invalid DDL); the
+        column is emitted with its type only."""
+        from pyspark.sql.types import StructType, StructField, StringType
+        schema = StructType([StructField("ssn", StringType(), True)])
+        ddl = DataflowSpecUtils.build_schema_ddl(schema, {}, {"ssn": ""})
+        self.assertEqual(ddl, "`ssn` string")
+        self.assertNotIn("MASK", ddl)
+
+    def test_build_schema_ddl_preserves_nested_array_map_types(self):
+        """StructType -> DDL conversion preserves nested struct/array/map
+        semantics via ``simpleString()`` so the emitted DDL is round-trippable
+        and comments/masks still attach to the top-level columns."""
+        from pyspark.sql.types import (
+            StructType, StructField, StringType, IntegerType, ArrayType,
+            MapType, LongType,
+        )
+        schema = StructType([
+            StructField("id", LongType(), False),
+            StructField("tags", ArrayType(StringType()), True),
+            StructField("attrs", MapType(StringType(), IntegerType()), True),
+            StructField(
+                "addr",
+                StructType([
+                    StructField("city", StringType(), True),
+                    StructField("zip", StringType(), True),
+                ]),
+                True,
+            ),
+        ])
+        ddl = DataflowSpecUtils.build_schema_ddl(
+            schema,
+            {"id": "primary key"},
+            {"tags": "cat.s.mask_tags"},
+        )
+        self.assertEqual(
+            ddl,
+            "`id` bigint NOT NULL COMMENT 'primary key', "
+            "`tags` array<string> MASK cat.s.mask_tags, "
+            "`attrs` map<string,int>, "
+            "`addr` struct<city:string,zip:string>",
+        )
+        # The nested type strings must round-trip through Spark's own DDL
+        # parser (confirming ``simpleString()`` produces valid, equivalent
+        # DDL for the array/map/struct columns).
+        from pyspark.sql.types import _parse_datatype_string
+        for field in schema.fields:
+            reparsed = _parse_datatype_string(field.dataType.simpleString())
+            self.assertEqual(reparsed, field.dataType)
+
     def test_get_dataflow_spec_positive(self):
         opm = copy.deepcopy(self.onboarding_bronze_silver_params_map)
         del opm["silver_dataflowspec_table"]

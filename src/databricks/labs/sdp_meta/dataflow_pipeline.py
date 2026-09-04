@@ -190,6 +190,93 @@ class DataflowPipeline:
             return None
         return getattr(self.dataflowSpec, "quarantineRowFilter", None)
 
+    def _get_column_comments(self):
+        """Return the column-comment map (``{column: text}``) or ``None``.
+
+        Comments are NOT a UC-only feature — they annotate any Delta table —
+        so this is not gated on ``self.uc_enabled`` (unlike masks / row
+        filters). Stored as a JSON string on the spec; parsed here.
+        """
+        raw = getattr(self.dataflowSpec, "columnComments", None)
+        if not raw:
+            return None
+        return json.loads(raw)
+
+    def _get_column_masks(self):
+        """Return the column-mask map (``{column: mask_clause}``) or ``None``.
+
+        Column masks are a Unity Catalog feature (like row filters), so they
+        are silently dropped on non-UC pipelines. Stored as a JSON string on
+        the spec; parsed here.
+        """
+        if not self.uc_enabled:
+            return None
+        raw = getattr(self.dataflowSpec, "columnMasks", None)
+        if not raw:
+            return None
+        return json.loads(raw)
+
+    def _apply_column_policies(self, struct_schema):
+        """Resolve the ``schema=`` argument for a DLT table creation call,
+        splicing UC column comments / masks into a DDL-string schema when set.
+
+        Returns:
+            * the original ``struct_schema`` unchanged (``StructType`` or
+              ``None``) when no comments/masks are configured — zero behaviour
+              change for pipelines that don't use the feature;
+            * a DDL string (built by
+              :meth:`DataflowSpecUtils.build_schema_ddl`) when comments/masks
+              are set and a schema is available.
+
+        Raises:
+            ValueError: if masks are configured but no schema is available to
+                attach them to (e.g. a bronze table with an inferred schema).
+                Masks fail closed — see ``build_schema_ddl``.
+        """
+        comments = self._get_column_comments()
+        masks = self._get_column_masks()
+        if not comments and not masks:
+            return struct_schema
+        if struct_schema is None:
+            if masks:
+                raise ValueError(
+                    "column_masks are configured for "
+                    f"{self._get_target_table_name()} but no schema is "
+                    "available to attach them to. Column masks require a "
+                    "declared schema (set the bronze source schema, or use "
+                    "them on a silver table whose schema is derived from its "
+                    "transform)."
+                )
+            logger.warning(
+                "column_comments are configured for %s but no schema is "
+                "available to attach them to; skipping comments.",
+                self._get_target_table_name(),
+            )
+            return None
+        ddl = DataflowSpecUtils.build_schema_ddl(struct_schema, comments, masks)
+        return ddl if ddl is not None else struct_schema
+
+    def _resolve_policy_schema(self):
+        """Materialise the table's StructType for column-policy rendering,
+        only when comments/masks are actually configured (avoids the cost of
+        ``get_silver_schema`` when the feature is unused).
+
+        Returns ``None`` when no policies are set, or when the schema can't be
+        determined (bronze without a declared schema).
+        """
+        if not self._get_column_comments() and not self._get_column_masks():
+            return None
+        if isinstance(self.dataflowSpec, SilverDataflowSpec):
+            # Silver derives its schema from the transform; cache it on the
+            # first (and only) production use of get_silver_schema().
+            if self.silver_schema is None:
+                self.silver_schema = self.get_silver_schema()
+            return self.silver_schema
+        # Bronze: schema is known only when a schema_json was supplied.
+        if self.schema_json:
+            return StructType.fromJson(self.schema_json)
+        return None
+
     def is_create_view(self):
         """Determine if a view should be created based on source details and snapshot configuration.
 
@@ -402,10 +489,18 @@ class DataflowPipeline:
             path=target_path,
             comment=comment,
             row_filter=self._get_row_filter(),
+            schema=self._apply_column_policies(self._resolve_policy_schema()),
         )
 
     def write_layer_table(self):
         """Write Bronze or Silver tables using unified logic."""
+        # Materialise the derived silver schema up-front when UC column
+        # comments/masks are configured, so every downstream path (standard,
+        # DQE, CDC apply-changes) can render them into a DDL-string schema —
+        # in particular ``modify_schema_for_cdc_changes`` reads
+        # ``self.silver_schema``. No-op (and no ``get_silver_schema`` cost)
+        # when the feature is unused.
+        self._resolve_policy_schema()
         is_bronze = isinstance(self.dataflowSpec, BronzeDataflowSpec)
         # Handle special cases first
         if is_bronze:
@@ -588,7 +683,16 @@ class DataflowPipeline:
 
     def apply_changes_from_snapshot(self):
         target_path = None if self.uc_enabled else self.dataflowSpec.targetDetails["path"]
-        self.create_streaming_table(None, target_path)
+        # Wire in the declared (Bronze ``schema_json``) / derived (Silver
+        # transform) schema so column comments/masks are applied to the
+        # snapshot-CDC target table. ``_resolve_policy_schema`` returns
+        # ``None`` when the feature is unused, so ``_apply_column_policies``
+        # (inside ``create_streaming_table``) preserves the previous
+        # ``create_streaming_table(None, ...)`` behaviour — masks otherwise
+        # error ("no schema available") and comments are silently skipped on
+        # this path.
+        struct_schema = self._resolve_policy_schema()
+        self.create_streaming_table(struct_schema, target_path)
         target_cl = self.dataflowSpec.targetDetails.get('catalog', None)
         target_db_name = self.dataflowSpec.targetDetails['database']
         target_table_name = self.dataflowSpec.targetDetails['table']
@@ -634,6 +738,10 @@ class DataflowPipeline:
                 and self.dataflowSpec.clusterByAuto is not None
                 else False
             )
+            # Resolve the DDL-string schema carrying any UC column comments /
+            # masks once (falls back to the derived StructType / None when the
+            # feature is unused).
+            column_policy_schema = self._apply_column_policies(self._resolve_policy_schema())
 
             # Create base table with expectations
             if expect_all_dict:
@@ -648,6 +756,7 @@ class DataflowPipeline:
                         path=target_path,
                         comment=target_comment,
                         row_filter=self._get_row_filter(),
+                        schema=column_policy_schema,
                     )
                 )
             if expect_all_or_fail_dict:
@@ -663,6 +772,7 @@ class DataflowPipeline:
                             path=target_path,
                             comment=target_comment,
                             row_filter=self._get_row_filter(),
+                            schema=column_policy_schema,
                         )
                     )
                 else:
@@ -681,6 +791,7 @@ class DataflowPipeline:
                             path=target_path,
                             comment=target_comment,
                             row_filter=self._get_row_filter(),
+                            schema=column_policy_schema,
                         )
                     )
                 else:
@@ -772,12 +883,18 @@ class DataflowPipeline:
                     if isinstance(self.dataflowSpec, BronzeDataflowSpec)
                     else self.silver_schema
                 )
+            elif isinstance(self.dataflowSpec, SilverDataflowSpec):
+                # Silver has no ``schema_json`` (its schema is derived from the
+                # transform). Resolve it lazily so column comments/masks can be
+                # attached; returns ``None`` when the feature is unused, which
+                # preserves the previous "no explicit schema" behaviour.
+                struct_schema = self._resolve_policy_schema()
             target_details = self._get_target_details()
 
             append_flow_writer = AppendFlowWriter(
                 self.spark, append_flow,
                 target_details['table'],
-                struct_schema,
+                self._apply_column_policies(struct_schema),
                 self.dataflowSpec.tableProperties,
                 self.dataflowSpec.partitionColumns,
                 self.dataflowSpec.clusterBy,
@@ -792,8 +909,17 @@ class DataflowPipeline:
         if cdc_apply_changes is None:
             raise Exception("cdcApplychanges is None! ")
 
+        # Silver has no ``schema_json`` (its schema comes from the transform),
+        # so conditioning only on ``schema_json`` previously passed ``None``
+        # here — dropping Silver comments and failing Silver masks with "no
+        # schema is available". ``_resolve_policy_schema`` materialises the
+        # derived schema on ``self.silver_schema`` ONLY when comments/masks
+        # are configured (returns ``None`` otherwise), so we pass the modified
+        # schema on the CDC path when policies are set and otherwise preserve
+        # the previous inferred-schema behaviour.
+        policy_schema = self._resolve_policy_schema()
         struct_schema = None
-        if self.schema_json:
+        if self.schema_json or policy_schema is not None:
             struct_schema = self.modify_schema_for_cdc_changes(cdc_apply_changes)
 
         target_path = None if self.uc_enabled else self.dataflowSpec.targetDetails["path"]
@@ -987,7 +1113,7 @@ class DataflowPipeline:
             cluster_by=DataflowSpecUtils.get_partition_cols(self.dataflowSpec.clusterBy),
             cluster_by_auto=cluster_by_auto,
             path=target_path,
-            schema=struct_schema,
+            schema=self._apply_column_policies(struct_schema),
             expect_all=expect_all_dict,
             expect_all_or_drop=expect_all_or_drop_dict,
             expect_all_or_fail=expect_all_or_fail_dict,

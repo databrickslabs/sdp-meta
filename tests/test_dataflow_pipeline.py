@@ -76,6 +76,8 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
         "cdcApplyChangesFlowsSchemas": None,
         "rowFilter": None,
         "quarantineRowFilter": None,
+        "columnComments": None,
+        "columnMasks": None,
     }
 
     bronze_dataflow_spec_map = {
@@ -117,6 +119,8 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
         "cdcApplyChangesFlowsSchemas": None,
         "rowFilter": None,
         "quarantineRowFilter": None,
+        "columnComments": None,
+        "columnMasks": None,
     }
     silver_cdc_apply_changes = {
         "keys": ["id"],
@@ -181,6 +185,8 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
         "cdcApplyChangesFlows": None,
         "rowFilter": None,
         "quarantineRowFilter": None,
+        "columnComments": None,
+        "columnMasks": None,
     }
     silver_acfs_dataflow_spec_map = {
         "dataFlowId": "1",
@@ -231,6 +237,8 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
         "cdcApplyChangesFlows": None,
         "rowFilter": None,
         "quarantineRowFilter": None,
+        "columnComments": None,
+        "columnMasks": None,
     }
 
     def setUp(self):
@@ -2714,6 +2722,154 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
         self.assertIsNone(quarantine_calls[0].kwargs["row_filter"])
 
     # ------------------------------------------------------------------
+    # UC column comments / masks coverage
+    # ------------------------------------------------------------------
+
+    def test_get_column_comments_not_uc_gated(self):
+        """Comments are not a UC feature -> returned even when UC is off."""
+        p = self._build_bronze_pipeline(uc_enabled=False, row_filter=None)
+        p.dataflowSpec.columnComments = json.dumps({"id": "the id"})
+        self.assertEqual(p._get_column_comments(), {"id": "the id"})
+
+    def test_get_column_comments_none(self):
+        p = self._build_bronze_pipeline(uc_enabled=True, row_filter=None)
+        p.dataflowSpec.columnComments = None
+        self.assertIsNone(p._get_column_comments())
+
+    def test_get_column_masks_uc_enabled(self):
+        p = self._build_bronze_pipeline(uc_enabled=True, row_filter=None)
+        p.dataflowSpec.columnMasks = json.dumps({"id": "cat.s.mask_id"})
+        self.assertEqual(p._get_column_masks(), {"id": "cat.s.mask_id"})
+
+    def test_get_column_masks_uc_disabled(self):
+        """Masks are UC-only -> suppressed (None) when UC is disabled."""
+        p = self._build_bronze_pipeline(uc_enabled=False, row_filter=None)
+        p.dataflowSpec.columnMasks = json.dumps({"id": "cat.s.mask_id"})
+        self.assertIsNone(p._get_column_masks())
+
+    def test_get_column_masks_not_set(self):
+        p = self._build_bronze_pipeline(uc_enabled=True, row_filter=None)
+        p.dataflowSpec.columnMasks = None
+        self.assertIsNone(p._get_column_masks())
+
+    def test_apply_column_policies_passthrough_when_unset(self):
+        """No comments/masks -> the original schema is returned unchanged."""
+        from pyspark.sql.types import StructType, StructField, StringType
+        p = self._build_bronze_pipeline(uc_enabled=True, row_filter=None)
+        p.dataflowSpec.columnComments = None
+        p.dataflowSpec.columnMasks = None
+        schema = StructType([StructField("id", StringType(), True)])
+        self.assertIs(p._apply_column_policies(schema), schema)
+
+    def test_apply_column_policies_builds_ddl(self):
+        from pyspark.sql.types import StructType, StructField, StringType
+        p = self._build_bronze_pipeline(uc_enabled=True, row_filter=None)
+        p.dataflowSpec.columnComments = json.dumps({"id": "the id"})
+        p.dataflowSpec.columnMasks = json.dumps({"id": "cat.s.mask_id"})
+        schema = StructType([StructField("id", StringType(), True)])
+        ddl = p._apply_column_policies(schema)
+        self.assertIn("COMMENT 'the id'", ddl)
+        self.assertIn("MASK cat.s.mask_id", ddl)
+
+    def test_apply_column_policies_masks_without_schema_raises(self):
+        """Masks fail closed when no schema is available to attach them to."""
+        p = self._build_bronze_pipeline(uc_enabled=True, row_filter=None)
+        p.dataflowSpec.columnMasks = json.dumps({"id": "cat.s.mask_id"})
+        with self.assertRaisesRegex(ValueError, "no schema is available"):
+            p._apply_column_policies(None)
+
+    def test_apply_column_policies_comments_only_no_schema_skips(self):
+        """Comments without a schema warn + skip (return None), not raise."""
+        p = self._build_bronze_pipeline(uc_enabled=True, row_filter=None)
+        p.dataflowSpec.columnComments = json.dumps({"id": "x"})
+        p.dataflowSpec.columnMasks = None
+        self.assertIsNone(p._apply_column_policies(None))
+
+    def test_resolve_policy_schema_none_when_no_policies(self):
+        p = self._build_bronze_pipeline(uc_enabled=True, row_filter=None)
+        p.dataflowSpec.columnComments = None
+        p.dataflowSpec.columnMasks = None
+        self.assertIsNone(p._resolve_policy_schema())
+
+    def test_resolve_policy_schema_bronze_from_schema_json(self):
+        from pyspark.sql.types import StructType, StructField, StringType
+        p = self._build_bronze_pipeline(uc_enabled=True, row_filter=None)
+        p.dataflowSpec.columnMasks = json.dumps({"id": "cat.s.mask_id"})
+        p.schema_json = StructType([StructField("id", StringType(), True)]).jsonValue()
+        resolved = p._resolve_policy_schema()
+        self.assertEqual([f.name for f in resolved.fields], ["id"])
+
+    def test_resolve_policy_schema_bronze_no_schema_json_none(self):
+        p = self._build_bronze_pipeline(uc_enabled=True, row_filter=None)
+        p.dataflowSpec.columnComments = json.dumps({"id": "x"})
+        p.schema_json = None
+        self.assertIsNone(p._resolve_policy_schema())
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.AppendFlowWriter')
+    def test_write_append_flows_silver_passes_schema_ddl(self, mock_writer):
+        """Silver append flow attaches masks via the DDL schema (4th positional
+        arg to AppendFlowWriter)."""
+        from pyspark.sql.types import StructType, StructField, StringType
+        self.spark.conf.set("spark.databricks.unityCatalog.enabled", "True")
+        self.addCleanup(self.spark.conf.unset, "spark.databricks.unityCatalog.enabled")
+        spec = SilverDataflowSpec(**copy.deepcopy(DataflowPipelineTests.silver_dataflow_spec_map))
+        spec.columnMasks = json.dumps({"id": "cat.s.mask_id"})
+        view_name = f"{spec.targetDetails['table']}_inputview"
+        pipeline = DataflowPipeline(self.spark, spec, view_name, None)
+        pipeline.appendFlows = [MagicMock()]
+        pipeline.get_silver_schema = MagicMock(
+            return_value=StructType([StructField("id", StringType(), True)])
+        )
+        pipeline.write_append_flows()
+        args, _ = mock_writer.call_args
+        schema_arg = args[3]
+        self.assertIn("MASK cat.s.mask_id", schema_arg)
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_create_streaming_table_passes_schema_ddl_with_policies(self, mock_dlt):
+        """create_streaming_table renders comments/masks into a DDL schema."""
+        from pyspark.sql.types import StructType, StructField, StringType
+        mock_dlt.create_streaming_table = MagicMock()
+        self.spark.conf.set("spark.databricks.unityCatalog.enabled", "True")
+        self.addCleanup(self.spark.conf.unset, "spark.databricks.unityCatalog.enabled")
+        spec = BronzeDataflowSpec(**copy.deepcopy(DataflowPipelineTests.bronze_dataflow_spec_map))
+        spec.dataQualityExpectations = None
+        spec.columnComments = json.dumps({"id": "the id"})
+        spec.columnMasks = json.dumps({"id": "cat.s.mask_id"})
+        view_name = f"{spec.targetDetails['table']}_inputview"
+        pipeline = DataflowPipeline(self.spark, spec, view_name, None)
+        schema = StructType([StructField("id", StringType(), True)])
+        pipeline.create_streaming_table(schema, None)
+        _, kwargs = mock_dlt.create_streaming_table.call_args
+        self.assertIn("COMMENT 'the id'", kwargs["schema"])
+        self.assertIn("MASK cat.s.mask_id", kwargs["schema"])
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_write_silver_standard_passes_schema_ddl(self, mock_dlt):
+        """Silver standard write materialises get_silver_schema() and passes a
+        DDL-string schema carrying the masks to dp.table."""
+        from pyspark.sql.types import StructType, StructField, StringType
+        mock_dlt.table = MagicMock(return_value=lambda func: func)
+        self.spark.conf.set("spark.databricks.unityCatalog.enabled", "True")
+        self.addCleanup(self.spark.conf.unset, "spark.databricks.unityCatalog.enabled")
+        spec = SilverDataflowSpec(**copy.deepcopy(DataflowPipelineTests.silver_dataflow_spec_map))
+        spec.cdcApplyChanges = None
+        spec.applyChangesFromSnapshot = None
+        spec.dataQualityExpectations = None
+        spec.appendFlows = []
+        spec.columnMasks = json.dumps({"id": "cat.s.mask_id"})
+        view_name = f"{spec.targetDetails['table']}_inputview"
+        pipeline = DataflowPipeline(self.spark, spec, view_name, None)
+        # Avoid a live source read: stub the derived silver schema.
+        pipeline.get_silver_schema = MagicMock(
+            return_value=StructType([StructField("id", StringType(), True)])
+        )
+        pipeline.write_silver()
+        _, kwargs = mock_dlt.table.call_args
+        self.assertIn("MASK cat.s.mask_id", kwargs["schema"])
+        pipeline.get_silver_schema.assert_called()
+
+    # ------------------------------------------------------------------
     # DQE-path row_filter coverage
     #
     # write_layer_with_dqe has three exclusive-first branches that each
@@ -2802,6 +2958,202 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
         )
         pipeline.write_layer_with_dqe()
         self._assert_main_table_row_filter(mock_dlt, spec, self.ROW_FILTER_REGION)
+
+    # ------------------------------------------------------------------
+    # DQE-path column-policy coverage
+    #
+    # Each of write_layer_with_dqe's exclusive-first branches builds the
+    # main dp.table independently. Only the expect_all branch originally
+    # forwarded `schema=column_policy_schema`, so fail-only / drop-only
+    # tables silently dropped comments/masks AND skipped the fail-closed
+    # unknown-column-mask check. These tests pin the policy schema on the
+    # fail-only and drop-only branches so a regression is caught.
+    # ------------------------------------------------------------------
+
+    def _assert_main_table_schema_contains(self, mock_dlt, spec, tokens):
+        target_table = self._expected_target_table_name(spec)
+        main_calls = [
+            call for call in mock_dlt.table.call_args_list
+            if call.kwargs.get("name") == target_table
+        ]
+        self.assertEqual(
+            len(main_calls), 1,
+            f"expected exactly 1 dp.table call for `{target_table}`, "
+            f"saw {mock_dlt.table.call_args_list}"
+        )
+        schema_arg = main_calls[0].kwargs.get("schema")
+        self.assertIsInstance(
+            schema_arg, str,
+            f"expected a DDL-string schema, got {schema_arg!r}"
+        )
+        for token in tokens:
+            self.assertIn(token, schema_arg)
+
+    def _build_dqe_policy_pipeline(self, dqe_dict, comments, masks, schema_cols=("id",)):
+        from pyspark.sql.types import StructType, StructField, StringType
+        pipeline, spec = self._build_dqe_pipeline(dqe_dict)
+        if comments is not None:
+            spec.columnComments = json.dumps(comments)
+        if masks is not None:
+            spec.columnMasks = json.dumps(masks)
+        pipeline.schema_json = StructType(
+            [StructField(c, StringType(), True) for c in schema_cols]
+        ).jsonValue()
+        return pipeline, spec
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_write_layer_with_dqe_fail_only_applies_column_policies(self, mock_dlt):
+        """expect_all_or_fail-only branch attaches the DDL schema carrying
+        comments/masks to the main table."""
+        mock_dlt.expect_all = MagicMock(return_value=lambda func: func)
+        mock_dlt.expect_all_or_drop = MagicMock(return_value=lambda func: func)
+        mock_dlt.expect_all_or_fail = MagicMock(return_value=lambda func: func)
+        mock_dlt.table = MagicMock(return_value=lambda func: func)
+        pipeline, spec = self._build_dqe_policy_pipeline(
+            {"expect_all_or_fail": {"valid_id": "id IS NOT NULL"}},
+            {"id": "the id"},
+            {"id": "cat.s.mask_id"},
+        )
+        pipeline.write_layer_with_dqe()
+        self._assert_main_table_schema_contains(
+            mock_dlt, spec, ["COMMENT 'the id'", "MASK cat.s.mask_id"]
+        )
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_write_layer_with_dqe_drop_only_applies_column_policies(self, mock_dlt):
+        """expect_all_or_drop-only branch attaches the DDL schema carrying
+        comments/masks to the main table."""
+        mock_dlt.expect_all = MagicMock(return_value=lambda func: func)
+        mock_dlt.expect_all_or_drop = MagicMock(return_value=lambda func: func)
+        mock_dlt.expect_all_or_fail = MagicMock(return_value=lambda func: func)
+        mock_dlt.table = MagicMock(return_value=lambda func: func)
+        pipeline, spec = self._build_dqe_policy_pipeline(
+            {"expect_all_or_drop": {"valid_id": "id IS NOT NULL"}},
+            {"id": "the id"},
+            {"id": "cat.s.mask_id"},
+        )
+        pipeline.write_layer_with_dqe()
+        self._assert_main_table_schema_contains(
+            mock_dlt, spec, ["COMMENT 'the id'", "MASK cat.s.mask_id"]
+        )
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_write_layer_with_dqe_fail_only_unknown_mask_fails_closed(self, mock_dlt):
+        """A mask on an absent column fails closed on the fail-only branch."""
+        mock_dlt.expect_all_or_fail = MagicMock(return_value=lambda func: func)
+        mock_dlt.table = MagicMock(return_value=lambda func: func)
+        pipeline, _ = self._build_dqe_policy_pipeline(
+            {"expect_all_or_fail": {"valid_id": "id IS NOT NULL"}},
+            None,
+            {"ssn": "cat.s.mask_ssn"},
+        )
+        with self.assertRaisesRegex(ValueError, "not present in the derived"):
+            pipeline.write_layer_with_dqe()
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_write_layer_with_dqe_drop_only_unknown_mask_fails_closed(self, mock_dlt):
+        """A mask on an absent column fails closed on the drop-only branch."""
+        mock_dlt.expect_all_or_drop = MagicMock(return_value=lambda func: func)
+        mock_dlt.table = MagicMock(return_value=lambda func: func)
+        pipeline, _ = self._build_dqe_policy_pipeline(
+            {"expect_all_or_drop": {"valid_id": "id IS NOT NULL"}},
+            None,
+            {"ssn": "cat.s.mask_ssn"},
+        )
+        with self.assertRaisesRegex(ValueError, "not present in the derived"):
+            pipeline.write_layer_with_dqe()
+
+    # ------------------------------------------------------------------
+    # Single-source Silver CDC column-policy coverage
+    # ------------------------------------------------------------------
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_cdc_apply_changes_silver_applies_column_policies(self, mock_dlt):
+        """Single-source Silver CDC resolves the derived schema and attaches
+        comments/masks. Silver has no schema_json, so the previous
+        ``if self.schema_json`` guard passed None and dropped the policies."""
+        from pyspark.sql.types import StructType, StructField, StringType
+        mock_dlt.create_streaming_table = MagicMock()
+        mock_dlt.create_auto_cdc_flow = MagicMock()
+        self.spark.conf.set("spark.databricks.unityCatalog.enabled", "True")
+        self.addCleanup(self.spark.conf.unset, "spark.databricks.unityCatalog.enabled")
+        spec = SilverDataflowSpec(**copy.deepcopy(DataflowPipelineTests.silver_dataflow_spec_map))
+        spec.cdcApplyChanges = json.dumps(self.silver_cdc_apply_changes)
+        spec.columnComments = json.dumps({"id": "the id"})
+        spec.columnMasks = json.dumps({"id": "cat.s.mask_id"})
+        view_name = f"{spec.targetDetails['table']}_inputview"
+        pipeline = DataflowPipeline(self.spark, spec, view_name, None)
+        pipeline.get_silver_schema = MagicMock(
+            return_value=StructType([StructField("id", StringType(), True)])
+        )
+        pipeline.cdc_apply_changes()
+        _, kwargs = mock_dlt.create_streaming_table.call_args
+        self.assertIn("COMMENT 'the id'", kwargs["schema"])
+        self.assertIn("MASK cat.s.mask_id", kwargs["schema"])
+        pipeline.get_silver_schema.assert_called()
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_cdc_apply_changes_silver_unknown_mask_fails_closed(self, mock_dlt):
+        """A Silver CDC mask on an absent column fails closed."""
+        from pyspark.sql.types import StructType, StructField, StringType
+        mock_dlt.create_streaming_table = MagicMock()
+        mock_dlt.create_auto_cdc_flow = MagicMock()
+        self.spark.conf.set("spark.databricks.unityCatalog.enabled", "True")
+        self.addCleanup(self.spark.conf.unset, "spark.databricks.unityCatalog.enabled")
+        spec = SilverDataflowSpec(**copy.deepcopy(DataflowPipelineTests.silver_dataflow_spec_map))
+        spec.cdcApplyChanges = json.dumps(self.silver_cdc_apply_changes)
+        spec.columnMasks = json.dumps({"ssn": "cat.s.mask_ssn"})
+        view_name = f"{spec.targetDetails['table']}_inputview"
+        pipeline = DataflowPipeline(self.spark, spec, view_name, None)
+        pipeline.get_silver_schema = MagicMock(
+            return_value=StructType([StructField("id", StringType(), True)])
+        )
+        with self.assertRaisesRegex(ValueError, "not present in the derived"):
+            pipeline.cdc_apply_changes()
+
+    # ------------------------------------------------------------------
+    # Snapshot CDC column-policy coverage
+    # ------------------------------------------------------------------
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_apply_changes_from_snapshot_applies_column_policies(self, mock_dlt):
+        """Snapshot CDC wires the declared schema so comments/masks apply to
+        the target table (previously always passed None)."""
+        from pyspark.sql.types import StructType, StructField, StringType
+        mock_dlt.create_streaming_table = MagicMock()
+        mock_dlt.create_auto_cdc_from_snapshot_flow = MagicMock()
+        self.spark.conf.set("spark.databricks.unityCatalog.enabled", "True")
+        self.addCleanup(self.spark.conf.unset, "spark.databricks.unityCatalog.enabled")
+        spec = BronzeDataflowSpec(**copy.deepcopy(DataflowPipelineTests.bronze_dataflow_spec_acs_map))
+        spec.columnComments = json.dumps({"id": "the id"})
+        spec.columnMasks = json.dumps({"id": "cat.s.mask_id"})
+        view_name = f"{spec.targetDetails['table']}_inputview"
+        pipeline = DataflowPipeline(self.spark, spec, view_name, None)
+        pipeline.schema_json = StructType(
+            [StructField("id", StringType(), True)]
+        ).jsonValue()
+        pipeline.apply_changes_from_snapshot()
+        _, kwargs = mock_dlt.create_streaming_table.call_args
+        self.assertIn("COMMENT 'the id'", kwargs["schema"])
+        self.assertIn("MASK cat.s.mask_id", kwargs["schema"])
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_apply_changes_from_snapshot_unknown_mask_fails_closed(self, mock_dlt):
+        """A snapshot-CDC mask on an absent column fails closed."""
+        from pyspark.sql.types import StructType, StructField, StringType
+        mock_dlt.create_streaming_table = MagicMock()
+        mock_dlt.create_auto_cdc_from_snapshot_flow = MagicMock()
+        self.spark.conf.set("spark.databricks.unityCatalog.enabled", "True")
+        self.addCleanup(self.spark.conf.unset, "spark.databricks.unityCatalog.enabled")
+        spec = BronzeDataflowSpec(**copy.deepcopy(DataflowPipelineTests.bronze_dataflow_spec_acs_map))
+        spec.columnMasks = json.dumps({"ssn": "cat.s.mask_ssn"})
+        view_name = f"{spec.targetDetails['table']}_inputview"
+        pipeline = DataflowPipeline(self.spark, spec, view_name, None)
+        pipeline.schema_json = StructType(
+            [StructField("id", StringType(), True)]
+        ).jsonValue()
+        with self.assertRaisesRegex(ValueError, "not present in the derived"):
+            pipeline.apply_changes_from_snapshot()
 
     # ------------------------------------------------------------------
     # Multi-source AUTO CDC runtime tests (issue #294)
@@ -3224,6 +3576,8 @@ class LegacyPublishingModeTests(SDPFrameworkTestCase):
         "cdcApplyChangesFlowsSchemas": None,
         "rowFilter": None,
         "quarantineRowFilter": None,
+        "columnComments": None,
+        "columnMasks": None,
     }
 
     def _make_pipeline(self, pipeline_schema="", uc_enabled=True, extra_spec=None):

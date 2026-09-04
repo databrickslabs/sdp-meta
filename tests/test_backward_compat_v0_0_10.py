@@ -167,12 +167,16 @@ NEW_BRONZE_FIELDS_AT_READ = [
     "cdcApplyChangesFlowsSchemas",
     "rowFilter",
     "quarantineRowFilter",
+    "columnComments",
+    "columnMasks",
 ]
 NEW_SILVER_FIELDS_AT_READ = [
     "clusterByAuto",
     "cdcApplyChangesFlows",
     "rowFilter",
     "quarantineRowFilter",
+    "columnComments",
+    "columnMasks",
 ]
 # ``cdcApplyChangesFlowsSchemas`` defaults to ``{}`` (empty map), not
 # ``None``, because :meth:`OnboardDataflowspec.get_cdc_apply_changes_flows_json`
@@ -188,12 +192,16 @@ EXPECTED_BRONZE_DEFAULTS_AT_ONBOARDING = {
     "cdcApplyChangesFlowsSchemas": {},
     "rowFilter": None,
     "quarantineRowFilter": None,
+    "columnComments": None,
+    "columnMasks": None,
 }
 EXPECTED_SILVER_DEFAULTS_AT_ONBOARDING = {
     "clusterByAuto": False,
     "cdcApplyChangesFlows": None,
     "rowFilter": None,
     "quarantineRowFilter": None,
+    "columnComments": None,
+    "columnMasks": None,
 }
 
 

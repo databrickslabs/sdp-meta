@@ -22,6 +22,8 @@ from databricks.labs.sdp_meta.dataflow_spec import (
 )
 from databricks.labs.sdp_meta.identifiers import (
     SUPPORTED_SOURCE_FORMATS,
+    validate_column_comments,
+    validate_column_masks,
     validate_scd_type,
     validate_sequence_by,
     validate_source_format,
@@ -503,6 +505,20 @@ class OnboardDataflowspec:
                         validate_sql_where_clause,
                         {},
                     ),
+                    # UC column-level governance. Both are JSON objects keyed
+                    # by column name: comments carry free text emitted as an
+                    # escaped ``COMMENT '...'`` literal; masks carry a
+                    # ``cat.schema.fn USING COLUMNS (...)`` clause spliced
+                    # after ``MASK`` in the generated DDL-string schema. The
+                    # mask validator runs the same denylist guard as the row
+                    # filters plus a strict function-name / USING-COLUMNS
+                    # parse (see identifiers.validate_column_masks).
+                    (
+                        f"{layer}_column_comments",
+                        validate_column_comments,
+                        {},
+                    ),
+                    (f"{layer}_column_masks", validate_column_masks, {}),
                 ]
                 for field, validator, kwargs in checks:
                     value = row_dict.get(field)
@@ -1305,6 +1321,10 @@ class OnboardDataflowspec:
             # and silently dropped on non-UC pipelines.
             "rowFilter",
             "quarantineRowFilter",
+            # UC column-level governance. JSON-object strings keyed by column
+            # name; optional. Masks are dropped on non-UC pipelines.
+            "columnComments",
+            "columnMasks",
         ]
         data_flow_spec_schema = StructType(
             [
@@ -1354,6 +1374,8 @@ class OnboardDataflowspec:
                 ),
                 StructField("rowFilter", StringType(), True),
                 StructField("quarantineRowFilter", StringType(), True),
+                StructField("columnComments", StringType(), True),
+                StructField("columnMasks", StringType(), True),
             ]
         )
         data = []
@@ -1530,6 +1552,12 @@ class OnboardDataflowspec:
                 )
                 else None
             )
+            bronze_column_comments = self.__get_column_policy_json(
+                onboarding_row, "bronze_column_comments"
+            )
+            bronze_column_masks = self.__get_column_policy_json(
+                onboarding_row, "bronze_column_masks"
+            )
             bronze_row = (
                 bronze_data_flow_spec_id,
                 bronze_data_flow_spec_group,
@@ -1555,6 +1583,8 @@ class OnboardDataflowspec:
                 cdc_apply_changes_flows_schemas,
                 bronze_row_filter,
                 bronze_quarantine_row_filter,
+                bronze_column_comments,
+                bronze_column_masks,
             )
             data.append(bronze_row)
             # logger.info(bronze_parition_columns)
@@ -1564,6 +1594,32 @@ class OnboardDataflowspec:
         ).toDF(*data_flow_spec_columns)
 
         return data_flow_spec_rows_df
+
+    def __get_column_policy_json(self, onboarding_row, key):
+        """Return the ``*_column_comments`` / ``*_column_masks`` value as a
+        JSON string, or ``None`` when absent/empty.
+
+        The onboarding file carries these as JSON objects keyed by column
+        name; the dataflowspec table stores them as a ``StringType`` JSON
+        string (like ``dataQualityExpectations``). ``spark.read.json`` infers
+        a *unified* struct across all rows, so a row that didn't set this key
+        still surfaces a struct whose fields (contributed by other rows) are
+        all ``None`` — those phantom keys are dropped here so each row keeps
+        only its own entries. A plain JSON string is passed through unchanged.
+        Validation already happened in pre-flight
+        (:func:`identifiers.validate_column_comments` /
+        ``validate_column_masks``)."""
+        if key not in onboarding_row or onboarding_row[key] is None:
+            return None
+        value = onboarding_row[key]
+        if hasattr(value, "asDict"):
+            value = value.asDict(recursive=True)
+        if isinstance(value, dict):
+            value = {k: v for k, v in value.items() if v is not None}
+            return json.dumps(value) if value else None
+        if isinstance(value, str):
+            return value if value else None
+        return json.dumps(value)
 
     def __parse_cluster_by_string(self, cluster_by_value, cluster_key):
         """Parse string representation of list into actual list."""
@@ -2276,6 +2332,10 @@ class OnboardDataflowspec:
             # and silently dropped on non-UC pipelines.
             "rowFilter",
             "quarantineRowFilter",
+            # UC column-level governance. JSON-object strings keyed by column
+            # name; optional. Masks are dropped on non-UC pipelines.
+            "columnComments",
+            "columnMasks",
         ]
         data_flow_spec_schema = StructType(
             [
@@ -2312,6 +2372,8 @@ class OnboardDataflowspec:
                 StructField("cdcApplyChangesFlows", StringType(), True),
                 StructField("rowFilter", StringType(), True),
                 StructField("quarantineRowFilter", StringType(), True),
+                StructField("columnComments", StringType(), True),
+                StructField("columnMasks", StringType(), True),
             ]
         )
         data = []
@@ -2553,6 +2615,12 @@ class OnboardDataflowspec:
                 )
                 else None
             )
+            silver_column_comments = self.__get_column_policy_json(
+                onboarding_row, "silver_column_comments"
+            )
+            silver_column_masks = self.__get_column_policy_json(
+                onboarding_row, "silver_column_masks"
+            )
             silver_row = (
                 silver_data_flow_spec_id,
                 silver_data_flow_spec_group,
@@ -2577,6 +2645,8 @@ class OnboardDataflowspec:
                 silver_cdc_apply_changes_flows,
                 silver_row_filter,
                 silver_quarantine_row_filter,
+                silver_column_comments,
+                silver_column_masks,
             )
             data.append(silver_row)
             logger.info(f"silver_data ==== {data}")

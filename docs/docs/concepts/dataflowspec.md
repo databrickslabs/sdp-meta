@@ -56,6 +56,8 @@ These fields are required on every flow entry.
 | `bronze_append_flows` | list | No | Additional append flows. See [Autoloader](../guides/autoloader.md). |
 | `bronze_sinks` | list | No | Sink configs (Delta, Kafka, Event Hubs). See [DLT Sink](../guides/dlt-sink.md). |
 | `bronze_row_filter` | string | No | `ROW FILTER` clause for the Bronze table (Unity Catalog only). |
+| `bronze_column_comments` | map | No | `{column: comment}` map. Comments annotate the Bronze table columns. See [Column policies](../guides/column-policies.md). |
+| `bronze_column_masks` | map | No | `{column: mask_clause}` map (e.g. `cat.schema.fn USING COLUMNS (other)`), Unity Catalog only. See [Column policies](../guides/column-policies.md). |
 
 ## Silver fields
 
@@ -74,6 +76,8 @@ These fields are required on every flow entry.
 | `silver_cluster_by` | list | No | Liquid clustering columns. |
 | `silver_cluster_by_auto` | boolean | No | Enable auto liquid clustering. |
 | `silver_row_filter` | string | No | `ROW FILTER` clause for the Silver table (Unity Catalog only). |
+| `silver_column_comments` | map | No | `{column: comment}` map. Comments annotate the Silver table columns. See [Column policies](../guides/column-policies.md). |
+| `silver_column_masks` | map | No | `{column: mask_clause}` map (e.g. `cat.schema.fn USING COLUMNS (other)`), Unity Catalog only. See [Column policies](../guides/column-policies.md). |
 
 ## Environment suffixes
 

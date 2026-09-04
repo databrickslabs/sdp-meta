@@ -59,6 +59,8 @@ class PipelineReadersTests(SDPFrameworkTestCase):
         "cdcApplyChangesFlowsSchemas": None,
         "rowFilter": None,
         "quarantineRowFilter": None,
+        "columnComments": None,
+        "columnMasks": None,
     }
 
     bronze_eventhub_dataflow_spec_map = {
@@ -107,6 +109,8 @@ class PipelineReadersTests(SDPFrameworkTestCase):
         "cdcApplyChangesFlowsSchemas": None,
         "rowFilter": None,
         "quarantineRowFilter": None,
+        "columnComments": None,
+        "columnMasks": None,
     }
 
     bronze_eventhub_dataflow_spec_omit_secret_map = {
@@ -154,6 +158,8 @@ class PipelineReadersTests(SDPFrameworkTestCase):
         "cdcApplyChangesFlowsSchemas": None,
         "rowFilter": None,
         "quarantineRowFilter": None,
+        "columnComments": None,
+        "columnMasks": None,
     }
 
     bronze_kafka_dataflow_spec_map = {
@@ -193,6 +199,8 @@ class PipelineReadersTests(SDPFrameworkTestCase):
         "cdcApplyChangesFlowsSchemas": None,
         "rowFilter": None,
         "quarantineRowFilter": None,
+        "columnComments": None,
+        "columnMasks": None,
     }
 
     def setUp(self):

@@ -25,6 +25,7 @@ flowing into the DLT pipeline and failing there.
 from __future__ import annotations
 
 import ast
+import json
 import re
 import sys
 from typing import Optional
@@ -410,6 +411,148 @@ def validate_sql_where_clause(value, *, kind: str = "where_clause") -> str:
             f"operations and DDL / DML are not."
         )
     return value
+
+
+_MAX_COLUMN_COMMENT_LEN = 1000
+
+# Matches the leading UC function name of a mask clause and, optionally, a
+# trailing ``USING COLUMNS (col, ...)`` list (case-insensitive). The function
+# name is everything up to the first whitespace or ``(``; the USING COLUMNS
+# group is captured separately so the column list can be validated.
+_MASK_CLAUSE_RE = re.compile(
+    r"^\s*(?P<func>[^\s(]+)\s*(?:USING\s+COLUMNS\s*\((?P<cols>[^)]*)\))?\s*$",
+    re.IGNORECASE,
+)
+
+
+def validate_column_comment(value, *, kind: str = "column_comment") -> str:
+    """Validate a column comment string; return it unchanged on success.
+
+    Column comments are emitted as SQL string literals (``COMMENT '...'``)
+    with embedded backslashes and single quotes escaped by
+    :meth:`DataflowSpecUtils.build_schema_ddl` (backslashes first, so ``\\'``
+    cannot terminate the literal), so the comment is *data*, not
+    code — the dangerous-keyword denylist that guards WHERE clauses does not
+    apply (a comment may legitimately contain words like "select"). We only
+    enforce type, a length bound, and the absence of control characters /
+    newlines that would corrupt the rendered DDL.
+    """
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str):
+        raise ValueError(
+            f"{kind} must be a string, got {type(value).__name__}: {value!r}"
+        )
+    if len(value) > _MAX_COLUMN_COMMENT_LEN:
+        raise ValueError(
+            f"{kind} is {len(value)} characters; maximum allowed is "
+            f"{_MAX_COLUMN_COMMENT_LEN}"
+        )
+    if any(ord(ch) < 0x20 for ch in value):
+        raise ValueError(
+            f"{kind} contains control characters (e.g. newlines/tabs), which "
+            f"are not permitted in a column comment."
+        )
+    return value
+
+
+def validate_column_mask_clause(value, *, kind: str = "column_mask") -> str:
+    """Validate a column mask clause; return it unchanged on success.
+
+    A mask clause is spliced verbatim after ``MASK`` into a DDL-string schema
+    (an unparameterisable position), so it is validated strictly:
+
+    1. the leading UC function name must pass :func:`validate_uc_full_name`
+       (1–3 dotted regular identifiers);
+    2. any ``USING COLUMNS (...)`` list must pass
+       :func:`validate_uc_column_list`;
+    3. the whole clause is run through the same dangerous-token / keyword
+       denylist as :func:`validate_sql_where_clause` to block ``;``, comment
+       markers, identifier delimiters and DDL/DML.
+
+    Canonical form: ``cat.schema.mask_fn USING COLUMNS (region, tier)`` or a
+    bare ``cat.schema.mask_fn``.
+    """
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str):
+        raise ValueError(
+            f"{kind} must be a string, got {type(value).__name__}: {value!r}"
+        )
+    # Reuse the WHERE-clause guard for statement-separation / comment / DDL
+    # escape tokens and keywords (also enforces the length bound).
+    validate_sql_where_clause(value, kind=kind)
+    match = _MASK_CLAUSE_RE.match(value)
+    if not match:
+        raise ValueError(
+            f"{kind} {value!r} is not a valid mask clause. Expected "
+            f"'<catalog.schema.function> [USING COLUMNS (col, ...)]'."
+        )
+    validate_uc_full_name(match.group("func"), kind=f"{kind} function name")
+    cols = match.group("cols")
+    if cols is not None:
+        validate_uc_column_list(cols, kind=f"{kind} USING COLUMNS list")
+    return value
+
+
+def _validate_column_policy_dict(
+    value, per_value_validator, *, kind, drop_empty_values=False
+):
+    """Shared validator for the JSON-dict column-policy onboarding fields.
+
+    Accepts a ``dict`` (already parsed from the onboarding row) or a JSON
+    string, validates each key as a UC identifier and each value with
+    ``per_value_validator``, and returns the parsed dict. ``None`` / empty
+    returns ``{}`` so optional fields don't trip pre-flight.
+
+    When ``drop_empty_values`` is set, entries whose value is empty (``""``
+    or whitespace) are dropped after validation. Masks use this: an empty
+    mask value would render an invalid bare ``MASK`` clause, so it is not a
+    policy at all and must not survive to the renderer.
+    """
+    if value is None or value == "":
+        return {}
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"{kind} must be a JSON object, could not parse: {exc}"
+            ) from exc
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"{kind} must be a JSON object keyed by column name, got "
+            f"{type(value).__name__}: {value!r}"
+        )
+    # ``spark.read.json`` unifies nested-object schemas across all onboarding
+    # rows, so a row can surface phantom keys (contributed by other rows)
+    # whose value is ``None``. Drop those — they are not policies for THIS
+    # row — and validate only the entries the operator actually set.
+    value = {column: entry for column, entry in value.items() if entry is not None}
+    validated = {}
+    for column, entry in value.items():
+        validate_uc_identifier(column, kind=f"{kind} column name")
+        per_value_validator(entry, kind=f"{kind} for column {column!r}")
+        if drop_empty_values and isinstance(entry, str) and entry.strip() == "":
+            continue
+        validated[column] = entry
+    return validated
+
+
+def validate_column_comments(value, *, kind: str = "column_comments") -> dict:
+    """Validate the ``*_column_comments`` onboarding field (a dict / JSON
+    object of ``{column: comment}``). Returns the parsed dict."""
+    return _validate_column_policy_dict(
+        value, validate_column_comment, kind=kind
+    )
+
+
+def validate_column_masks(value, *, kind: str = "column_masks") -> dict:
+    """Validate the ``*_column_masks`` onboarding field (a dict / JSON object
+    of ``{column: mask_clause}``). Returns the parsed dict."""
+    return _validate_column_policy_dict(
+        value, validate_column_mask_clause, kind=kind, drop_empty_values=True
+    )
 
 
 def _format_prompt_error(message: str) -> str:
