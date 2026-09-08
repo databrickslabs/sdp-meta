@@ -2939,9 +2939,10 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
             spec_map["columnMasks"] = columnMasks
         return SilverDataflowSpec(**spec_map)
 
-    def test_augment_bronze_schema_cloudfiles_rescued_and_metadata(self):
-        """cloudFiles bronze target schema gains the (configured) rescued column
-        + autoloader metadata columns; subfield types resolve from _metadata."""
+    def test_augment_bronze_schema_cloudfiles_metadata_enabled_exact_order(self):
+        """Metadata enabled: EXACT target column order mirrors the reader —
+        declared, _rescued, <metadata struct>, then projected metadata cols
+        (the struct precedes the projections, per add_cloudfiles_metadata)."""
         from databricks.labs.sdp_meta.dataflow_pipeline import (
             augment_bronze_schema_with_reader_columns,
         )
@@ -2956,13 +2957,58 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
         })}
         declared = StructType([StructField("id", StringType(), True)])
         aug = augment_bronze_schema_with_reader_columns(spec, declared)
+        # Exact order: metadata struct BEFORE the projected columns.
+        self.assertEqual(
+            [f.name for f in aug.fields],
+            ["id", "_rescued", "src_meta", "fpath", "custom"],
+        )
         types = {f.name: f.dataType for f in aug.fields}
-        self.assertEqual([f.name for f in aug.fields][0], "id")
-        self.assertIn("_rescued", types)
         self.assertIsInstance(types["_rescued"], StringType)
         self.assertIsInstance(types["src_meta"], StructType)
         self.assertIsInstance(types["fpath"], StringType)   # _metadata.file_path -> string
         self.assertIsInstance(types["custom"], StringType)  # non-_metadata expr -> string
+
+    def test_augment_bronze_schema_metadata_present_but_false_keeps_metadata(self):
+        """present-and-false mirrors the reader: the struct is KEPT as
+        ``_metadata`` (the reader only DROPS it when the key is ABSENT), and
+        still precedes the projected columns."""
+        from databricks.labs.sdp_meta.dataflow_pipeline import (
+            augment_bronze_schema_with_reader_columns,
+        )
+        from pyspark.sql.types import StructType, StructField, StringType
+        spec = BronzeDataflowSpec(**copy.deepcopy(DataflowPipelineTests.bronze_dataflow_spec_map))
+        spec.sourceFormat = "cloudFiles"
+        spec.readerConfigOptions = {}
+        spec.sourceDetails = {"path": "/x", "source_metadata": json.dumps({
+            "include_autoloader_metadata_column": "false",
+            "select_metadata_cols": {"fpath": "_metadata.file_path"},
+        })}
+        declared = StructType([StructField("id", StringType(), True)])
+        aug = augment_bronze_schema_with_reader_columns(spec, declared)
+        self.assertEqual(
+            [f.name for f in aug.fields],
+            ["id", "_rescued_data", "_metadata", "fpath"],
+        )
+
+    def test_augment_bronze_schema_metadata_key_absent_drops_metadata(self):
+        """Key ABSENT mirrors the reader: ``_metadata`` is dropped; projected
+        columns still present."""
+        from databricks.labs.sdp_meta.dataflow_pipeline import (
+            augment_bronze_schema_with_reader_columns,
+        )
+        from pyspark.sql.types import StructType, StructField, StringType
+        spec = BronzeDataflowSpec(**copy.deepcopy(DataflowPipelineTests.bronze_dataflow_spec_map))
+        spec.sourceFormat = "cloudFiles"
+        spec.readerConfigOptions = {}
+        spec.sourceDetails = {"path": "/x", "source_metadata": json.dumps({
+            "select_metadata_cols": {"fpath": "_metadata.file_path"},
+        })}
+        declared = StructType([StructField("id", StringType(), True)])
+        aug = augment_bronze_schema_with_reader_columns(spec, declared)
+        self.assertEqual(
+            [f.name for f in aug.fields],
+            ["id", "_rescued_data", "fpath"],
+        )
 
     def test_augment_bronze_schema_default_rescued_and_non_cloudfiles_noop(self):
         from databricks.labs.sdp_meta.dataflow_pipeline import (
@@ -3092,6 +3138,68 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
         )
         with self.assertRaisesRegex(ValueError, "incompatible schemas"):
             pipeline.get_silver_schema()
+
+    def test_merge_flow_schemas_nullability_widened_order_independent(self):
+        """BLOCKING #2: nullability is merged by SAFE WIDENING (nullable if ANY
+        flow is nullable) and is independent of flow ORDER — so flow order can
+        never flip whether a column gets NOT NULL in the policy DDL."""
+        from pyspark.sql.types import StructType, StructField, StringType, LongType
+        spec = self._multi_source_silver_spec()
+        pipeline = DataflowPipeline(self.spark, spec, "v", None)
+        # Flow A: name NON-nullable; Flow B: name nullable. id nullable in both.
+        schema_a = StructType([
+            StructField("id", LongType(), True), StructField("name", StringType(), False)])
+        schema_b = StructType([
+            StructField("id", LongType(), True), StructField("name", StringType(), True)])
+        merged_ab = pipeline._merge_flow_schemas([("a", schema_a), ("b", schema_b)])
+        merged_ba = pipeline._merge_flow_schemas([("b", schema_b), ("a", schema_a)])
+        ab = [(f.name, f.nullable) for f in merged_ab.fields]
+        ba = [(f.name, f.nullable) for f in merged_ba.fields]
+        # Order-independent AND widened: name is nullable regardless of order.
+        self.assertEqual(ab, ba)
+        self.assertEqual(ab, [("id", True), ("name", True)])
+
+    def test_merge_flow_schemas_all_nonnull_stays_nonnull(self):
+        """When EVERY flow guarantees a column non-null, the merged column stays
+        non-null (so a legitimately NOT NULL column is preserved)."""
+        from pyspark.sql.types import StructType, StructField, StringType, LongType
+        spec = self._multi_source_silver_spec()
+        pipeline = DataflowPipeline(self.spark, spec, "v", None)
+        nn = StructType([
+            StructField("id", LongType(), False), StructField("name", StringType(), True)])
+        merged = pipeline._merge_flow_schemas([("a", nn), ("b", nn)])
+        self.assertEqual([(f.name, f.nullable) for f in merged.fields],
+                         [("id", False), ("name", True)])
+
+    def test_get_silver_schema_catalog_qualified_lookup_end_to_end(self):
+        """Non-blocking: a REAL catalog-qualified map LOOKUP — the silver
+        source carries a catalog, the map key is ``catalog.db.table``, and the
+        schema resolves in-process with no table read."""
+        from pyspark.sql.types import StringType
+        self.spark.conf.set("spark.databricks.unityCatalog.enabled", "True")
+        self.addCleanup(self.spark.conf.unset, "spark.databricks.unityCatalog.enabled")
+        spec = SilverDataflowSpec(**copy.deepcopy(DataflowPipelineTests.silver_dataflow_spec_map))
+        spec.sourceDetails = dict(spec.sourceDetails)
+        spec.sourceDetails["catalog"] = "mycat"
+        view_name = f"{spec.targetDetails['table']}_inputview"
+        source_schema_map = {"mycat.bronze.customer": self._bronze_customer_struct()}
+        pipeline = DataflowPipeline(
+            self.spark, spec, view_name, None,
+            source_schema_map=source_schema_map, combined_run=True
+        )
+        spy = self._SparkReadStreamSpy(self.spark)
+        pipeline.spark = spy
+        schema = pipeline.get_silver_schema()
+        spy.readStream.table.assert_not_called()
+        self.assertEqual(
+            [(f.name, type(f.dataType)) for f in schema.fields],
+            [
+                ("address", StringType), ("email", StringType),
+                ("firstname", StringType), ("id", StringType),
+                ("lastname", StringType), ("operation_date", StringType),
+                ("operation", StringType), ("_rescued_data", StringType),
+            ],
+        )
 
     def test_multi_source_split_reads_flow_sources_live(self):
         """Split topology (no map, not combined): each multi-source flow's

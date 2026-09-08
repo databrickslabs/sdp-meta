@@ -106,16 +106,35 @@ def augment_bronze_schema_with_reader_columns(bronze_spec, declared_schema):
                 meta = {}
             file_meta_struct = _file_metadata_struct()
             subfield_types = {f.name: f.dataType for f in file_meta_struct.fields}
+            # Mirror ``PipelineReaders.add_cloudfiles_metadata`` EXACTLY, both in
+            # column ORDER and in false-flag handling:
+            #   * ``selectExpr("*", "_metadata")`` adds the ``_metadata`` struct
+            #     FIRST (right after the reader's ``_rescued_data``), then the
+            #     ``select_metadata_cols`` projections are appended — so the
+            #     struct column precedes the projected columns in the target.
+            #   * ``_metadata`` is only DROPPED when the
+            #     ``include_autoloader_metadata_column`` key is ABSENT. When the
+            #     key is present-and-false the reader keeps it as ``_metadata``;
+            #     present-and-true renames it (custom name, or ``source_metadata``).
+            if "include_autoloader_metadata_column" in meta:
+                flag = str(meta.get("include_autoloader_metadata_column", "")).lower() == "true"
+                if flag and "autoloader_metadata_col_name" in meta:
+                    # Reader renames ``_metadata`` -> custom name (a custom name
+                    # equal to ``_metadata`` is a no-op — same column name here).
+                    meta_col = meta["autoloader_metadata_col_name"]
+                elif flag:
+                    meta_col = "source_metadata"
+                else:
+                    # present-and-false: reader keeps the struct as ``_metadata``.
+                    meta_col = "_metadata"
+                _add(meta_col, file_meta_struct)
             # ``select_metadata_cols`` are projected regardless of the
-            # include-metadata flag (see PipelineReaders.add_cloudfiles_metadata).
+            # include-metadata flag, and always AFTER the ``_metadata`` column.
             for new_col, source_expr in (_as_plain_dict(meta.get("select_metadata_cols"))).items():
                 dtype = StringType()
                 if isinstance(source_expr, str) and source_expr.startswith("_metadata."):
                     dtype = subfield_types.get(source_expr.split(".", 1)[1], StringType())
                 _add(new_col, dtype)
-            if str(meta.get("include_autoloader_metadata_column", "")).lower() == "true":
-                meta_col = meta.get("autoloader_metadata_col_name") or "source_metadata"
-                _add(meta_col, file_meta_struct)
 
     return StructType(fields)
 
@@ -821,13 +840,23 @@ class DataflowPipeline:
 
     def _merge_flow_schemas(self, per_flow_schemas):
         """Verify every multi-source flow projects the same (name, type) columns
-        and return the shared schema. All flows land in ONE streaming table, so
+        and return the merged schema. All flows land in ONE streaming table, so
         their post-transform schemas must be compatible; a mismatch is a config
-        error surfaced clearly rather than a confusing DLT failure downstream."""
+        error surfaced clearly rather than a confusing DLT failure downstream.
+
+        Nullability is merged by SAFE WIDENING: a field is nullable in the
+        result when ANY flow projects it as nullable. This is order-independent
+        (the flow list order never changes the result) and never emits a
+        spurious ``NOT NULL`` — the policy DDL adds ``NOT NULL`` from
+        ``field.nullable`` (dataflow_spec.build_schema_ddl), so a column is
+        constrained ``NOT NULL`` only when every flow guarantees it is
+        non-null."""
         if not per_flow_schemas:
             return None
         ref_name, ref_schema = per_flow_schemas[0]
         ref_fields = [(f.name, f.dataType) for f in ref_schema.fields]
+        # nullable[i] widened across flows (any-nullable -> nullable).
+        nullable = [f.nullable for f in ref_schema.fields]
         for name, schema in per_flow_schemas[1:]:
             fields = [(f.name, f.dataType) for f in schema.fields]
             if fields != ref_fields:
@@ -839,7 +868,12 @@ class DataflowPipeline:
                     f"landing in one streaming table must project the same "
                     f"columns and types."
                 )
-        return ref_schema
+            for i, f in enumerate(schema.fields):
+                nullable[i] = nullable[i] or f.nullable
+        return StructType([
+            StructField(f.name, f.dataType, nullable[i], f.metadata)
+            for i, f in enumerate(ref_schema.fields)
+        ])
 
     def _get_silver_schema_from_cdc_flows(self):
         """Derive the target schema for a multi-source AUTO CDC silver spec
