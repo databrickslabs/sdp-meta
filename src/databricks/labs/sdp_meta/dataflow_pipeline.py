@@ -6,7 +6,8 @@ import ast
 from pyspark import pipelines as dp
 from pyspark.sql import DataFrame
 from pyspark.sql.functions import expr, struct
-from pyspark.sql.types import StructType, StructField
+from pyspark.sql.types import StructType, StructField, StringType, LongType, TimestampType
+from pyspark.sql.utils import AnalysisException
 from databricks.labs.sdp_meta.dataflow_spec import BronzeDataflowSpec, SilverDataflowSpec, DataflowSpecUtils
 from databricks.labs.sdp_meta.pipeline_writers import AppendFlowWriter, DLTSinkWriter
 from databricks.labs.sdp_meta.__about__ import __version__
@@ -14,6 +15,109 @@ from databricks.labs.sdp_meta.pipeline_readers import PipelineReaders
 
 logger = logging.getLogger('databricks.labs.sdp_meta')
 logger.setLevel(logging.INFO)
+
+
+def _as_plain_dict(obj):
+    """Coerce a Spark map / Row / dict-like into a plain ``dict`` ({} on None)."""
+    if obj is None:
+        return {}
+    if isinstance(obj, dict):
+        return obj
+    try:
+        return dict(obj)
+    except (TypeError, ValueError):
+        return {}
+
+
+def _file_metadata_struct():
+    """The standard Spark file-source ``_metadata`` struct.
+
+    Used to type the autoloader metadata column (and any ``select_metadata_cols``
+    that project one of its fields) when augmenting a bronze declared schema
+    with the columns the reader injects into the materialised target.
+    """
+    return StructType([
+        StructField("file_path", StringType(), True),
+        StructField("file_name", StringType(), True),
+        StructField("file_size", LongType(), True),
+        StructField("file_block_start", LongType(), True),
+        StructField("file_block_length", LongType(), True),
+        StructField("file_modification_time", TimestampType(), True),
+    ])
+
+
+def augment_bronze_schema_with_reader_columns(bronze_spec, declared_schema):
+    """Return ``declared_schema`` augmented with the columns the bronze reader
+    injects into the *materialised* bronze target table.
+
+    A bronze table's on-disk schema is the declared source schema
+    (``source_schema_path``) PLUS columns the reader/pipeline adds — so a
+    downstream consumer that only has the declared schema (a combined-run silver
+    transform, or the bronze column-policy DDL for issue #2) cannot resolve
+    against the true target shape. This helper reproduces those additions,
+    mirroring :class:`PipelineReaders`:
+
+      * ``cloudFiles`` sources gain the rescued-data column — name from the
+        ``cloudFiles.rescuedDataColumn`` / ``rescuedDataColumn`` reader option,
+        default ``_rescued_data`` — as a ``StringType``.
+      * When ``source_details['source_metadata']`` enables
+        ``include_autoloader_metadata_column``, the file-metadata column (custom
+        ``autoloader_metadata_col_name`` or ``source_metadata``) is added as the
+        standard file-metadata struct. Any ``select_metadata_cols`` are added
+        too (typed from the ``_metadata`` struct when the expression projects one
+        of its fields, else ``StringType``).
+
+    Columns already present in ``declared_schema`` are never duplicated. Returns
+    ``None`` unchanged when ``declared_schema`` is ``None``. This function is
+    deliberately module-level and reusable — issue #2 (bronze column policies)
+    needs the same reader-injected-column augmentation.
+    """
+    if declared_schema is None:
+        return None
+    fields = list(declared_schema.fields)
+    existing = {f.name for f in fields}
+
+    def _add(name, dtype):
+        if name and name not in existing:
+            fields.append(StructField(name, dtype, True))
+            existing.add(name)
+
+    source_format = (getattr(bronze_spec, "sourceFormat", None) or "").lower()
+    reader_opts = _as_plain_dict(getattr(bronze_spec, "readerConfigOptions", None))
+    source_details = _as_plain_dict(getattr(bronze_spec, "sourceDetails", None))
+
+    if source_format == "cloudfiles":
+        rescued = (
+            reader_opts.get("cloudFiles.rescuedDataColumn")
+            or reader_opts.get("rescuedDataColumn")
+            or "_rescued_data"
+        )
+        _add(rescued, StringType())
+
+        source_metadata_raw = source_details.get("source_metadata")
+        if source_metadata_raw:
+            try:
+                meta = (
+                    json.loads(source_metadata_raw)
+                    if isinstance(source_metadata_raw, str)
+                    else _as_plain_dict(source_metadata_raw)
+                )
+            except (ValueError, TypeError):
+                meta = {}
+            file_meta_struct = _file_metadata_struct()
+            subfield_types = {f.name: f.dataType for f in file_meta_struct.fields}
+            # ``select_metadata_cols`` are projected regardless of the
+            # include-metadata flag (see PipelineReaders.add_cloudfiles_metadata).
+            for new_col, source_expr in (_as_plain_dict(meta.get("select_metadata_cols"))).items():
+                dtype = StringType()
+                if isinstance(source_expr, str) and source_expr.startswith("_metadata."):
+                    dtype = subfield_types.get(source_expr.split(".", 1)[1], StringType())
+                _add(new_col, dtype)
+            if str(meta.get("include_autoloader_metadata_column", "")).lower() == "true":
+                meta_col = meta.get("autoloader_metadata_col_name") or "source_metadata"
+                _add(meta_col, file_meta_struct)
+
+    return StructType(fields)
 
 
 class DataflowPipeline:
@@ -29,15 +133,24 @@ class DataflowPipeline:
     def __init__(self, spark, dataflow_spec, view_name, view_name_quarantine=None,
                  custom_transform_func: Optional[Callable] = None,
                  next_snapshot_and_version: Optional[Callable] = None,
-                 source_schema_map: Optional[dict] = None):
+                 source_schema_map: Optional[dict] = None,
+                 combined_run: bool = False):
         """Initialize Constructor.
 
         ``source_schema_map`` maps an upstream source table's fully-qualified
-        name to its declared schema (a StructType-JSON string). It is populated
-        by :meth:`invoke_dlt_pipeline` for the combined ``bronze_silver``
-        topology so a silver spec can derive its schema from the bronze spec's
-        declared schema in-process — without reading the not-yet-materialised
-        bronze table (issue #1).
+        name to its (reader-augmented) bronze target schema — a ``StructType``,
+        or a StructType-JSON string/dict. It is populated by
+        :meth:`invoke_dlt_pipeline` for the combined ``bronze_silver`` topology
+        so a silver spec can derive its schema from the bronze spec's declared
+        schema in-process — without reading the not-yet-materialised bronze
+        table (issue #1).
+
+        ``combined_run`` is ``True`` only for the silver flow of a combined
+        ``bronze_silver`` run. When set, silver column-policy schema resolution
+        that cannot be satisfied from ``source_schema_map`` FAILS FAST with an
+        actionable error naming the split-pipeline workaround, instead of
+        falling back to a live bronze-table read that would raise the opaque
+        ``TABLE_OR_VIEW_NOT_FOUND`` (the bronze table does not exist yet).
         """
         logger.info(
             f"""dataflowSpec={dataflow_spec} ,
@@ -45,6 +158,7 @@ class DataflowPipeline:
                 view_name_quarantine={view_name_quarantine}"""
         )
         self.source_schema_map = source_schema_map or {}
+        self.combined_run = combined_run
         if isinstance(dataflow_spec, BronzeDataflowSpec) or isinstance(dataflow_spec, SilverDataflowSpec):
             self.__initialize_dataflow_pipeline(
                 spark, dataflow_spec, view_name, view_name_quarantine, custom_transform_func, next_snapshot_and_version
@@ -596,28 +710,177 @@ class DataflowPipeline:
         return input_df
 
     def _get_inprocess_source_schema(self, source_fqn):
-        """Return the upstream source's declared schema as a ``StructType`` when
-        it was threaded in-process via ``source_schema_map`` (combined
-        ``bronze_silver`` runs), else ``None``.
+        """Return the upstream source's (reader-augmented) bronze target schema
+        as a ``StructType`` when it was threaded in-process via
+        ``source_schema_map`` (combined ``bronze_silver`` runs), else ``None``.
 
         This lets ``get_silver_schema`` derive the silver schema from the
         bronze dataflowspec's declared schema instead of a live
         ``spark.readStream.table(<bronze fqn>)`` — the bronze table is produced
         in the SAME run and does not exist in UC at graph-construction time, so
-        a physical read raises ``TABLE_OR_VIEW_NOT_FOUND`` (issue #1).
+        a physical read raises ``TABLE_OR_VIEW_NOT_FOUND`` (issue #1). Accepts a
+        ``StructType`` (as built by ``_build_bronze_target_schema_map``) or a
+        StructType-JSON string / dict (as tests and hand-built maps may supply).
         """
         schema_map = getattr(self, "source_schema_map", None)
-        if not schema_map:
+        if not schema_map or not source_fqn:
             return None
-        schema_json = schema_map.get(source_fqn)
-        if not schema_json:
+        schema = schema_map.get(source_fqn)
+        if schema is None:
             return None
-        if isinstance(schema_json, str):
-            schema_json = json.loads(schema_json)
-        return StructType.fromJson(schema_json)
+        if isinstance(schema, StructType):
+            return schema
+        if isinstance(schema, str):
+            schema = json.loads(schema)
+        if isinstance(schema, dict):
+            return StructType.fromJson(schema)
+        return None
+
+    @staticmethod
+    def _flow_source_fqn(source_details):
+        """Build a multi-source CDC flow's source FQN from its
+        ``source_catalog`` / ``source_database`` / ``source_table`` keys (the
+        naming ``PipelineReaders.read_dlt_delta`` uses), matching how
+        ``_build_bronze_target_schema_map`` keys bronze targets. Returns
+        ``None`` when the flow source is not a catalog/db.table (e.g. a
+        cloudFiles path)."""
+        sd = _as_plain_dict(source_details)
+        db = sd.get("source_database")
+        table = sd.get("source_table")
+        if not db or not table:
+            return None
+        catalog = sd.get("source_catalog")
+        catalog_prefix = f"{catalog}." if catalog else ''
+        return f"{catalog_prefix}{db}.{table}"
+
+    def _combined_topology_schema_error(self, source_label):
+        """Actionable error for a combined-run silver policy schema that cannot
+        be resolved in-process (schemaless bronze, or a non-bronze source)."""
+        return (
+            f"Silver column policies (columnComments/columnMasks) on "
+            f"{self._get_target_table_name()} need the upstream schema at "
+            f"graph-construction time, but the source '{source_label}' has no "
+            f"declared schema available in-process during this combined "
+            f"'bronze_silver' run (the bronze table is produced in the same run "
+            f"and does not exist yet). Declare the bronze source schema "
+            f"(source_schema_path) for that source, or run bronze and silver as "
+            f"separate pipelines (the split topology, which reads the "
+            f"already-materialised bronze table)."
+        )
+
+    def _derive_schema_from_struct(self, source_struct, select_exp, where_clause, source_label):
+        """Apply a silver ``select_exp`` / ``where_clause`` to an EMPTY frame of
+        ``source_struct`` and return the resulting schema — deriving the silver
+        schema in-process with no physical read (issue #1). A referenced column
+        missing from the in-process bronze schema (e.g. added by a bronze
+        ``custom_transform_func``, or a reader column not captured by the
+        declared schema) surfaces as an ``AnalysisException`` here, which we
+        translate into an actionable combined-topology error rather than letting
+        it fall through to an opaque failure."""
+        df = self.spark.createDataFrame([], source_struct)
+        try:
+            if select_exp:
+                df = df.selectExpr(*select_exp)
+            df = self.__apply_where_clause(where_clause, df)
+        except AnalysisException as ae:
+            raise ValueError(
+                f"Silver column policies on {self._get_target_table_name()} in a "
+                f"combined 'bronze_silver' run: the silver transform references a "
+                f"column not present in the in-process bronze schema for source "
+                f"'{source_label}'. This happens when the column is added by a "
+                f"bronze custom_transform_func or a reader option not reflected "
+                f"in the declared bronze schema. Declare the column in the bronze "
+                f"source schema, or run bronze and silver as separate pipelines "
+                f"(split topology). Original error: {ae}"
+            ) from ae
+        return df.schema
+
+    def _read_flow_source_df(self, flow):
+        """Live-read one multi-source CDC flow's source into a DataFrame (split
+        topology only — the source table/files already exist). Mirrors the
+        reader dispatch in ``read_cdc_flows``."""
+        pipeline_reader = PipelineReaders(
+            self.spark,
+            flow.source_format,
+            flow.source_details,
+            flow.reader_options or {},
+            None,
+        )
+        sf = flow.source_format.lower()
+        if sf == "cloudfiles":
+            return pipeline_reader.read_dlt_cloud_files()
+        elif sf == "delta":
+            return pipeline_reader.read_dlt_delta()
+        elif sf in ("kafka", "eventhub"):
+            return pipeline_reader.read_kafka()
+        raise Exception(
+            f"cdcApplyChangesFlows.flows[{flow.name}].source_format"
+            f"={flow.source_format!r} is not supported by the runtime; "
+            f"allowed: cloudFiles, delta, kafka, eventhub"
+        )
+
+    def _merge_flow_schemas(self, per_flow_schemas):
+        """Verify every multi-source flow projects the same (name, type) columns
+        and return the shared schema. All flows land in ONE streaming table, so
+        their post-transform schemas must be compatible; a mismatch is a config
+        error surfaced clearly rather than a confusing DLT failure downstream."""
+        if not per_flow_schemas:
+            return None
+        ref_name, ref_schema = per_flow_schemas[0]
+        ref_fields = [(f.name, f.dataType) for f in ref_schema.fields]
+        for name, schema in per_flow_schemas[1:]:
+            fields = [(f.name, f.dataType) for f in schema.fields]
+            if fields != ref_fields:
+                raise ValueError(
+                    f"Multi-source AUTO CDC flows for {self._get_target_table_name()} "
+                    f"produce incompatible schemas after per-flow "
+                    f"select_exp/where_clause: flow '{ref_name}' yields "
+                    f"{ref_fields} but flow '{name}' yields {fields}. Every flow "
+                    f"landing in one streaming table must project the same "
+                    f"columns and types."
+                )
+        return ref_schema
+
+    def _get_silver_schema_from_cdc_flows(self):
+        """Derive the target schema for a multi-source AUTO CDC silver spec
+        (issue #294). Pure multi-source silver specs carry empty
+        ``sourceDetails`` and null ``selectExp`` — their real sources live in
+        ``cdcApplyChangesFlows`` — so single-source ``get_silver_schema`` would
+        build the FQN ``"."`` and fail. Resolve EACH flow's source against the
+        in-process bronze schema map (combined run) or a live read (split
+        topology), apply that flow's ``select_exp`` / ``where_clause``, and merge
+        the compatible per-flow schemas into the shared target schema (issue
+        #1 / BLOCKING: multi-source combined policy support)."""
+        group = self.cdcApplyChangesFlows
+        per_flow_schemas = []
+        for flow in group.flows:
+            fqn = self._flow_source_fqn(flow.source_details)
+            in_proc = self._get_inprocess_source_schema(fqn)
+            if in_proc is not None:
+                schema = self._derive_schema_from_struct(
+                    in_proc, flow.select_exp, flow.where_clause, fqn
+                )
+            elif self.combined_run:
+                raise ValueError(self._combined_topology_schema_error(
+                    fqn or f"flow '{flow.name}' (source_format={flow.source_format})"
+                ))
+            else:
+                # Split topology: the flow's source already exists — read it.
+                df = self._read_flow_source_df(flow)
+                if flow.select_exp:
+                    df = df.selectExpr(*flow.select_exp)
+                df = self.__apply_where_clause(flow.where_clause, df)
+                schema = df.schema
+            per_flow_schemas.append((flow.name, schema))
+        return self._merge_flow_schemas(per_flow_schemas)
 
     def get_silver_schema(self):
         """Get Silver table Schema."""
+        # Multi-source AUTO CDC silver specs (issue #294) carry their real
+        # sources in ``cdcApplyChangesFlows`` (empty sourceDetails / null
+        # selectExp), so resolve them per-flow.
+        if self.cdcApplyChangesFlows:
+            return self._get_silver_schema_from_cdc_flows()
         silver_dataflow_spec: SilverDataflowSpec = self.dataflowSpec
         source_details = self._get_source_details()
         source_cl = source_details.get('catalog', None)
@@ -635,15 +898,20 @@ class DataflowPipeline:
         # ``where`` transform against an empty frame — instead of issuing a live
         # ``spark.readStream.table(<bronze fqn>)`` that would raise
         # TABLE_OR_VIEW_NOT_FOUND. This removes the bronze→silver ordering
-        # dependency entirely (issue #1). The split bronze-then-silver topology
-        # (no in-process schema) keeps reading the already-materialised bronze
-        # table below, exactly as before.
+        # dependency entirely (issue #1).
         source_struct = self._get_inprocess_source_schema(source_fqn)
         if source_struct is not None:
-            raw_delta_table_stream = self.spark.createDataFrame(
-                [], source_struct
-            ).selectExpr(*select_exp)
-        elif self.uc_enabled:
+            return self._derive_schema_from_struct(
+                source_struct, select_exp, where_clause, source_fqn
+            )
+        # No in-process schema. In a combined run the bronze table does not exist
+        # yet, so a live read would raise TABLE_OR_VIEW_NOT_FOUND — fail fast with
+        # an actionable message instead (schemaless bronze / non-mapped source).
+        if self.combined_run:
+            raise ValueError(self._combined_topology_schema_error(source_fqn))
+        # Split bronze-then-silver topology: the bronze table already exists,
+        # read it live, exactly as before.
+        if self.uc_enabled:
             raw_delta_table_stream = self.spark.readStream.table(
                 source_fqn
             ).selectExpr(*select_exp)
@@ -1282,41 +1550,55 @@ class DataflowPipeline:
             )
             DataflowPipeline._launch_dlt_flow(
                 spark, "silver", silver_dataflowspec_list, silver_custom_transform_func,
-                silver_next_snapshot_and_version, source_schema_map=source_schema_map
+                silver_next_snapshot_and_version, source_schema_map=source_schema_map,
+                combined_run=True
             )
 
     @staticmethod
     def _build_bronze_target_schema_map(bronze_dataflowspec_list):
-        """Map each bronze target's fully-qualified table name to its declared
-        schema (StructType-JSON string), for in-process silver schema
-        resolution during a combined ``bronze_silver`` run.
+        """Map each bronze target's fully-qualified table name to its
+        reader-augmented TARGET schema (a ``StructType``), for in-process silver
+        schema resolution during a combined ``bronze_silver`` run.
 
-        Keyed to match how ``get_silver_schema`` builds the silver source FQN
-        (``catalog.database.table``, catalog omitted when absent). Bronze specs
-        with no declared schema are skipped — silver schema resolution then
-        falls back to the live table read (which, in the split topology, works
-        because the bronze table already exists).
+        The mapped schema is the declared source schema AUGMENTED with the
+        columns the bronze reader injects into the materialised target
+        (``_rescued_data``, autoloader metadata columns — see
+        :func:`augment_bronze_schema_with_reader_columns`), so a silver
+        ``selectExp`` that references such a valid bronze-target column resolves
+        against the in-process schema exactly as it would against the physical
+        table (BLOCKING #2: mapped schema must be the TARGET schema, not the raw
+        input schema).
+
+        Keyed to match how ``get_silver_schema`` / ``_flow_source_fqn`` build
+        the silver source FQN (``catalog.database.table``, catalog omitted when
+        absent). Bronze specs with no declared schema are skipped — silver
+        schema resolution then fails fast in a combined run (there is no schema
+        to resolve against) or reads the live table in the split topology.
         """
         schema_map = {}
         for spec in bronze_dataflowspec_list:
             if not isinstance(spec, BronzeDataflowSpec):
                 continue
-            schema = getattr(spec, "schema", None)
-            if not schema:
+            raw_schema = getattr(spec, "schema", None)
+            if not raw_schema:
                 continue
             target_details = spec.targetDetails
             if not target_details:
                 continue
+            declared = StructType.fromJson(
+                json.loads(raw_schema) if isinstance(raw_schema, str) else raw_schema
+            )
+            augmented = augment_bronze_schema_with_reader_columns(spec, declared)
             catalog = target_details.get('catalog', None)
             catalog_prefix = f"{catalog}." if catalog is not None else ''
             key = f"{catalog_prefix}{target_details['database']}.{target_details['table']}"
-            schema_map[key] = schema
+            schema_map[key] = augmented
         return schema_map
 
     @staticmethod
     def _launch_dlt_flow(
         spark, layer, dataflowspec_list, custom_transform_func=None, next_snapshot_and_version: Callable = None,
-        source_schema_map=None
+        source_schema_map=None, combined_run=False
     ):
         for dataflowSpec in dataflowspec_list:
             logger.info("Printing Dataflow Spec")
@@ -1359,7 +1641,8 @@ class DataflowPipeline:
                 quarantine_input_view_name,
                 custom_transform_func,
                 next_snapshot_and_version,
-                source_schema_map=source_schema_map
+                source_schema_map=source_schema_map,
+                combined_run=combined_run
             )
             dlt_data_flow.run_dlt()
 

@@ -78,13 +78,39 @@ A silver table derives its schema from its transform applied to the upstream
 bronze table. In a combined run the bronze table is *produced in the same run*
 and does not yet exist in Unity Catalog when the graph is built, so SDP-META
 does **not** read it to resolve the silver policy schema. Instead it derives the
-silver schema from the bronze dataflowspec's declared schema in-process (the
-`bronze_schema` you supply via `source_schema_path`), applying the silver
-`selectExp` / `whereClause` to it. This means a bronze table feeding a silver
-table with masks/comments **must have a declared schema** in a combined run
-(bronze without a declared schema falls back to reading the physical table,
-which only exists in the split topology). The split topology continues to read
-the already-materialised bronze table as before.
+silver schema from the bronze dataflowspec's declared schema in-process, then
+applies the silver transform to it:
+
+- **Effective (target) schema, not the raw input schema.** The mapped bronze
+  schema is the declared `source_schema_path` schema **augmented with the
+  columns the bronze reader injects into the materialised target** — the
+  `cloudFiles` rescued-data column (default `_rescued_data`, or your
+  `cloudFiles.rescuedDataColumn`) and any autoloader metadata columns
+  (`include_autoloader_metadata_column` / `select_metadata_cols`). So a silver
+  `selectExp` that references `_rescued_data` (or a metadata column) resolves in
+  a combined run exactly as it does against the physical table in the split
+  topology.
+- **Single-source and multi-source AUTO CDC.** For a standard silver spec the
+  `selectExp` / `whereClause` is applied to the bronze target schema. For a
+  **multi-source AUTO CDC** silver spec (`silver_cdc_apply_changes_flows`), each
+  flow's source is resolved against its bronze schema, that flow's `select_exp`
+  / `where_clause` is applied, and the per-flow schemas are merged (they must be
+  compatible — same columns and types — since all flows land in one streaming
+  table).
+
+**Requirements & fail-fast.** In a combined run a bronze source feeding a
+silver table with masks/comments **must have a declared schema**
+(`source_schema_path`). If it does not — or if the silver transform references a
+column that is not in the declared+augmented bronze schema (for example a column
+added by a bronze `custom_transform_func`, which is not statically knowable) —
+SDP-META **fails fast at graph-construction time** with an actionable error that
+names the split-pipeline workaround, rather than surfacing an opaque
+`TABLE_OR_VIEW_NOT_FOUND`. In those cases, declare the missing column in the
+bronze source schema, or run bronze and silver as **separate pipelines** (the
+split topology reads the already-materialised bronze table and has no such
+restriction). Note that a `selectExp` of `*` cannot be statically validated
+against a `custom_transform_func`'s output; prefer explicit column lists on a
+silver table that carries policies in a combined run.
 
 ## Rules & limitations
 
