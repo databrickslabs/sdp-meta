@@ -124,6 +124,38 @@ silver table that carries policies in a combined run.
   the transform, so masks work out of the box. A Bronze table with an inferred
   schema (no `bronze_schema`) cannot carry masks — supply a schema, or apply
   masks on the Silver table.
+- **Reader-injected columns are auto-appended to the bronze policy schema.**
+  On the standard (non-CDC) bronze write path, when comments/masks are
+  configured SDP-META renders an explicit schema so it can attach the DDL. DLT
+  otherwise infers the query schema — which includes the columns the reader
+  adds on top of your declared `source_schema_path` — so the two must match or
+  table creation fails with a schema-incompatibility error. You do **not** need
+  to hand-enumerate those reader columns in `source_schema_path`: SDP-META
+  augments the bronze policy schema to match what the reader produces. What IS
+  auto-appended (for a `cloudFiles` source):
+    - the **rescued-data column** — `_rescued_data`, or your custom
+      `cloudFiles.rescuedDataColumn` / `rescuedDataColumn` name — as `string`;
+    - when `include_autoloader_metadata_column` is set, the **file-metadata
+      column** (your `autoloader_metadata_col_name`, else `source_metadata`, or
+      `_metadata` when the flag is present-and-false) as the standard
+      file-metadata struct;
+    - any `select_metadata_cols` projections, typed from the `_metadata` struct
+      when they project one of its fields, else `string`.
+
+  Columns you already list in `source_schema_path` are never duplicated, and
+  the appended order matches the reader (declared columns first, then rescued
+  data, then the metadata struct, then the projected metadata columns).
+
+  What is **NOT** auto-augmented, so you must still declare it yourself (or
+  policies on it will fail):
+    - non-`cloudFiles` bronze sources (delta / kafka / eventhub) get no
+      reader-column augmentation — only the declared schema is used;
+    - columns added by a bronze `custom_transform_func` or a `select_exp` —
+      these are not statically knowable, so enumerate any policied ones in the
+      declared schema;
+    - the **CDC** bronze paths (`cdcApplyChanges` / multi-source AUTO CDC) and
+      the **DQE** write path are out of scope for this auto-augmentation — a
+      column policy there must match the schema those paths render.
 - **Quarantine tables** do not receive column masks in this version (masking
   rejected rows would hide the very values operators need to triage them, and
   the mask map is keyed to the main table's columns).

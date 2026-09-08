@@ -622,6 +622,24 @@ class DataflowPipeline:
             else False
         )
 
+        # Resolve the column-policy schema (``None`` unless comments/masks are
+        # configured — the feature gate). On the standard bronze write path DLT
+        # infers the query schema, which includes the reader-injected columns
+        # (``_rescued_data`` from ``cloudFiles.rescuedDataColumn`` and the
+        # autoloader metadata columns). The declared ``source_schema_path`` does
+        # NOT list those, so forcing the declared schema alone would fail table
+        # creation with a schema-incompatibility error (issue #2). Augment the
+        # policy schema with the SAME reader columns
+        # ``PipelineReaders.add_cloudfiles_metadata`` injects so the explicit
+        # schema matches DLT's inferred query schema. Strictly behind the
+        # policies-configured gate (``struct_schema is None`` when unused) and
+        # only for bronze — silver derives its schema from the transform.
+        struct_schema = self._resolve_policy_schema()
+        if is_bronze and struct_schema is not None:
+            struct_schema = augment_bronze_schema_with_reader_columns(
+                self.dataflowSpec, struct_schema
+            )
+
         dp.table(
             self.write_to_delta,
             name=f"{target_table}",
@@ -632,7 +650,7 @@ class DataflowPipeline:
             path=target_path,
             comment=comment,
             row_filter=self._get_row_filter(),
-            schema=self._apply_column_policies(self._resolve_policy_schema()),
+            schema=self._apply_column_policies(struct_schema),
         )
 
     def write_layer_table(self):

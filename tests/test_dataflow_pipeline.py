@@ -2871,6 +2871,107 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
         pipeline.get_silver_schema.assert_called()
 
     # ------------------------------------------------------------------
+    # Issue #2: the standard (non-CDC) bronze write path must augment the
+    # column-policy schema with the reader-injected columns
+    # (``_rescued_data`` / autoloader metadata), so the forced explicit
+    # schema matches DLT's inferred query schema instead of failing table
+    # creation with a schema-incompatibility error.
+    # ------------------------------------------------------------------
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_write_bronze_standard_augments_policy_schema_with_reader_columns(self, mock_dlt):
+        """A cloudFiles bronze spec with rescuedDataColumn + autoloader metadata
+        and column comments/masks, whose declared source schema does NOT list
+        ``_rescued_data``, forces an explicit schema that DOES include the
+        reader-injected columns — matching what the reader produces."""
+        from pyspark.sql.types import StructType, StructField, StringType
+        mock_dlt.table = MagicMock(return_value=lambda func: func)
+        self.spark.conf.set("spark.databricks.unityCatalog.enabled", "True")
+        self.addCleanup(self.spark.conf.unset, "spark.databricks.unityCatalog.enabled")
+        spec = BronzeDataflowSpec(**copy.deepcopy(DataflowPipelineTests.bronze_dataflow_spec_map))
+        spec.cdcApplyChanges = None
+        spec.applyChangesFromSnapshot = None
+        spec.dataQualityExpectations = None
+        spec.appendFlows = []
+        spec.sourceFormat = "cloudFiles"
+        spec.readerConfigOptions = {"cloudFiles.rescuedDataColumn": "_rescued_data"}
+        spec.sourceDetails = {"path": "/x", "source_metadata": json.dumps({
+            "include_autoloader_metadata_column": "true",
+            "autoloader_metadata_col_name": "src_meta",
+        })}
+        # Declared schema deliberately OMITS the reader-injected columns.
+        spec.columnComments = json.dumps({"id": "the id"})
+        spec.columnMasks = json.dumps({"id": "cat.s.mask_id"})
+        view_name = f"{spec.targetDetails['table']}_inputview"
+        pipeline = DataflowPipeline(self.spark, spec, view_name, None)
+        pipeline.read_bronze = MagicMock()
+        pipeline.schema_json = StructType([
+            StructField("id", StringType(), True),
+            StructField("name", StringType(), True),
+        ]).jsonValue()
+
+        # Capture the StructType handed to _apply_column_policies so we can
+        # assert the exact ordered (name, type) of the augmented policy schema.
+        captured = {}
+        original_apply = pipeline._apply_column_policies
+
+        def _spy(struct_schema):
+            captured["schema"] = struct_schema
+            return original_apply(struct_schema)
+
+        pipeline._apply_column_policies = _spy
+        pipeline.write_bronze()
+
+        aug = captured["schema"]
+        self.assertIsInstance(aug, StructType)
+        # Exact ordered (name, type): declared first, then _rescued_data, then
+        # the renamed autoloader metadata struct — mirroring the reader.
+        self.assertEqual(
+            [(f.name, type(f.dataType)) for f in aug.fields],
+            [
+                ("id", StringType),
+                ("name", StringType),
+                ("_rescued_data", StringType),
+                ("src_meta", StructType),
+            ],
+        )
+        # End-to-end: dp.table received a DDL-string schema (masks force DDL)
+        # carrying the reader-injected column and the policy clauses.
+        _, kwargs = mock_dlt.table.call_args
+        self.assertIsInstance(kwargs["schema"], str)
+        self.assertIn("_rescued_data", kwargs["schema"])
+        self.assertIn("src_meta", kwargs["schema"])
+        self.assertIn("MASK cat.s.mask_id", kwargs["schema"])
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_write_bronze_standard_no_policies_forces_no_schema(self, mock_dlt):
+        """A non-policy bronze pipeline is unchanged: no schema is forced on
+        dp.table even for a cloudFiles source with a declared schema_json."""
+        from pyspark.sql.types import StructType, StructField, StringType
+        mock_dlt.table = MagicMock(return_value=lambda func: func)
+        self.spark.conf.set("spark.databricks.unityCatalog.enabled", "True")
+        self.addCleanup(self.spark.conf.unset, "spark.databricks.unityCatalog.enabled")
+        spec = BronzeDataflowSpec(**copy.deepcopy(DataflowPipelineTests.bronze_dataflow_spec_map))
+        spec.cdcApplyChanges = None
+        spec.applyChangesFromSnapshot = None
+        spec.dataQualityExpectations = None
+        spec.appendFlows = []
+        spec.sourceFormat = "cloudFiles"
+        spec.readerConfigOptions = {"cloudFiles.rescuedDataColumn": "_rescued_data"}
+        spec.sourceDetails = {"path": "/x"}
+        spec.columnComments = None
+        spec.columnMasks = None
+        view_name = f"{spec.targetDetails['table']}_inputview"
+        pipeline = DataflowPipeline(self.spark, spec, view_name, None)
+        pipeline.read_bronze = MagicMock()
+        pipeline.schema_json = StructType([
+            StructField("id", StringType(), True),
+        ]).jsonValue()
+        pipeline.write_bronze()
+        _, kwargs = mock_dlt.table.call_args
+        self.assertIsNone(kwargs["schema"])
+
+    # ------------------------------------------------------------------
     # Issue #1: combined bronze_silver + silver column policies must NOT
     # depend on the not-yet-materialised bronze table. The silver schema is
     # derived from the bronze dataflowspec's declared schema, threaded
