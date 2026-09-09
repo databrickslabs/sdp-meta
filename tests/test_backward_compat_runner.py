@@ -323,6 +323,42 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
                 output,
             )
 
+    @patch("integration_tests.run_backward_compat_tests.time.sleep")
+    def test_download_phase_output_retries_transient_download_failure(
+        self, sleep
+    ):
+        self.ws.workspace.download.side_effect = [
+            OSError("temporary workspace error"),
+            BytesIO(b',0\n0,"A compatibility invariant. Passed!"\n'),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = os.path.join(tmp, "phase2.csv")
+
+            self.assertEqual(
+                self.runner.download_phase_output("/Workspace/phase2.csv", output),
+                output,
+            )
+
+        self.assertEqual(self.ws.workspace.download.call_count, 2)
+        sleep.assert_called_once_with(2)
+
+    @patch("integration_tests.run_backward_compat_tests.time.sleep")
+    def test_download_phase_output_reports_exhausted_retries(self, sleep):
+        self.ws.workspace.download.side_effect = OSError(
+            "temporary workspace error"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            output = os.path.join(tmp, "phase2.csv")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "after 3 attempts; validation status is unavailable",
+            ):
+                self.runner.download_phase_output("/Workspace/phase2.csv", output)
+
+        self.assertEqual(self.ws.workspace.download.call_count, 3)
+        self.assertEqual(sleep.call_args_list, [mock_call(2), mock_call(4)])
+
     def test_compat_wheelhouse_requires_local_cross_namespace_upgrade(self):
         self.ws.current_user.me.return_value = SimpleNamespace(
             user_name="test@example.com"

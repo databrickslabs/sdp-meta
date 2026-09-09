@@ -37,6 +37,8 @@ phase1_counts = {}
 for table, expected in EXPECTED_COUNTS.items():
     actual = spark.sql(f"SELECT count(*) AS cnt FROM {table}").collect()[0].cnt
     phase1_counts[table] = int(actual)
+    # Validation contract: run_backward_compat_tests.py scans persisted report
+    # cells for the exact "Failed!" marker. Keep this status wording unchanged.
     status = "Passed" if int(actual) == expected else "Failed"
     log_list.append(
         f"Phase1 count {table}: expected={expected} actual={actual}. {status}!"

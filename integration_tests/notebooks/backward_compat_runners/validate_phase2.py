@@ -55,6 +55,9 @@ target_package_version = dbutils.widgets.get("target_package_version")
 
 log_list = []
 log_list.append("Backward-compat Phase 2 (v0.1.0 upgrade) validation starting.")
+# Validation contract: run_backward_compat_tests.py scans persisted report cells
+# for the exact "Failed!" marker. Keep that wording on every failure written
+# to log_list; checks that raise directly are enforced by the failed task.
 
 # Whenever a target package version is pinned (compat_wheelhouse mode, or
 # install_mode=pypi where Phase 2 installed dlt-meta==<version> from the

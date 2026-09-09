@@ -1331,6 +1331,9 @@ class EndToEndRenderTests(unittest.TestCase):
                 flow["bronze_database_quarantine_dev"],
                 "main.sdp_meta_bronze",
             )
+            self.assertEqual(flow["bronze_quarantine_table_path_dev"], "")
+            self.assertEqual(flow["bronze_quarantine_table_properties"], {})
+            self.assertEqual(flow["bronze_quarantine_table_cluster_by"], [])
 
         # Strip seeded `<your-...>` placeholders before the sanity-check
         # comparison: the helper's job is "rendered bundle is structurally

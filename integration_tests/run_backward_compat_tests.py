@@ -120,6 +120,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import traceback
 import uuid
 import warnings
@@ -368,6 +369,11 @@ class BackwardCompatRunner:
     # compat_wheelhouse. Without it a stalled PyPI/proxy fetch would hang
     # the whole orchestrator with no diagnostic.
     COMPAT_DOWNLOAD_TIMEOUT_SEC = 600
+    PHASE_OUTPUT_DOWNLOAD_ATTEMPTS = 3
+    PHASE_OUTPUT_RETRY_DELAY_SEC = 2
+    # Contract with validate_phase1.py and validate_phase2.py: validation
+    # failures are persisted as human-readable rows containing this marker.
+    VALIDATION_FAILURE_MARKER = "Failed!"
 
     def __init__(self, args: dict, ws: WorkspaceClient) -> None:
         self.args = args
@@ -1624,9 +1630,28 @@ class BackwardCompatRunner:
 
     def download_phase_output(self, ws_path: str, local_name: str) -> str:
         """Download a phase report and fail if it contains failed assertions."""
-        payload = self.ws.workspace.download(ws_path)
+        content = None
+        for attempt in range(1, self.PHASE_OUTPUT_DOWNLOAD_ATTEMPTS + 1):
+            try:
+                payload = self.ws.workspace.download(ws_path)
+                content = payload.read()
+                break
+            except Exception as exc:
+                if attempt == self.PHASE_OUTPUT_DOWNLOAD_ATTEMPTS:
+                    raise RuntimeError(
+                        f"Could not download backward-compat validation report "
+                        f"{ws_path!r} after {attempt} attempts; validation status "
+                        "is unavailable."
+                    ) from exc
+                print(
+                    f"  validation report download attempt {attempt} failed "
+                    f"for {ws_path}: {exc}; retrying..."
+                )
+                time.sleep(self.PHASE_OUTPUT_RETRY_DELAY_SEC * attempt)
+
+        assert content is not None
         with open(local_name, "wb") as out:
-            out.write(payload.read())
+            out.write(content)
         print(f"  downloaded -> {local_name}")
 
         with open(local_name, newline="", encoding="utf-8") as report:
@@ -1634,7 +1659,7 @@ class BackwardCompatRunner:
                 cell
                 for row in csv.reader(report)
                 for cell in row
-                if "Failed!" in cell
+                if self.VALIDATION_FAILURE_MARKER in cell
             ]
         if failures:
             details = "\n".join(f"  - {failure}" for failure in failures)
