@@ -159,17 +159,31 @@ silver table that carries policies in a combined run.
 - **Quarantine tables** do not receive column masks in this version (masking
   rejected rows would hide the very values operators need to triage them, and
   the mask map is keyed to the main table's columns).
-- **SCD type 2 snapshot targets are not supported.** Column comments/masks on
-  an `apply_changes_from_snapshot` target with `scd_type: 2` raise an error at
-  runtime. An SCD2 table carries DLT-managed `__START_AT` / `__END_AT` system
-  columns typed to the snapshot *version*; unlike the regular CDC path, the
-  snapshot config has no `sequence_by` to derive that type from (it is decided
-  at runtime by the snapshot source), so a complete explicit schema cannot be
-  built. Rather than emit a schema missing those columns (which would break
-  table creation) or silently drop a mask, the pipeline fails closed. Use
-  **SCD type 1** for column policies on a snapshot target, or apply the
-  `COMMENT` / `MASK` with a separate `ALTER TABLE` after the table is created.
-  SCD1 snapshot targets are unaffected.
+- **SCD type 2 snapshot targets require a declared version type.** An SCD2
+  `apply_changes_from_snapshot` table carries DLT-managed `__START_AT` /
+  `__END_AT` system columns typed to the snapshot *version*. Unlike the regular
+  CDC path, the snapshot config has no `sequence_by` to derive that type from
+  (the version is produced at runtime by the `next_snapshot_and_version`
+  callable / snapshot source and cannot be introspected safely at graph-build
+  time), so the type must be declared explicitly:
+    - Set `snapshot_version_type` on the `apply_changes_from_snapshot` block to
+      a canonical Spark/DDL type string (e.g. `"long"` or `"timestamp"`). The
+      pipeline then injects correctly-typed `__START_AT` / `__END_AT` into the
+      explicit schema and attaches the comments/masks. **The version returned
+      at runtime MUST conform to this declared type** — a mismatch surfaces as
+      an explicit table-create / insert failure (validatable), not a silently
+      wrong schema.
+    - The **first-party Delta snapshot-source mode** (`snapshot_format: delta`)
+      contractually guarantees the version is the Delta commit version, so it
+      defaults `snapshot_version_type` to `long` when none is declared. A custom
+      `next_snapshot_and_version` callback does **not** get this default, even
+      if it happens to read Delta.
+    - When neither a declared type nor the Delta-source mode applies (or no
+      schema is available to attach the policies to), the pipeline **fails
+      closed** rather than emit a schema missing those columns or silently drop
+      a mask. Use **SCD type 1** for column policies on a snapshot target, or
+      apply the `COMMENT` / `MASK` with a separate `ALTER TABLE` after the table
+      is created. SCD1 snapshot targets are unaffected.
 
 ## Related
 

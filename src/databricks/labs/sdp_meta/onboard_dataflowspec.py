@@ -26,6 +26,7 @@ from databricks.labs.sdp_meta.identifiers import (
     validate_column_masks,
     validate_scd_type,
     validate_sequence_by,
+    validate_snapshot_version_type,
     validate_source_format,
     validate_sql_where_clause,
     validate_uc_column_list,
@@ -610,6 +611,20 @@ class OnboardDataflowspec:
                                 cdc_block[col_field],
                                 kind=f"flow {flow_id} {cdc_field}.{col_field}",
                             )
+                    # snapshot_version_type is only meaningful on the
+                    # apply_changes_from_snapshot block (there is no sequence_by
+                    # there to derive the SCD2 __START_AT/__END_AT type from).
+                    # Validate it parses to a real Spark DataType so garbage is
+                    # caught at onboarding rather than at pipeline create.
+                    if (
+                        cdc_field.endswith("apply_changes_from_snapshot")
+                        and cdc_block.get("snapshot_version_type")
+                    ):
+                        _check(
+                            validate_snapshot_version_type,
+                            cdc_block["snapshot_version_type"],
+                            kind=f"flow {flow_id} {cdc_field}.snapshot_version_type",
+                        )
 
                 # Each append flow has its own source_format which drives
                 # a separate read path; validate every one.

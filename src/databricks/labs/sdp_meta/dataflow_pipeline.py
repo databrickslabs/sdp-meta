@@ -12,6 +12,7 @@ from databricks.labs.sdp_meta.dataflow_spec import BronzeDataflowSpec, SilverDat
 from databricks.labs.sdp_meta.pipeline_writers import AppendFlowWriter, DLTSinkWriter
 from databricks.labs.sdp_meta.__about__ import __version__
 from databricks.labs.sdp_meta.pipeline_readers import PipelineReaders
+from databricks.labs.sdp_meta.identifiers import parse_sequence_by_columns
 
 logger = logging.getLogger('databricks.labs.sdp_meta')
 logger.setLevel(logging.INFO)
@@ -1076,17 +1077,44 @@ class DataflowPipeline:
         # snapshot targets have no such system columns and keep working; SCD2
         # with no policies is unaffected. See docs/docs/guides/column-policies.md.
         has_policies = bool(self._get_column_comments()) or bool(self._get_column_masks())
+        struct_schema = self._resolve_policy_schema()
         if has_policies and str(self.applyChangesFromSnapshot.scd_type) == "2":
+            # Determine the snapshot version type for the DLT-managed
+            # __START_AT / __END_AT system columns. It is an EXPLICIT contract
+            # (declared snapshot_version_type), or LONG for the first-party
+            # Delta snapshot-source mode that contractually guarantees the
+            # Delta commit version. When neither is available we keep the
+            # original fail-closed error (below).
+            version_type = self._resolve_snapshot_version_type()
+            if version_type is not None:
+                # INJECT the system columns into the explicit schema via the
+                # SAME build-new-StructType mechanism as the regular CDC path
+                # (Fix 1): __END_AT nullable, __START_AT following the version
+                # nullability. When the policy schema is unavailable (e.g. an
+                # inferred-schema Bronze target) there is nothing to attach the
+                # policies to; fall through to the fail-closed error so masks
+                # are never silently dropped.
+                if struct_schema is not None:
+                    struct_schema = self._with_scd2_system_columns(
+                        struct_schema, version_type, start_at_nullable=True
+                    )
+                    self.create_streaming_table(struct_schema, target_path)
+                    self._create_auto_cdc_from_snapshot_flow()
+                    return
             raise ValueError(
                 "column_comments / column_masks are not supported on an SCD2 "
-                f"apply_changes_from_snapshot target ({self._get_target_table_name()}). "
+                f"apply_changes_from_snapshot target ({self._get_target_table_name()}) "
+                "without a declared snapshot_version_type. "
                 "SCD2 snapshot targets require DLT-managed __START_AT / __END_AT "
                 "system columns whose type is the snapshot version and cannot be "
                 "derived here (apply_changes_from_snapshot has no sequence_by), so "
                 "an explicit schema carrying the policies would omit them and break "
-                "target-table creation. Use SCD type 1 for column policies on a "
-                "snapshot target, or apply the COMMENT / MASK with a separate ALTER "
-                "TABLE after the pipeline creates the table."
+                "target-table creation. Declare the version type via "
+                "apply_changes_from_snapshot.snapshot_version_type (e.g. 'long' or "
+                "'timestamp') AND provide a schema (Bronze source schema, or a "
+                "Silver transform-derived schema), use SCD type 1 for column "
+                "policies on a snapshot target, or apply the COMMENT / MASK with a "
+                "separate ALTER TABLE after the pipeline creates the table."
             )
         # Wire in the declared (Bronze ``schema_json``) / derived (Silver
         # transform) schema so column comments/masks are applied to the
@@ -1096,8 +1124,34 @@ class DataflowPipeline:
         # ``create_streaming_table(None, ...)`` behaviour — a masks-only
         # inferred-schema SCD1 target still fails closed via
         # ``_apply_column_policies(None)``.
-        struct_schema = self._resolve_policy_schema()
         self.create_streaming_table(struct_schema, target_path)
+        self._create_auto_cdc_from_snapshot_flow()
+
+    def _resolve_snapshot_version_type(self):
+        """Return the SCD2 snapshot version ``DataType`` to declare, or ``None``.
+
+        Precedence:
+          1. An explicit ``snapshot_version_type`` declared on the spec — the
+             general contract. Parsed to a real Spark ``DataType`` (validated
+             at onboarding). The runtime version MUST conform to it; a mismatch
+             surfaces as an explicit create/insert failure.
+          2. ``LongType`` for the first-party Delta snapshot-source mode
+             (``snapshot_format == "delta"``), which CONTRACTUALLY guarantees
+             the version is the Delta commit version (a ``long``). We do NOT
+             infer ``LONG`` merely because a ``next_snapshot_and_version``
+             callback happens to read Delta — only this declared source mode.
+          3. ``None`` otherwise — the caller keeps the fail-closed error.
+        """
+        declared = getattr(self.applyChangesFromSnapshot, "snapshot_version_type", None)
+        if declared:
+            from pyspark.sql.types import _parse_datatype_string
+            return _parse_datatype_string(declared)
+        if self.snapshot_source_format == "delta":
+            return LongType()
+        return None
+
+    def _create_auto_cdc_from_snapshot_flow(self):
+        """Register the snapshot CDC flow against the (already created) target."""
         target_cl = self.dataflowSpec.targetDetails.get('catalog', None)
         target_db_name = self.dataflowSpec.targetDetails['database']
         target_table_name = self.dataflowSpec.targetDetails['table']
@@ -1344,11 +1398,14 @@ class DataflowPipeline:
         target_table_name = self.dataflowSpec.targetDetails['table']
         target_table = self._build_table_name(target_cl, target_db_name, target_table_name)
 
-        # Handle comma-separated sequence columns using struct
-        sequence_by = cdc_apply_changes.sequence_by
-        if ',' in sequence_by:
-            sequence_cols = [col.strip() for col in sequence_by.split(',')]
-            sequence_by = struct(*sequence_cols)  # Use struct() from pyspark.sql.functions
+        # Handle comma-separated sequence columns using struct. Parse via the
+        # shared helper so the apply-time struct(*cols) and the schema-time
+        # __START_AT/__END_AT type derivation (modify_schema_for_cdc_changes)
+        # operate on the SAME validated column list.
+        sequence_cols = parse_sequence_by_columns(cdc_apply_changes.sequence_by)
+        sequence_by = (
+            struct(*sequence_cols) if len(sequence_cols) > 1 else sequence_cols[0]
+        )
 
         dp.create_auto_cdc_flow(
             target=target_table,
@@ -1421,13 +1478,17 @@ class DataflowPipeline:
         apply_as_truncates = expr(group.apply_as_truncates) if group.apply_as_truncates else None
 
         # Composite sequence_by ("ts,id") => struct(ts, id), same as the
-        # single-flow path. The first column is also what
-        # ``modify_schema_for_cdc_changes`` uses for the SCD2 timestamp
-        # dtype lookup, so the two stay aligned.
-        sequence_by = group.sequence_by
-        if ',' in sequence_by:
-            sequence_cols = [c.strip() for c in sequence_by.split(',')]
-            sequence_by = struct(*sequence_cols)
+        # single-flow path. Both this apply-time struct(*cols) and the
+        # SCD2 __START_AT/__END_AT type derivation in
+        # ``modify_schema_for_cdc_changes`` parse the spec through the SAME
+        # ``parse_sequence_by_columns`` helper and consume the identical
+        # column list, so the declared schema mirrors exactly what DLT
+        # materialises. (Previously the schema path looked up only the first
+        # column's scalar type, which did NOT match struct(ts,id).)
+        sequence_cols = parse_sequence_by_columns(group.sequence_by)
+        sequence_by = (
+            struct(*sequence_cols) if len(sequence_cols) > 1 else sequence_cols[0]
+        )
 
         target_table = self._get_target_table_name()
 
@@ -1467,33 +1528,94 @@ class DataflowPipeline:
         if struct_schema is None:
             return None
 
-        # Resolve the sequence-by column's dtype up front, independent of
-        # ``except_column_list``. Previously this lookup lived *inside* the
-        # ``if except_column_list:`` block, so an SCD2 table with an explicit
-        # schema but no except-list never got its __START_AT/__END_AT columns
-        # appended. The lookup uses the full (pre-prune) schema; the sequence
-        # column is never a member of except_column_list, so ordering is safe.
-        sequence_by = cdc_apply_changes.sequence_by.strip()
-        sequence_lookup_col = (
-            sequence_by if ',' not in sequence_by
-            else sequence_by.split(',', 1)[0].strip()
-        )
-        name_to_dtype = {f.name: f.dataType for f in struct_schema.fields}
-        sequenced_by_data_type = name_to_dtype.get(sequence_lookup_col)
+        # Parse sequence_by ONCE into the validated list of bare column names.
+        # This is the SAME list the apply-time paths (cdc_apply_changes /
+        # cdc_apply_changes_flows) feed to ``struct(*cols)``, so the SCD2
+        # system-column type derived from it mirrors exactly what DLT
+        # materialises. The derivation below uses the full (pre-prune) schema,
+        # so it still resolves the type even when a sequence column is itself
+        # listed in except_column_list.
+        sequence_cols = parse_sequence_by_columns(cdc_apply_changes.sequence_by)
 
+        # Prune except_column_list off a COPY of the fields. NEVER mutate
+        # ``struct_schema`` in place: on the silver path it is
+        # ``self.silver_schema`` (shared and cached across refreshes/targets),
+        # so an in-place ``.add()`` would corrupt it for every later use.
         if cdc_apply_changes.except_column_list:
-            # Hoist per-field-invariant work out of the loop. On wide schemas
-            # (hundreds of columns) the previous O(N*M) membership check plus
-            # repeated string parsing dominated graph build time.
             except_set = set(cdc_apply_changes.except_column_list)
-            struct_schema = StructType(
-                [f for f in struct_schema.fields if f.name not in except_set]
-            )
+            pruned_fields = [f for f in struct_schema.fields if f.name not in except_set]
+        else:
+            pruned_fields = list(struct_schema.fields)
+        pruned_schema = StructType(pruned_fields)
 
-        if struct_schema and cdc_apply_changes.scd_type == "2" and sequenced_by_data_type is not None:
-            struct_schema.add(StructField("__START_AT", sequenced_by_data_type))
-            struct_schema.add(StructField("__END_AT", sequenced_by_data_type))
-        return struct_schema
+        if cdc_apply_changes.scd_type != "2":
+            return pruned_schema
+
+        # Derive the __START_AT/__END_AT type from the (pre-prune) source
+        # schema so it matches the apply-time value exactly. ``None`` means a
+        # sequence column isn't a top-level field (e.g. a nested/dotted ref)
+        # and we can't declare a correct type — skip the system columns rather
+        # than declare a wrong one (previous behaviour when the lookup missed).
+        derived = self._derive_scd2_sequence_type(struct_schema, sequence_cols)
+        if derived is None:
+            return pruned_schema
+        start_at_type, start_at_nullable = derived
+        return self._with_scd2_system_columns(
+            pruned_schema, start_at_type, start_at_nullable=start_at_nullable
+        )
+
+    @staticmethod
+    def _derive_scd2_sequence_type(struct_schema, sequence_cols):
+        """Return ``(dataType, nullable)`` for the SCD2 ``__START_AT`` column,
+        mirroring EXACTLY what the apply-time sequence expression materialises.
+
+        * 1 column -> the source ``StructField``'s ``dataType`` (a scalar),
+          following its nullability. Apply time passes the bare column name (a
+          scalar), so DLT stamps that scalar type.
+        * N columns -> a ``StructType`` built from the corresponding source
+          ``StructField``s in DECLARED order (names / types / nested
+          nullability / metadata copied verbatim), because apply time wraps
+          them in ``struct(*cols)`` and Spark's ``struct()`` preserves each
+          referenced field verbatim. The struct expression itself is
+          non-nullable.
+
+        Returns ``None`` if any sequence column is absent from the top-level
+        schema (a nested/dotted reference), signalling the caller to skip the
+        system columns rather than declare a wrong type.
+        """
+        name_to_field = {f.name: f for f in struct_schema.fields}
+        try:
+            seq_fields = [name_to_field[col] for col in sequence_cols]
+        except KeyError:
+            return None
+        if len(seq_fields) == 1:
+            field = seq_fields[0]
+            return field.dataType, field.nullable
+        nested = StructType([
+            StructField(f.name, f.dataType, f.nullable, f.metadata)
+            for f in seq_fields
+        ])
+        return nested, False
+
+    @staticmethod
+    def _with_scd2_system_columns(struct_schema, start_at_type, *, start_at_nullable):
+        """Return a NEW ``StructType`` with SCD2 ``__START_AT`` / ``__END_AT``
+        appended to ``struct_schema``.
+
+        Never mutates ``struct_schema`` (it may be a shared/cached schema such
+        as ``self.silver_schema``); a fresh ``StructType`` is always built.
+        ``__END_AT`` is DELIBERATELY nullable — current/open records carry
+        ``NULL`` there — regardless of the sequence/version nullability;
+        ``__START_AT`` follows the sequence/version nullability. Shared by the
+        regular CDC path (Fix 1) and the snapshot-CDC path (Fix 2).
+        """
+        return StructType(
+            list(struct_schema.fields)
+            + [
+                StructField("__START_AT", start_at_type, start_at_nullable),
+                StructField("__END_AT", start_at_type, True),
+            ]
+        )
 
     def create_streaming_table(self, struct_schema, target_path=None):
         expect_all_dict, expect_all_or_drop_dict, expect_all_or_fail_dict = self.get_dq_expectations()

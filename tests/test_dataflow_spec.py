@@ -1335,6 +1335,37 @@ class DataFlowSpecTests(SDPFrameworkTestCase):
         self.assertEqual(result.track_history_column_list, None)
         self.assertEqual(result.track_history_except_column_list, None)
 
+    def test_get_apply_changes_from_snapshot_snapshot_version_type_defaults_none(self):
+        """snapshot_version_type defaults to None when absent (legacy rows)."""
+        apply_changes_from_snapshot = """{"keys": ["id"], "scd_type": "2"}"""
+        result = DataflowSpecUtils.get_apply_changes_from_snapshot(apply_changes_from_snapshot)
+        self.assertIsNone(result.snapshot_version_type)
+
+    def test_get_apply_changes_from_snapshot_snapshot_version_type_present(self):
+        """A declared snapshot_version_type flows through to the dataclass."""
+        apply_changes_from_snapshot = (
+            """{"keys": ["id"], "scd_type": "2", "snapshot_version_type": "long"}"""
+        )
+        result = DataflowSpecUtils.get_apply_changes_from_snapshot(apply_changes_from_snapshot)
+        self.assertEqual(result.snapshot_version_type, "long")
+
+    def test_validate_snapshot_version_type_valid(self):
+        """Valid DDL type strings parse to a canonical Spark type."""
+        from databricks.labs.sdp_meta.identifiers import validate_snapshot_version_type
+        self.assertEqual(validate_snapshot_version_type("long"), "bigint")
+        self.assertEqual(validate_snapshot_version_type("bigint"), "bigint")
+        self.assertEqual(validate_snapshot_version_type("timestamp"), "timestamp")
+
+    def test_validate_snapshot_version_type_rejects_garbage(self):
+        from databricks.labs.sdp_meta.identifiers import validate_snapshot_version_type
+        with self.assertRaisesRegex(ValueError, r"not a valid Spark/DDL type"):
+            validate_snapshot_version_type("blabla")
+
+    def test_validate_snapshot_version_type_rejects_empty(self):
+        from databricks.labs.sdp_meta.identifiers import validate_snapshot_version_type
+        with self.assertRaisesRegex(ValueError, r"non-empty"):
+            validate_snapshot_version_type("")
+
     def test_get_sinks_missing_mandatory_attributes(self):
         """Test get_sinks with missing mandatory attributes to cover lines 459-461."""
         sink_spec = """[{
