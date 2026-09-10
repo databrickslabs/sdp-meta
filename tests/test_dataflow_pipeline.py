@@ -1349,6 +1349,98 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
         self.assertTrue(out["__END_AT"].nullable)
 
     @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_modify_schema_for_cdc_changes_single_struct_typed_sequence_preserves_nesting(self, mock_dlt):
+        """A non-scalar (struct-typed) single sequence column must keep its
+        nested nullability/metadata: the derivation copies the source
+        StructField's dataType OBJECT directly, so __START_AT equals the column
+        itself (df.select(col)) — including a NOT-NULL nested field."""
+        from pyspark.sql.functions import col as _col
+        cdc_apply_changes = DataflowSpecUtils.get_cdc_apply_changes(json.dumps({
+            "keys": ["id"],
+            "sequence_by": "ver",
+            "scd_type": "2",
+        }))
+        # ``ver`` is itself a struct with a NOT-NULL nested field carrying
+        # metadata — the shape that a naive rebuild would flatten/lose.
+        ver_type = T.StructType([
+            T.StructField("seq", T.LongType(), False, {"note": "n"}),
+            T.StructField("sub", T.TimestampType(), True),
+        ])
+        schema = T.StructType([
+            T.StructField("id", T.StringType(), True),
+            T.StructField("ver", ver_type, True),
+        ])
+        spec = BronzeDataflowSpec(**copy.deepcopy(self.bronze_dataflow_spec_map))
+        spec.schema = json.dumps(schema.jsonValue())
+        spec.dataQualityExpectations = None
+        pipeline = DataflowPipeline(
+            self.spark, spec,
+            f"{spec.targetDetails['table']}_inputview", None,
+        )
+        out = pipeline.modify_schema_for_cdc_changes(cdc_apply_changes)
+        expected = (
+            self.spark.createDataFrame([], schema)
+            .select(_col("ver").alias("x"))
+            .schema[0]
+            .dataType
+        )
+        self.assertEqual(out["__START_AT"].dataType, expected)
+        self.assertEqual(out["__END_AT"].dataType, expected)
+        # Nested structure preserved verbatim (including the NOT-NULL field).
+        self.assertIsInstance(out["__START_AT"].dataType, T.StructType)
+        self.assertFalse(out["__START_AT"].dataType["seq"].nullable)
+        self.assertEqual(out["__START_AT"].dataType["seq"].metadata, {"note": "n"})
+        self.assertTrue(out["__END_AT"].nullable)
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_modify_schema_for_cdc_changes_dotted_sequence_scd2_raises(self, mock_dlt):
+        """A dotted sequence_by on an SCD2 explicit-schema target is REJECTED
+        with a clear error rather than silently omitting __START_AT/__END_AT
+        (which would emit an incomplete schema and break table creation)."""
+        cdc_apply_changes = DataflowSpecUtils.get_cdc_apply_changes(json.dumps({
+            "keys": ["id"],
+            "sequence_by": "_metadata.file_path",
+            "scd_type": "2",
+        }))
+        schema = T.StructType([
+            T.StructField("id", T.StringType(), True),
+            T.StructField("ts", T.TimestampType(), True),
+        ])
+        spec = BronzeDataflowSpec(**copy.deepcopy(self.bronze_dataflow_spec_map))
+        spec.schema = json.dumps(schema.jsonValue())
+        spec.dataQualityExpectations = None
+        pipeline = DataflowPipeline(
+            self.spark, spec,
+            f"{spec.targetDetails['table']}_inputview", None,
+        )
+        with self.assertRaisesRegex(ValueError, r"dotted sequence_by"):
+            pipeline.modify_schema_for_cdc_changes(cdc_apply_changes)
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_modify_schema_for_cdc_changes_dotted_sequence_scd1_ok(self, mock_dlt):
+        """A dotted sequence_by on an SCD1 target is unaffected — no system
+        columns are derived, so no explicit-schema completeness constraint."""
+        cdc_apply_changes = DataflowSpecUtils.get_cdc_apply_changes(json.dumps({
+            "keys": ["id"],
+            "sequence_by": "_metadata.file_path",
+            "scd_type": "1",
+        }))
+        schema = T.StructType([
+            T.StructField("id", T.StringType(), True),
+            T.StructField("ts", T.TimestampType(), True),
+        ])
+        spec = BronzeDataflowSpec(**copy.deepcopy(self.bronze_dataflow_spec_map))
+        spec.schema = json.dumps(schema.jsonValue())
+        spec.dataQualityExpectations = None
+        pipeline = DataflowPipeline(
+            self.spark, spec,
+            f"{spec.targetDetails['table']}_inputview", None,
+        )
+        out = pipeline.modify_schema_for_cdc_changes(cdc_apply_changes)
+        self.assertNotIn("__START_AT", out.fieldNames())
+        self.assertEqual(out.fieldNames(), ["id", "ts"])
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
     def test_modify_schema_for_cdc_changes_does_not_mutate_cached_silver_schema(self, mock_dlt):
         """struct_schema may be the shared/cached self.silver_schema; appending
         SCD2 system columns must build a NEW StructType and leave the cache

@@ -614,11 +614,17 @@ class OnboardDataflowspec:
                     # snapshot_version_type is only meaningful on the
                     # apply_changes_from_snapshot block (there is no sequence_by
                     # there to derive the SCD2 __START_AT/__END_AT type from).
-                    # Validate it parses to a real Spark DataType so garbage is
-                    # caught at onboarding rather than at pipeline create.
+                    # Semantics: validate whenever an explicit NON-None value is
+                    # present — so an empty string / garbage is rejected here
+                    # with a clear message instead of silently falling through
+                    # to the runtime fail-closed "no type declared" error. A
+                    # None / absent value means "unset" and legitimately falls
+                    # through (Spark JSON inference also injects None for rows
+                    # that omit the field when a sibling row sets it, so a bare
+                    # ``in`` presence check would false-positive on those).
                     if (
                         cdc_field.endswith("apply_changes_from_snapshot")
-                        and cdc_block.get("snapshot_version_type")
+                        and cdc_block.get("snapshot_version_type") is not None
                     ):
                         _check(
                             validate_snapshot_version_type,

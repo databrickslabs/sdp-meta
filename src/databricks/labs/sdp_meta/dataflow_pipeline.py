@@ -1376,10 +1376,15 @@ class DataflowPipeline:
         # are configured (returns ``None`` otherwise), so we pass the modified
         # schema on the CDC path when policies are set and otherwise preserve
         # the previous inferred-schema behaviour.
+        # Parse sequence_by ONCE here; this single list is reused for BOTH the
+        # explicit-schema derivation (modify_schema_for_cdc_changes) and the
+        # apply-time struct(*cols) below — the contract's single source of truth.
+        sequence_cols = parse_sequence_by_columns(cdc_apply_changes.sequence_by)
+
         policy_schema = self._resolve_policy_schema()
         struct_schema = None
         if self.schema_json or policy_schema is not None:
-            struct_schema = self.modify_schema_for_cdc_changes(cdc_apply_changes)
+            struct_schema = self.modify_schema_for_cdc_changes(cdc_apply_changes, sequence_cols)
 
         target_path = None if self.uc_enabled else self.dataflowSpec.targetDetails["path"]
 
@@ -1398,11 +1403,10 @@ class DataflowPipeline:
         target_table_name = self.dataflowSpec.targetDetails['table']
         target_table = self._build_table_name(target_cl, target_db_name, target_table_name)
 
-        # Handle comma-separated sequence columns using struct. Parse via the
-        # shared helper so the apply-time struct(*cols) and the schema-time
-        # __START_AT/__END_AT type derivation (modify_schema_for_cdc_changes)
-        # operate on the SAME validated column list.
-        sequence_cols = parse_sequence_by_columns(cdc_apply_changes.sequence_by)
+        # Composite sequence_by => struct(*cols); single => the bare column.
+        # ``sequence_cols`` was parsed once above and also fed to the schema
+        # derivation, so the declared __START_AT/__END_AT type matches this
+        # value exactly.
         sequence_by = (
             struct(*sequence_cols) if len(sequence_cols) > 1 else sequence_cols[0]
         )
@@ -1462,6 +1466,10 @@ class DataflowPipeline:
         if group is None:
             raise Exception("cdcApplyChangesFlows is None! ")
 
+        # Parse sequence_by ONCE; reused for BOTH the schema derivation and the
+        # apply-time struct(*cols) below (single source of truth).
+        sequence_cols = parse_sequence_by_columns(group.sequence_by)
+
         struct_schema = None
         # Bronze derives the streaming-table schema from
         # ``self.schema_json`` if set; silver from ``self.silver_schema``.
@@ -1469,7 +1477,7 @@ class DataflowPipeline:
         # ``modify_schema_for_cdc_changes`` then checks both possibilities
         # internally and returns ``None`` when no schema is available.
         if self.schema_json or self.silver_schema:
-            struct_schema = self.modify_schema_for_cdc_changes(group)
+            struct_schema = self.modify_schema_for_cdc_changes(group, sequence_cols)
 
         target_path = None if self.uc_enabled else self.dataflowSpec.targetDetails["path"]
         self.create_streaming_table(struct_schema, target_path)
@@ -1478,14 +1486,11 @@ class DataflowPipeline:
         apply_as_truncates = expr(group.apply_as_truncates) if group.apply_as_truncates else None
 
         # Composite sequence_by ("ts,id") => struct(ts, id), same as the
-        # single-flow path. Both this apply-time struct(*cols) and the
-        # SCD2 __START_AT/__END_AT type derivation in
-        # ``modify_schema_for_cdc_changes`` parse the spec through the SAME
-        # ``parse_sequence_by_columns`` helper and consume the identical
-        # column list, so the declared schema mirrors exactly what DLT
-        # materialises. (Previously the schema path looked up only the first
-        # column's scalar type, which did NOT match struct(ts,id).)
-        sequence_cols = parse_sequence_by_columns(group.sequence_by)
+        # single-flow path. ``sequence_cols`` (parsed once above and also fed to
+        # the schema derivation) is the single source of truth, so the declared
+        # __START_AT/__END_AT type mirrors exactly what DLT materialises here.
+        # (Previously the schema path looked up only the first column's scalar
+        # type, which did NOT match struct(ts,id).)
         sequence_by = (
             struct(*sequence_cols) if len(sequence_cols) > 1 else sequence_cols[0]
         )
@@ -1513,7 +1518,15 @@ class DataflowPipeline:
                 ignore_null_updates_except_column_list=group.ignore_null_updates_except_column_list,
             )
 
-    def modify_schema_for_cdc_changes(self, cdc_apply_changes):
+    def modify_schema_for_cdc_changes(self, cdc_apply_changes, sequence_cols=None):
+        """Build the explicit target schema for a CDC/SCD2 table.
+
+        ``sequence_cols`` is the ALREADY-parsed bare-column list (single source
+        of truth). The apply-time callers parse ``sequence_by`` once and pass it
+        here so the derived ``__START_AT``/``__END_AT`` type and the apply-time
+        ``struct(*cols)`` provably operate on the identical list. When called
+        directly (e.g. from tests) ``None`` means "parse it here".
+        """
         if isinstance(self.dataflowSpec, BronzeDataflowSpec) and self.schema_json is None:
             return None
         if isinstance(self.dataflowSpec, SilverDataflowSpec) and self.silver_schema is None:
@@ -1528,14 +1541,14 @@ class DataflowPipeline:
         if struct_schema is None:
             return None
 
-        # Parse sequence_by ONCE into the validated list of bare column names.
-        # This is the SAME list the apply-time paths (cdc_apply_changes /
-        # cdc_apply_changes_flows) feed to ``struct(*cols)``, so the SCD2
-        # system-column type derived from it mirrors exactly what DLT
-        # materialises. The derivation below uses the full (pre-prune) schema,
-        # so it still resolves the type even when a sequence column is itself
-        # listed in except_column_list.
-        sequence_cols = parse_sequence_by_columns(cdc_apply_changes.sequence_by)
+        # Single source of truth: reuse the caller's already-parsed bare-column
+        # list so the SCD2 system-column type and the apply-time struct(*cols)
+        # provably operate on the identical columns. Only parse here when called
+        # without one (direct/test calls). The derivation below uses the full
+        # (pre-prune) schema, so it still resolves the type even when a sequence
+        # column is itself listed in except_column_list.
+        if sequence_cols is None:
+            sequence_cols = parse_sequence_by_columns(cdc_apply_changes.sequence_by)
 
         # Prune except_column_list off a COPY of the fields. NEVER mutate
         # ``struct_schema`` in place: on the silver path it is
@@ -1552,11 +1565,14 @@ class DataflowPipeline:
             return pruned_schema
 
         # Derive the __START_AT/__END_AT type from the (pre-prune) source
-        # schema so it matches the apply-time value exactly. ``None`` means a
-        # sequence column isn't a top-level field (e.g. a nested/dotted ref)
-        # and we can't declare a correct type — skip the system columns rather
-        # than declare a wrong one (previous behaviour when the lookup missed).
-        derived = self._derive_scd2_sequence_type(struct_schema, sequence_cols)
+        # schema so it matches the apply-time value exactly. Dotted references
+        # are rejected here (see _derive_scd2_sequence_type). ``None`` means a
+        # plain top-level sequence column is simply absent from the schema — we
+        # skip the system columns rather than declare a wrong one (preserving
+        # the long-standing behaviour for a missing sequence column).
+        derived = self._derive_scd2_sequence_type(
+            struct_schema, sequence_cols, target_name=self._get_target_table_name()
+        )
         if derived is None:
             return pruned_schema
         start_at_type, start_at_nullable = derived
@@ -1565,13 +1581,16 @@ class DataflowPipeline:
         )
 
     @staticmethod
-    def _derive_scd2_sequence_type(struct_schema, sequence_cols):
+    def _derive_scd2_sequence_type(struct_schema, sequence_cols, *, target_name=""):
         """Return ``(dataType, nullable)`` for the SCD2 ``__START_AT`` column,
         mirroring EXACTLY what the apply-time sequence expression materialises.
 
-        * 1 column -> the source ``StructField``'s ``dataType`` (a scalar),
-          following its nullability. Apply time passes the bare column name (a
-          scalar), so DLT stamps that scalar type.
+        * 1 column -> the source ``StructField``'s ``dataType`` OBJECT copied
+          directly (not rebuilt), following its nullability. Apply time passes
+          the bare column name (a scalar reference), so DLT stamps that column's
+          own type — which may itself be a struct/array/map, whose nested
+          nullability and metadata are preserved because we reuse the very same
+          ``DataType`` object.
         * N columns -> a ``StructType`` built from the corresponding source
           ``StructField``s in DECLARED order (names / types / nested
           nullability / metadata copied verbatim), because apply time wraps
@@ -1579,16 +1598,40 @@ class DataflowPipeline:
           referenced field verbatim. The struct expression itself is
           non-nullable.
 
-        Returns ``None`` if any sequence column is absent from the top-level
-        schema (a nested/dotted reference), signalling the caller to skip the
-        system columns rather than declare a wrong type.
+        Dotted sequence references (``a.b``) are REJECTED with a clear error:
+        we must emit a COMPLETE explicit schema (comments/masks require it), but
+        a dotted path resolves against nested schema and ``struct()`` renames it
+        to the last segment, so a top-level lookup here cannot faithfully mirror
+        what DLT materialises. Silently skipping would emit a schema missing the
+        system columns and break CREATE — so we fail loudly and actionably
+        instead. ``validate_sequence_by`` still accepts dotted refs for the
+        (non-explicit-schema) SCD1 / ordering-only paths.
+
+        Returns ``None`` if a plain top-level sequence column is simply absent
+        from the schema, signalling the caller to skip the system columns
+        (long-standing behaviour for a missing sequence column).
         """
+        dotted = [col for col in sequence_cols if "." in col]
+        if dotted:
+            raise ValueError(
+                f"SCD2 apply_changes target ({target_name}) declares a dotted "
+                f"sequence_by column {dotted!r}, which is not supported when an "
+                f"explicit schema is required (column comments/masks, or a "
+                f"declared bronze/silver schema). The DLT-managed __START_AT / "
+                f"__END_AT columns must be typed from a top-level schema field, "
+                f"but a dotted reference resolves against nested schema and is "
+                f"renamed by struct(...). Use a top-level column for sequence_by "
+                f"on an SCD2 target, or drop the explicit schema / column "
+                f"policies."
+            )
         name_to_field = {f.name: f for f in struct_schema.fields}
         try:
             seq_fields = [name_to_field[col] for col in sequence_cols]
         except KeyError:
             return None
         if len(seq_fields) == 1:
+            # Copy the source dataType OBJECT directly so a non-scalar sequence
+            # column keeps its nested nullability/metadata intact.
             field = seq_fields[0]
             return field.dataType, field.nullable
         nested = StructType([
