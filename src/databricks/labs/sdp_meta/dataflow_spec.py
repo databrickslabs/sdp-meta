@@ -174,11 +174,25 @@ class CDCApplyChanges:
 
 @dataclass
 class ApplyChangesFromSnapshot:
-    """CDC ApplyChangesFromSnapshot structure."""
+    """CDC ApplyChangesFromSnapshot structure.
+
+    ``snapshot_version_type`` (optional) declares the Spark/DDL type of the
+    snapshot *version* that DLT stamps into the managed SCD2 ``__START_AT`` /
+    ``__END_AT`` columns. ``apply_changes_from_snapshot`` has no
+    ``sequence_by`` to derive that type from, and the runtime version comes
+    from the ``next_snapshot_and_version`` callable / Delta source, which
+    cannot be introspected safely at graph-build time. Declaring it here lets
+    column comments/masks be attached to an SCD2 snapshot target via a
+    complete explicit schema. The runtime version MUST conform to this
+    declared type; a mismatch surfaces as a create/insert failure (explicit
+    and validatable) rather than a silently wrong schema. ``None`` for legacy
+    spec rows and whenever the feature is unused.
+    """
     keys: list
     scd_type: str
     track_history_column_list: list
     track_history_except_column_list: list
+    snapshot_version_type: str = None
 
 
 @dataclass
@@ -375,13 +389,24 @@ class DataflowSpecUtils:
         "keys",
         "scd_type",
         "track_history_column_list",
-        "track_history_except_column_list"
+        "track_history_except_column_list",
+        # Optional: canonical Spark/DDL type of the snapshot version stamped
+        # into the SCD2 __START_AT / __END_AT columns. Enables column
+        # comments/masks on an SCD2 snapshot target (see ApplyChangesFromSnapshot).
+        "snapshot_version_type",
     ]
     apply_changes_from_snapshot_api_mandatory_attributes = ["keys", "scd_type"]
-    additional_apply_changes_from_snapshot_columns = ["track_history_column_list", "track_history_except_column_list"]
+    additional_apply_changes_from_snapshot_columns = [
+        "track_history_column_list",
+        "track_history_except_column_list",
+        # Defaults to None (via populate_additional_df_cols) so legacy
+        # dataflowspec rows load without a rewrite.
+        "snapshot_version_type",
+    ]
     apply_changes_from_snapshot_api_attributes_defaults = {
         "track_history_column_list": None,
-        "track_history_except_column_list": None
+        "track_history_except_column_list": None,
+        "snapshot_version_type": None,
     }
 
     @staticmethod

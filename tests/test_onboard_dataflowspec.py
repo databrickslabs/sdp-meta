@@ -989,6 +989,81 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    def test_onboardDataFlowSpecs_pre_validates_snapshot_version_type(self):
+        """Pre-flight validates apply_changes_from_snapshot.snapshot_version_type
+        parses to a real Spark type. A garbage type surfaces an actionable
+        error scoped to that field; a valid type ('long') passes."""
+        rows = [
+            {
+                "data_flow_id": "400",
+                "data_flow_group": "A1",
+                "source_format": "snapshot",
+                "source_details": {"source_path_dev": "/tmp/s"},
+                "bronze_database_dev": "ok_db",
+                "bronze_table": "ok_table_snap",
+                "bronze_reader_options": {},
+                "bronze_table_path_dev": "/tmp/bronze/s",
+                "bronze_apply_changes_from_snapshot": {
+                    "keys": ["id"],
+                    "scd_type": "2",
+                    # Garbage type string -> must be rejected.
+                    "snapshot_version_type": "notatype",
+                },
+            },
+        ]
+        tmp_dir = tempfile.mkdtemp(prefix="sdp_meta_prevalidate_svt_")
+        try:
+            f_path = os.path.join(tmp_dir, "onboarding_svt_bad.json")
+            with open(f_path, "w") as fh:
+                json.dump(rows, fh)
+            params = copy.deepcopy(self.onboarding_bronze_silver_params_map)
+            params["onboarding_file_path"] = f_path
+            with self.assertRaises(ValueError) as ctx:
+                OnboardDataflowspec(self.spark, params).onboard_dataflow_specs()
+            self.assertIn(
+                "flow 400 bronze_apply_changes_from_snapshot.snapshot_version_type",
+                str(ctx.exception),
+            )
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_onboardDataFlowSpecs_pre_validates_snapshot_version_type_empty_rejected(self):
+        """An explicitly-present EMPTY snapshot_version_type ("") is a mistake
+        and must be rejected at onboarding (semantics: validate on non-None
+        value), not silently fall through to the runtime fail-closed error."""
+        rows = [
+            {
+                "data_flow_id": "401",
+                "data_flow_group": "A1",
+                "source_format": "snapshot",
+                "source_details": {"source_path_dev": "/tmp/s2"},
+                "bronze_database_dev": "ok_db",
+                "bronze_table": "ok_table_snap2",
+                "bronze_reader_options": {},
+                "bronze_table_path_dev": "/tmp/bronze/s2",
+                "bronze_apply_changes_from_snapshot": {
+                    "keys": ["id"],
+                    "scd_type": "2",
+                    "snapshot_version_type": "",
+                },
+            },
+        ]
+        tmp_dir = tempfile.mkdtemp(prefix="sdp_meta_prevalidate_svt_empty_")
+        try:
+            f_path = os.path.join(tmp_dir, "onboarding_svt_empty.json")
+            with open(f_path, "w") as fh:
+                json.dump(rows, fh)
+            params = copy.deepcopy(self.onboarding_bronze_silver_params_map)
+            params["onboarding_file_path"] = f_path
+            with self.assertRaises(ValueError) as ctx:
+                OnboardDataflowspec(self.spark, params).onboard_dataflow_specs()
+            self.assertIn(
+                "flow 401 bronze_apply_changes_from_snapshot.snapshot_version_type",
+                str(ctx.exception),
+            )
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
     def test_onboardDataFlowSpecs_pre_validation_reports_every_category_in_one_error(self):
         """End-to-end: one onboarding file, one violation per category.
 

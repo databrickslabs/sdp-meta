@@ -32,6 +32,12 @@ from typing import Optional
 
 _REGULAR_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+# A ``sequence_by`` entry containing a parenthesis or embedded whitespace is
+# an expression (function call / cast / arithmetic), not a bare column name.
+# ``validate_sequence_by`` uses this to reject expressions with a clear message
+# (a bare / dotted column reference matches neither).
+_SEQUENCE_EXPRESSION_RE = re.compile(r"[()\s]")
+
 _MAX_IDENT_LEN = 255
 
 # Source formats supported by the bronze readers in
@@ -298,6 +304,16 @@ def validate_sequence_by(value, *, kind: str = "sequence_by") -> str:
     dot-segment of each comma-entry must be a regular identifier —
     that's exactly what the runtime's ``struct(...)`` split and DLT's
     column resolution can handle. Returns ``value`` unchanged.
+
+    Bare-column-only contract: each comma-entry is passed straight to
+    ``struct(*cols)`` at apply time as a column *name*, and the same list
+    is used to derive the SCD2 ``__START_AT`` / ``__END_AT`` type
+    (:func:`parse_sequence_by_columns`). Expression-valued sequence_by —
+    ``coalesce(a, b)``, ``cast(x as decimal(10,2))``, arithmetic, etc. —
+    is therefore rejected: ``struct()`` would treat the whole string as a
+    column name, and there is no source ``StructField`` to copy the type
+    from. Function calls / casts are caught here with a targeted message
+    rather than the generic per-segment "not a valid identifier" error.
     """
     if not isinstance(value, str) or not value.strip():
         raise ValueError(
@@ -312,12 +328,80 @@ def validate_sequence_by(value, *, kind: str = "sequence_by") -> str:
                 f"comma-separated list of column names, e.g. "
                 f"'event_ts,sequence_id'"
             )
+        # Parentheses or embedded whitespace mean this entry is an
+        # expression (a function call / cast / arithmetic sub-expression),
+        # not a bare column reference. Reject it with a clear, actionable
+        # message before the per-segment identifier check turns it into a
+        # cryptic "not a valid identifier" error. Dotted references like
+        # ``_metadata.file_path`` have neither and still pass.
+        if _SEQUENCE_EXPRESSION_RE.search(entry):
+            raise ValueError(
+                f"{kind} {value!r} looks like an expression (offending "
+                f"entry {entry!r}); {kind} must be bare column name(s), "
+                f"optionally comma-separated (e.g. 'event_ts' or "
+                f"'event_ts,sequence_id'). Each entry is passed to "
+                f"struct(...) as a column name, so expressions such as "
+                f"coalesce(...), cast(... as ...) or arithmetic are not "
+                f"supported."
+            )
         # No max_parts cap: nested struct fields can be arbitrarily deep.
         for i, part in enumerate(entry.split(".")):
             validate_uc_identifier(
                 part, kind=f"segment {i + 1} of {kind} column {entry!r}"
             )
     return value
+
+
+def parse_sequence_by_columns(value, *, kind: str = "sequence_by") -> list:
+    """Validate ``value`` and return its bare column names as a list.
+
+    Single source of truth for turning a ``sequence_by`` spec string into
+    the column list consumed BOTH by the apply-time ``struct(*cols)`` and by
+    the SCD2 ``__START_AT`` / ``__END_AT`` type derivation in
+    ``dataflow_pipeline.py``. Deriving the declared system-column type from
+    the very same list the ``struct()`` is built from is what keeps a
+    composite ``sequence_by`` ("ts,id") from declaring a scalar type while
+    DLT materialises a ``struct<ts,id>``.
+
+    Runs :func:`validate_sequence_by` first, so an expression / empty entry
+    is rejected with an actionable error before any split is trusted.
+    """
+    validate_sequence_by(value, kind=kind)
+    return [entry.strip() for entry in value.split(",")]
+
+
+def validate_snapshot_version_type(value, *, kind: str = "snapshot_version_type") -> str:
+    """Validate a snapshot version type expressed as a Spark/DDL type string.
+
+    ``apply_changes_from_snapshot`` has no ``sequence_by``; its DLT-managed
+    ``__START_AT`` / ``__END_AT`` columns are typed to the snapshot *version*,
+    produced at runtime by the ``next_snapshot_and_version`` callable or the
+    Delta source. That type cannot be introspected safely at graph-build time
+    (calling the callback does I/O / has side effects, and return annotations
+    are unreliable), so it must be declared explicitly as a canonical type
+    string. This parses the declared value to a real Spark ``DataType`` —
+    rejecting garbage — and returns its canonical ``simpleString``.
+
+    Requires an active Spark session (onboarding runs on a cluster). The
+    pyspark import is deferred so importing this module stays Spark-free.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"{kind} must be a non-empty Spark/DDL type string, got "
+            f"{type(value).__name__}: {value!r}"
+        )
+    # Deferred import: keeps this module import-light and Spark-free for the
+    # pure-Python identifier validators; the parser needs the JVM.
+    from pyspark.sql.types import _parse_datatype_string
+    try:
+        data_type = _parse_datatype_string(value)
+    except Exception as exc:  # ParseException and friends live in the JVM bridge
+        raise ValueError(
+            f"{kind}={value!r} is not a valid Spark/DDL type string. Use a "
+            f"canonical type such as 'long', 'bigint' or 'timestamp'. "
+            f"Parse error: {exc}"
+        ) from exc
+    return data_type.simpleString()
 
 
 # SQL fragments (e.g. an optional WHERE clause on the App's Metadata

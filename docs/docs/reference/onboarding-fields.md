@@ -123,7 +123,7 @@ Example:
 | `bronze_cluster_by` | array | List of column names for liquid clustering |
 | `bronze_cluster_by_auto` | boolean | Enable automatic liquid clustering. Can be combined with `bronze_cluster_by`. See [Automatic liquid clustering](https://docs.databricks.com/aws/en/delta/clustering#auto-liquid) |
 | `bronze_cdc_apply_changes` | object | Configuration for `create_auto_cdc_flow` on the bronze table — see [CDC guide](../guides/cdc) |
-| `bronze_apply_changes_from_snapshot` | object | Snapshot CDC configuration. Mandatory fields: `keys` (array), `scd_type` (`1` or `2`). Optional: `track_history_column_list`, `track_history_except_column_list` |
+| `bronze_apply_changes_from_snapshot` | object | Snapshot CDC configuration. Mandatory fields: `keys` (array), `scd_type` (`1` or `2`). Optional: `track_history_column_list`, `track_history_except_column_list`, `snapshot_version_type` (canonical Spark/DDL type string, e.g. `"long"` / `"timestamp"`, of the snapshot version stamped into the SCD2 `__START_AT` / `__END_AT` columns — required to attach column comments/masks to an SCD2 snapshot target; see [Column Policies](../guides/column-policies)) |
 | `bronze_table_path_{env}` | string | External storage path for the bronze table (optional, uses managed table if omitted) |
 | `bronze_table_properties` | object | Declarative Pipeline table properties, e.g. `{"pipelines.autoOptimize.managed": "false", "pipelines.reset.allowed": "false"}` |
 | `bronze_sink` | object | Declarative Pipeline Sink API configuration for writing to an external Delta table or Kafka topic — see [DLT Sink guide](../guides/dlt-sink) |

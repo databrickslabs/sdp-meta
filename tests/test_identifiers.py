@@ -19,6 +19,7 @@ from databricks.labs.sdp_meta.identifiers import (
     validate_column_comments,
     validate_column_mask_clause,
     validate_column_masks,
+    parse_sequence_by_columns,
     validate_scd_type,
     validate_sequence_by,
     validate_source_format,
@@ -395,6 +396,42 @@ class ValidateSequenceByTests(unittest.TestCase):
     def test_kind_appears_in_error(self):
         with self.assertRaisesRegex(ValueError, r"my_seq_field"):
             validate_sequence_by("bad-col", kind="my_seq_field")
+
+    def test_expression_coalesce_rejected(self):
+        # struct(*cols) treats each entry as a column NAME, so an expression
+        # must be rejected with a clear message (bare-column-only contract).
+        with self.assertRaisesRegex(ValueError, r"expression"):
+            validate_sequence_by("coalesce(a,b)")
+
+    def test_expression_cast_rejected(self):
+        with self.assertRaisesRegex(ValueError, r"expression"):
+            validate_sequence_by("cast(x as decimal(10,2))")
+
+    def test_expression_embedded_space_rejected(self):
+        with self.assertRaisesRegex(ValueError, r"expression"):
+            validate_sequence_by("a b")
+
+
+class ParseSequenceByColumnsTests(unittest.TestCase):
+    """``parse_sequence_by_columns`` is the single source of truth turning a
+    sequence_by spec into the bare column list both the apply-time struct and
+    the SCD2 type derivation consume."""
+
+    def test_single(self):
+        self.assertEqual(parse_sequence_by_columns("event_ts"), ["event_ts"])
+
+    def test_composite_strips_whitespace(self):
+        self.assertEqual(parse_sequence_by_columns(" ts , id "), ["ts", "id"])
+
+    def test_dotted_preserved(self):
+        self.assertEqual(
+            parse_sequence_by_columns("_metadata.file_path"),
+            ["_metadata.file_path"],
+        )
+
+    def test_expression_rejected(self):
+        with self.assertRaisesRegex(ValueError, r"expression"):
+            parse_sequence_by_columns("coalesce(a, b)")
 
 
 class ValidateSqlWhereClauseTests(unittest.TestCase):

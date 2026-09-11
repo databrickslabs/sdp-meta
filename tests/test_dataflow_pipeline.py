@@ -6,7 +6,7 @@ import tempfile
 import copy
 import shutil
 import os
-from pyspark.sql.functions import lit, expr
+from pyspark.sql.functions import lit, expr, struct
 import pyspark.sql.types as T
 from pyspark.sql import DataFrame
 from tests.utils import SDPFrameworkTestCase
@@ -1271,8 +1271,11 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
 
     @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
     def test_modify_schema_for_cdc_changes_composite_sequence_by(self, mock_dlt):
-        """Composite sequence_by like ' ts , id ' must use the FIRST trimmed token
-        for the SCD2 timestamp dtype lookup."""
+        """Composite sequence_by like ' ts , id ' must type __START_AT/__END_AT
+        as the SAME struct(*cols) DLT builds at apply time — NOT the first
+        column's scalar type (the old bug). The authoritative check compares
+        the derived DataType against df.select(struct(*cols))."""
+        from pyspark.sql.functions import struct as _struct
         cdc_apply_changes = DataflowSpecUtils.get_cdc_apply_changes(json.dumps({
             "keys": ["id"],
             "sequence_by": " ts , id ",
@@ -1295,8 +1298,216 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
         self.assertNotIn("op", out.fieldNames())
         self.assertIn("__START_AT", out.fieldNames())
         self.assertIn("__END_AT", out.fieldNames())
-        self.assertEqual(out["__START_AT"].dataType, T.TimestampType())
-        self.assertEqual(out["__END_AT"].dataType, T.TimestampType())
+        # Authoritative "does it match what DLT builds" check: apply time wraps
+        # the parsed bare-column list in struct(*cols), so the declared type
+        # must equal that struct's dataType exactly (names/order/nullability).
+        expected = (
+            self.spark.createDataFrame([], schema)
+            .select(_struct("ts", "id").alias("x"))
+            .schema[0]
+            .dataType
+        )
+        self.assertEqual(out["__START_AT"].dataType, expected)
+        self.assertEqual(out["__END_AT"].dataType, expected)
+        # __END_AT is always nullable (open records carry NULL).
+        self.assertTrue(out["__END_AT"].nullable)
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_modify_schema_for_cdc_changes_single_sequence_by_matches_apply_expr(self, mock_dlt):
+        """Single sequence_by: apply time passes the bare column (a scalar), so
+        __START_AT/__END_AT must be that column's scalar dataType — copied from
+        the source StructField so its nullability is preserved."""
+        from pyspark.sql.functions import col as _col
+        cdc_apply_changes = DataflowSpecUtils.get_cdc_apply_changes(json.dumps({
+            "keys": ["id"],
+            "sequence_by": "ts",
+            "scd_type": "2",
+        }))
+        schema = T.StructType([
+            T.StructField("id", T.StringType(), True),
+            T.StructField("ts", T.TimestampType(), False),
+        ])
+        spec = BronzeDataflowSpec(**copy.deepcopy(self.bronze_dataflow_spec_map))
+        spec.schema = json.dumps(schema.jsonValue())
+        spec.dataQualityExpectations = None
+        pipeline = DataflowPipeline(
+            self.spark, spec,
+            f"{spec.targetDetails['table']}_inputview", None,
+        )
+        out = pipeline.modify_schema_for_cdc_changes(cdc_apply_changes)
+        expected = (
+            self.spark.createDataFrame([], schema)
+            .select(_col("ts").alias("x"))
+            .schema[0]
+            .dataType
+        )
+        self.assertEqual(out["__START_AT"].dataType, expected)
+        self.assertEqual(out["__END_AT"].dataType, expected)
+        # __START_AT follows the sequence field's nullability (here: not null);
+        # __END_AT is always nullable (open records carry NULL).
+        self.assertFalse(out["__START_AT"].nullable)
+        self.assertTrue(out["__END_AT"].nullable)
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_modify_schema_for_cdc_changes_single_struct_typed_sequence_preserves_nesting(self, mock_dlt):
+        """A non-scalar (struct-typed) single sequence column must keep its
+        nested nullability/metadata: the derivation copies the source
+        StructField's dataType OBJECT directly, so __START_AT equals the column
+        itself (df.select(col)) — including a NOT-NULL nested field."""
+        from pyspark.sql.functions import col as _col
+        cdc_apply_changes = DataflowSpecUtils.get_cdc_apply_changes(json.dumps({
+            "keys": ["id"],
+            "sequence_by": "ver",
+            "scd_type": "2",
+        }))
+        # ``ver`` is itself a struct with a NOT-NULL nested field carrying
+        # metadata — the shape that a naive rebuild would flatten/lose.
+        ver_type = T.StructType([
+            T.StructField("seq", T.LongType(), False, {"note": "n"}),
+            T.StructField("sub", T.TimestampType(), True),
+        ])
+        schema = T.StructType([
+            T.StructField("id", T.StringType(), True),
+            T.StructField("ver", ver_type, True),
+        ])
+        spec = BronzeDataflowSpec(**copy.deepcopy(self.bronze_dataflow_spec_map))
+        spec.schema = json.dumps(schema.jsonValue())
+        spec.dataQualityExpectations = None
+        pipeline = DataflowPipeline(
+            self.spark, spec,
+            f"{spec.targetDetails['table']}_inputview", None,
+        )
+        out = pipeline.modify_schema_for_cdc_changes(cdc_apply_changes)
+        expected = (
+            self.spark.createDataFrame([], schema)
+            .select(_col("ver").alias("x"))
+            .schema[0]
+            .dataType
+        )
+        self.assertEqual(out["__START_AT"].dataType, expected)
+        self.assertEqual(out["__END_AT"].dataType, expected)
+        # Nested structure preserved verbatim (including the NOT-NULL field).
+        self.assertIsInstance(out["__START_AT"].dataType, T.StructType)
+        self.assertFalse(out["__START_AT"].dataType["seq"].nullable)
+        self.assertEqual(out["__START_AT"].dataType["seq"].metadata, {"note": "n"})
+        self.assertTrue(out["__END_AT"].nullable)
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_modify_schema_for_cdc_changes_dotted_sequence_scd2_raises(self, mock_dlt):
+        """A dotted sequence_by on an SCD2 explicit-schema target is REJECTED
+        with a clear error rather than silently omitting __START_AT/__END_AT
+        (which would emit an incomplete schema and break table creation)."""
+        cdc_apply_changes = DataflowSpecUtils.get_cdc_apply_changes(json.dumps({
+            "keys": ["id"],
+            "sequence_by": "_metadata.file_path",
+            "scd_type": "2",
+        }))
+        schema = T.StructType([
+            T.StructField("id", T.StringType(), True),
+            T.StructField("ts", T.TimestampType(), True),
+        ])
+        spec = BronzeDataflowSpec(**copy.deepcopy(self.bronze_dataflow_spec_map))
+        spec.schema = json.dumps(schema.jsonValue())
+        spec.dataQualityExpectations = None
+        pipeline = DataflowPipeline(
+            self.spark, spec,
+            f"{spec.targetDetails['table']}_inputview", None,
+        )
+        with self.assertRaisesRegex(ValueError, r"dotted sequence_by"):
+            pipeline.modify_schema_for_cdc_changes(cdc_apply_changes)
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_modify_schema_for_cdc_changes_dotted_sequence_scd1_ok(self, mock_dlt):
+        """A dotted sequence_by on an SCD1 target is unaffected — no system
+        columns are derived, so no explicit-schema completeness constraint."""
+        cdc_apply_changes = DataflowSpecUtils.get_cdc_apply_changes(json.dumps({
+            "keys": ["id"],
+            "sequence_by": "_metadata.file_path",
+            "scd_type": "1",
+        }))
+        schema = T.StructType([
+            T.StructField("id", T.StringType(), True),
+            T.StructField("ts", T.TimestampType(), True),
+        ])
+        spec = BronzeDataflowSpec(**copy.deepcopy(self.bronze_dataflow_spec_map))
+        spec.schema = json.dumps(schema.jsonValue())
+        spec.dataQualityExpectations = None
+        pipeline = DataflowPipeline(
+            self.spark, spec,
+            f"{spec.targetDetails['table']}_inputview", None,
+        )
+        out = pipeline.modify_schema_for_cdc_changes(cdc_apply_changes)
+        self.assertNotIn("__START_AT", out.fieldNames())
+        self.assertEqual(out.fieldNames(), ["id", "ts"])
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_modify_schema_for_cdc_changes_does_not_mutate_cached_silver_schema(self, mock_dlt):
+        """struct_schema may be the shared/cached self.silver_schema; appending
+        SCD2 system columns must build a NEW StructType and leave the cache
+        untouched (a prior bug mutated it in place via .add())."""
+        cdc_apply_changes = DataflowSpecUtils.get_cdc_apply_changes(json.dumps({
+            "keys": ["id"],
+            "sequence_by": "ts",
+            "scd_type": "2",
+        }))
+        silver_schema = T.StructType([
+            T.StructField("id", T.StringType(), True),
+            T.StructField("ts", T.TimestampType(), True),
+        ])
+        silver_spec = SilverDataflowSpec(**copy.deepcopy(self.silver_dataflow_spec_map))
+        pipeline = DataflowPipeline(
+            self.spark, silver_spec,
+            f"{silver_spec.targetDetails['table']}_inputview", None,
+        )
+        pipeline.silver_schema = silver_schema
+        before = silver_schema.fieldNames()
+        out = pipeline.modify_schema_for_cdc_changes(cdc_apply_changes)
+        self.assertIn("__START_AT", out.fieldNames())
+        # The cached schema is NOT mutated.
+        self.assertEqual(pipeline.silver_schema.fieldNames(), before)
+        self.assertNotIn("__START_AT", pipeline.silver_schema.fieldNames())
+        self.assertIsNot(out, pipeline.silver_schema)
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_cdc_apply_changes_composite_sequence_by_with_policies_succeeds(self, mock_dlt):
+        """Regression: composite sequence_by + column policies now SUCCEEDS.
+        The full apply path builds the explicit schema, types __START_AT/
+        __END_AT as struct(*cols), and creates the table (previously the
+        declared scalar type mismatched struct(ts,id) and CREATE failed)."""
+        mock_dlt.create_streaming_table = MagicMock()
+        mock_dlt.create_auto_cdc_flow = MagicMock()
+        self.spark.conf.set("spark.databricks.unityCatalog.enabled", "True")
+        self.addCleanup(self.spark.conf.unset, "spark.databricks.unityCatalog.enabled")
+        schema = T.StructType([
+            T.StructField("id", T.StringType(), True),
+            T.StructField("ts", T.TimestampType(), True),
+        ])
+        spec = BronzeDataflowSpec(**copy.deepcopy(self.bronze_dataflow_spec_map))
+        spec.schema = json.dumps(schema.jsonValue())
+        spec.dataQualityExpectations = None
+        spec.cdcApplyChanges = json.dumps({
+            "keys": ["id"],
+            "sequence_by": "ts,id",
+            "scd_type": "2",
+        })
+        spec.columnComments = json.dumps({"id": "the id"})
+        pipeline = DataflowPipeline(
+            self.spark, spec,
+            f"{spec.targetDetails['table']}_inputview", None,
+        )
+        pipeline.cdc_apply_changes()
+        mock_dlt.create_streaming_table.assert_called_once()
+        mock_dlt.create_auto_cdc_flow.assert_called_once()
+        _, cst_kwargs = mock_dlt.create_streaming_table.call_args
+        ddl = cst_kwargs["schema"]
+        # Comments configured => DDL-string schema; __START_AT/__END_AT are the
+        # struct(ts,id) type, not a scalar.
+        self.assertIsInstance(ddl, str)
+        self.assertIn("`__START_AT` struct<", ddl)
+        self.assertIn("`__END_AT` struct<", ddl)
+        # And apply time wraps the same columns in struct(*cols).
+        _, flow_kwargs = mock_dlt.create_auto_cdc_flow.call_args
+        self.assertEqual(str(flow_kwargs["sequence_by"]), str(struct("ts", "id")))
 
     @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
     def test_modify_schema_for_cdc_changes_unknown_sequence_column(self, mock_dlt):
@@ -3817,6 +4028,136 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
         pipeline.apply_changes_from_snapshot()
         _, kwargs = mock_dlt.create_streaming_table.call_args
         self.assertIsNone(kwargs["schema"])
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_apply_changes_from_snapshot_scd2_policies_declared_version_type(self, mock_dlt):
+        """SCD2 snapshot + policies + a declared snapshot_version_type SUCCEEDS:
+        the DLT-managed __START_AT/__END_AT are injected into the explicit
+        schema with the declared type, so the table is created (no raise)."""
+        from pyspark.sql.types import StructType, StructField, StringType
+        mock_dlt.create_streaming_table = MagicMock()
+        mock_dlt.create_auto_cdc_from_snapshot_flow = MagicMock()
+        self.spark.conf.set("spark.databricks.unityCatalog.enabled", "True")
+        self.addCleanup(self.spark.conf.unset, "spark.databricks.unityCatalog.enabled")
+        spec = BronzeDataflowSpec(**copy.deepcopy(DataflowPipelineTests.bronze_dataflow_spec_acs_map))
+        spec.applyChangesFromSnapshot = json.dumps(
+            {"keys": ["id"], "scd_type": "2", "snapshot_version_type": "timestamp"}
+        )
+        spec.columnComments = json.dumps({"id": "the id"})
+        view_name = f"{spec.targetDetails['table']}_inputview"
+        pipeline = DataflowPipeline(self.spark, spec, view_name, None)
+        pipeline.schema_json = StructType(
+            [StructField("id", StringType(), True)]
+        ).jsonValue()
+        pipeline.apply_changes_from_snapshot()
+        # Table IS created (no fail-closed raise).
+        mock_dlt.create_streaming_table.assert_called_once()
+        mock_dlt.create_auto_cdc_from_snapshot_flow.assert_called_once()
+        _, kwargs = mock_dlt.create_streaming_table.call_args
+        ddl = kwargs["schema"]
+        # Comments configured => DDL string schema carrying the system columns
+        # typed to the declared snapshot_version_type.
+        self.assertIsInstance(ddl, str)
+        self.assertIn("`__START_AT` timestamp", ddl)
+        self.assertIn("`__END_AT` timestamp", ddl)
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_apply_changes_from_snapshot_scd2_policies_no_version_type_still_raises(self, mock_dlt):
+        """SCD2 snapshot + policies + an explicit schema but NO declared
+        snapshot_version_type STILL raises the fail-closed error — a schema
+        alone can't type the version columns, so the guard holds."""
+        from pyspark.sql.types import StructType, StructField, StringType
+        mock_dlt.create_streaming_table = MagicMock()
+        mock_dlt.create_auto_cdc_from_snapshot_flow = MagicMock()
+        self.spark.conf.set("spark.databricks.unityCatalog.enabled", "True")
+        self.addCleanup(self.spark.conf.unset, "spark.databricks.unityCatalog.enabled")
+        spec = BronzeDataflowSpec(**copy.deepcopy(DataflowPipelineTests.bronze_dataflow_spec_acs_map))
+        self.assertEqual(json.loads(spec.applyChangesFromSnapshot)["scd_type"], "2")
+        spec.columnComments = json.dumps({"id": "the id"})
+        view_name = f"{spec.targetDetails['table']}_inputview"
+        pipeline = DataflowPipeline(self.spark, spec, view_name, None)
+        pipeline.schema_json = StructType(
+            [StructField("id", StringType(), True)]
+        ).jsonValue()
+        with self.assertRaisesRegex(ValueError, "SCD2 apply_changes_from_snapshot"):
+            pipeline.apply_changes_from_snapshot()
+        mock_dlt.create_streaming_table.assert_not_called()
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_apply_changes_from_snapshot_scd2_policies_declared_type_but_no_schema_raises(self, mock_dlt):
+        """SCD2 snapshot + masks + a declared snapshot_version_type but an
+        INFERRED (no) schema still fails closed: there is nothing to attach the
+        masks to, so we must not silently drop them."""
+        mock_dlt.create_streaming_table = MagicMock()
+        mock_dlt.create_auto_cdc_from_snapshot_flow = MagicMock()
+        self.spark.conf.set("spark.databricks.unityCatalog.enabled", "True")
+        self.addCleanup(self.spark.conf.unset, "spark.databricks.unityCatalog.enabled")
+        spec = BronzeDataflowSpec(**copy.deepcopy(DataflowPipelineTests.bronze_dataflow_spec_acs_map))
+        spec.applyChangesFromSnapshot = json.dumps(
+            {"keys": ["id"], "scd_type": "2", "snapshot_version_type": "long"}
+        )
+        spec.columnMasks = json.dumps({"id": "cat.s.mask_id"})
+        view_name = f"{spec.targetDetails['table']}_inputview"
+        pipeline = DataflowPipeline(self.spark, spec, view_name, None)
+        # Inferred schema: schema_json stays None.
+        self.assertIsNone(pipeline.schema_json)
+        with self.assertRaisesRegex(ValueError, "SCD2 apply_changes_from_snapshot"):
+            pipeline.apply_changes_from_snapshot()
+        mock_dlt.create_streaming_table.assert_not_called()
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_apply_changes_from_snapshot_scd2_policies_delta_source_defaults_long(self, mock_dlt):
+        """The first-party Delta snapshot-source mode (snapshot_format='delta')
+        CONTRACTUALLY guarantees the version is the Delta commit version, so
+        SCD2 + policies defaults snapshot_version_type to LONG (bigint) without
+        a declaration and succeeds."""
+        from pyspark.sql.types import StructType, StructField, StringType
+        mock_dlt.create_streaming_table = MagicMock()
+        mock_dlt.create_auto_cdc_from_snapshot_flow = MagicMock()
+        self.spark.conf.set("spark.databricks.unityCatalog.enabled", "True")
+        self.addCleanup(self.spark.conf.unset, "spark.databricks.unityCatalog.enabled")
+        spec = BronzeDataflowSpec(**copy.deepcopy(DataflowPipelineTests.bronze_dataflow_spec_acs_map))
+        # First-party delta snapshot source (no declared version type).
+        spec.sourceDetails = {
+            "path": "tests/resources/delta/customers",
+            "snapshot_format": "delta",
+        }
+        self.assertEqual(json.loads(spec.applyChangesFromSnapshot)["scd_type"], "2")
+        spec.columnComments = json.dumps({"id": "the id"})
+        view_name = f"{spec.targetDetails['table']}_inputview"
+        pipeline = DataflowPipeline(self.spark, spec, view_name, None)
+        self.assertEqual(pipeline.snapshot_source_format, "delta")
+        pipeline.schema_json = StructType(
+            [StructField("id", StringType(), True)]
+        ).jsonValue()
+        pipeline.apply_changes_from_snapshot()
+        mock_dlt.create_streaming_table.assert_called_once()
+        _, kwargs = mock_dlt.create_streaming_table.call_args
+        ddl = kwargs["schema"]
+        self.assertIsInstance(ddl, str)
+        self.assertIn("`__START_AT` bigint", ddl)
+        self.assertIn("`__END_AT` bigint", ddl)
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_apply_changes_from_snapshot_scd2_custom_callback_no_default_long(self, mock_dlt):
+        """A custom next_snapshot_and_version callback that happens to read
+        Delta does NOT get the LONG default — only the declared delta-source
+        MODE does. Without a declared type it still fails closed."""
+        mock_dlt.create_streaming_table = MagicMock()
+        mock_dlt.create_auto_cdc_from_snapshot_flow = MagicMock()
+        self.spark.conf.set("spark.databricks.unityCatalog.enabled", "True")
+        self.addCleanup(self.spark.conf.unset, "spark.databricks.unityCatalog.enabled")
+        spec = BronzeDataflowSpec(**copy.deepcopy(DataflowPipelineTests.bronze_dataflow_spec_acs_map))
+        spec.columnComments = json.dumps({"id": "the id"})
+        view_name = f"{spec.targetDetails['table']}_inputview"
+        pipeline = DataflowPipeline(
+            self.spark, spec, view_name, None,
+            next_snapshot_and_version=lambda v, s: None,
+        )
+        self.assertIsNone(pipeline.snapshot_source_format)
+        with self.assertRaisesRegex(ValueError, "SCD2 apply_changes_from_snapshot"):
+            pipeline.apply_changes_from_snapshot()
+        mock_dlt.create_streaming_table.assert_not_called()
 
     # ------------------------------------------------------------------
     # Multi-source AUTO CDC runtime tests (issue #294)
