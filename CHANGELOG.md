@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+### Added
+- **Column comments & masks**: Attach Unity Catalog column-level governance directly from the onboarding file. `bronze_column_comments` / `silver_column_comments` set free-text column documentation (any Delta table); `bronze_column_masks` / `silver_column_masks` apply UC dynamic data masking via a `<catalog>.<schema>.<function> [USING COLUMNS (col, ...)]` clause (Unity Catalog only, dropped on non-UC pipelines like row filters). When either is set, SDP-META creates the target with a DDL-string schema carrying the `COMMENT` / `MASK` clauses — UC reads masks only from DDL, not `StructField.metadata` — across the standard, data-quality, CDC apply-changes, append-flow, and snapshot write paths. Masks **fail closed** (a mask naming an unknown column raises rather than silently leaving it unprotected); comments on unknown columns warn and skip; quarantine tables never receive masks. Function/comment references are stored and applied verbatim, consistent with row filters. See [Column Comments & Masks](https://databrickslabs.github.io/sdp-meta/docs/guides/column-policies).
+  - **SCD Type 1 and Type 2 targets**, via both CDC apply-changes and auto CDC from Delta snapshots. The DLT-managed `__START_AT` / `__END_AT` system columns are typed from the resolved `sequence_by` (including composite `ts,id` sequences, now typed as the real `struct` instead of the first column's scalar type) or, for snapshot targets, from the snapshot version type. Snapshot SCD2 with policies requires a **resolvable version type** — a declared `apply_changes_from_snapshot.snapshot_version_type` (e.g. `"long"` / `"timestamp"`), or the `long` guaranteed by the first-party Delta snapshot-source mode — and still **fails closed** with an actionable error when no version type and schema are available.
+  - **Combined `bronze_silver` runs**: silver policy schemas are resolved from the upstream bronze *dataflowspec* (declared schema + reader-injected columns) in-process, so silver policies no longer require the bronze table to already exist in Unity Catalog.
+  - **Reader-injected columns**: a bronze policy schema is augmented with the columns the reader adds to the materialised table — the `cloudFiles` rescued-data column and, when enabled, the autoloader file-metadata column — so comments/masks don't collide with the inferred query schema.
+- **`snapshot_version_type` onboarding field** on `apply_changes_from_snapshot`: declares the Spark/DDL type of the DLT snapshot version so an SCD2 snapshot target can carry column policies (see above).
+
+### Fixed
+- **Onboarding no longer crashes when a layer declares data-quality expectations but no quarantine table.** Quarantine-table fields are now read defensively (matching the row-filter handling), so an onboarding file that uses DQE without a `*_quarantine_table` onboards cleanly instead of raising `'bronze_quarantine_table' is not in list`.
+
 ## [v0.1.0]
 ### ⚠️ Breaking Changes
 - **Project rename `dlt-meta` → `sdp-meta`** to align with the Lakeflow Spark Declarative Pipelines product naming. This affects the PyPI package, CLI command, Python import path, source layout, and main class name. A backward-compatibility wrapper is published so existing installations keep working with a deprecation warning. [PR](https://github.com/databrickslabs/sdp-meta/pull/289)
