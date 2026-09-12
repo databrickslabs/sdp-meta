@@ -71,7 +71,7 @@ content = re.sub(r'\]\((?!https?://|#)([^)]+)\)', rf']({_REPO}/blob/main/\1)', c
 long_description = content
 
 INSTALL_REQUIRES = [
-    "setuptools>=65,<83",
+    "setuptools>=65,<85",
     "databricks-sdk>=0.20,<1",
     "PyYAML>=6.0,<7",
 ]
