@@ -9,4 +9,4 @@ click==8.4.2
 databricks-sdk>=0.25
 
 # Config parsing used by onboarding, demo scripts, and parse-spec endpoint
-PyYAML>=6.0
+PyYAML>=6.0.3
