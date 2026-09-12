@@ -196,6 +196,9 @@ class CompatibilityWheelResolutionTests(unittest.TestCase):
                         "}))"
                     ),
                 ],
+                # Keep ignored/stale *.egg-info metadata in the developer
+                # checkout from shadowing the wheel installed in this venv.
+                cwd=tmp_path,
                 env=clean_env,
             )
             self.assertEqual(

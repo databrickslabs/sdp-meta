@@ -11,7 +11,9 @@ import uuid
 import webbrowser
 import yaml
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
+from typing import List
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service import jobs, pipelines, compute
 from databricks.sdk.service.pipelines import PipelineLibrary, NotebookLibrary
@@ -133,6 +135,19 @@ def _coerce_bool(v):
     if isinstance(v, str):
         return v.strip().lower() in ("1", "true", "yes", "on")
     return bool(v)
+
+
+def _quality_migration_layers(onboarding):
+    """Return layers with an explicit full-refresh quality migration."""
+    if not isinstance(onboarding, list):
+        return []
+    return sorted({
+        layer
+        for row in onboarding
+        if isinstance(row, dict)
+        for layer in ("bronze", "silver")
+        if row.get(f"{layer}_quality_engine_migration") == "full_refresh"
+    })
 
 
 def _recover_swallowed_flag(flags: dict, bool_flag_name: str) -> None:
@@ -302,6 +317,8 @@ class OnboardCommand:
     silver_dataflowspec_path: str = None
     update_paths: bool = True
     sdp_meta_dependency: str = None
+    quality_engine_dependency: str = None
+    quality_migration_layers: List[str] = None
 
     def __post_init__(self):
         if not self.onboarding_file_path or self.onboarding_file_path == "":
@@ -391,6 +408,8 @@ class DeployCommand:
     serverless: bool = False
     dbfs_path: str = None
     sdp_meta_dependency: str = None
+    quality_engine_dependency: str = None
+    quality_migration_layers: List[str] = None
 
     def __post_init__(self):
         if self.uc_enabled and not self.uc_catalog_name:
@@ -675,17 +694,18 @@ class SDPMeta:
             self.update_ws_onboarding_paths(cmd)
             self.copy_to_dbfs(cmd.onboarding_files_dir_path, cmd.dbfs_path + "/sdp_meta_conf/")
             logger.info(f"uploading to  {cmd.dbfs_path}/sdp_meta_conf complete!!!")
+        _persist_quality_migration_layers(cmd.quality_migration_layers or [])
         created_job = self.create_onnboarding_job(cmd)
-        logger.info(f"Waiting for job to complete. job_id={created_job.job_id}")
         run = self._ws.jobs.run_now(job_id=created_job.job_id)
         msg = (
             "SDP-META Onboarding Job(job_id={}) "
-            "launched with run_id={}, Please check the job status in databricks workspace jobs tab"
+            "launched with run_id={}. Check the Databricks Jobs UI for status."
         ).format(created_job.job_id, run.run_id)
         logger.info(msg)
         job_url = f"{self._ws.config.host}/jobs/{created_job.job_id}?o={self._ws.get_workspace_id()}"
         print(
-            f"Job created successfully. job_id={created_job.job_id}, url={job_url}"
+            f"Job launched successfully. job_id={created_job.job_id}, "
+            f"run_id={run.run_id}, url={job_url}"
         )
         _maybe_open_url(f"{self._ws.config.host}/jobs/{created_job.job_id}?o={self._ws.get_workspace_id()}")
 
@@ -723,11 +743,14 @@ class SDPMeta:
             )
         named_parameters = self._get_onboarding_named_parameters(cmd)
         sdp_meta_dependency = cmd.sdp_meta_dependency or f"sdp-meta=={self.version}"
+        dependencies = [sdp_meta_dependency]
+        if cmd.quality_engine_dependency:
+            dependencies.append(cmd.quality_engine_dependency)
         sdp_meta_environments = [
             jobs.JobEnvironment(
                 environment_key="sdp_meta_cli_env",
                 spec=compute.Environment(client="1",
-                                         dependencies=[sdp_meta_dependency]
+                                         dependencies=dependencies
                                          )
             )
         ]
@@ -746,20 +769,26 @@ class SDPMeta:
                         entry_point="run",
                         named_parameters=named_parameters,
                     ),
-                    libraries=self._onboarding_job_libraries(sdp_meta_dependency)
+                    libraries=self._onboarding_job_libraries(*dependencies)
                     if not cmd.serverless else None,
                 ),
             ]
         )
 
-    def _onboarding_job_libraries(self, sdp_meta_dependency: str):
-        if sdp_meta_dependency.startswith("/Volumes/") or sdp_meta_dependency.endswith(".whl"):
-            return [jobs.compute.Library(whl=sdp_meta_dependency)]
-        return [
-            jobs.compute.Library(
-                pypi=compute.PythonPyPiLibrary(package=sdp_meta_dependency)
-            )
-        ]
+    def _onboarding_job_libraries(self, *dependencies: str):
+        libraries = []
+        for dependency in dependencies:
+            if dependency.startswith("/Volumes/") or dependency.endswith(
+                ".whl"
+            ):
+                libraries.append(jobs.compute.Library(whl=dependency))
+            else:
+                libraries.append(
+                    jobs.compute.Library(
+                        pypi=compute.PythonPyPiLibrary(package=dependency)
+                    )
+                )
+        return libraries
 
     def _get_onboarding_named_parameters(self, cmd: OnboardCommand):
         named_parameters = {
@@ -812,7 +841,14 @@ class SDPMeta:
         # path or any other pip-installable spec — see ``deploy()`` for the
         # resolution order (CLI flag > onboarding_job_details.json > PyPI).
         dependency = cmd.sdp_meta_dependency or f"databricks-labs-sdp-meta=={self.version}"
-        runner_notebook_py = SDP_META_RUNNER_NOTEBOOK.format(dependency=dependency).encode("utf8")
+        install_dependencies = " ".join(
+            item
+            for item in (dependency, cmd.quality_engine_dependency)
+            if item
+        )
+        runner_notebook_py = SDP_META_RUNNER_NOTEBOOK.format(
+            dependency=install_dependencies
+        ).encode("utf8")
         runner_notebook_path = f"{self._install_folder()}/init_sdp_meta_pipeline.py"
         try:
             self._ws.workspace.mkdirs(self._install_folder())
@@ -907,17 +943,108 @@ class SDPMeta:
             raise Exception("Pipeline creation failed")
         return created.pipeline_id
 
+    def _run_managed_quality_update_job(
+        self, cmd: DeployCommand, pipeline_id: str
+    ):
+        dependency = (
+            cmd.sdp_meta_dependency
+            or f"databricks-labs-sdp-meta=={self.version}"
+        )
+        spec_tables = {}
+        groups = {}
+        if cmd.layer in ("bronze", "bronze_silver"):
+            spec_tables["bronze"] = (
+                f"{cmd.uc_catalog_name}.{cmd.sdp_meta_bronze_schema}."
+                f"{cmd.dataflowspec_bronze_table}"
+                if cmd.uc_enabled
+                else {"path": cmd.dataflowspec_bronze_path}
+            )
+            groups["bronze"] = cmd.onboard_bronze_group
+        if cmd.layer in ("silver", "bronze_silver"):
+            spec_tables["silver"] = (
+                f"{cmd.uc_catalog_name}.{cmd.sdp_meta_silver_schema}."
+                f"{cmd.dataflowspec_silver_table}"
+                if cmd.uc_enabled
+                else {"path": cmd.dataflowspec_silver_path}
+            )
+            groups["silver"] = cmd.onboard_silver_group
+        task_kwargs = {}
+        environments = None
+        if cmd.uc_enabled:
+            task_kwargs["environment_key"] = "quality_migration"
+            environments = [
+                jobs.JobEnvironment(
+                    environment_key="quality_migration",
+                    spec=compute.Environment(
+                        client="1", dependencies=[dependency]
+                    ),
+                )
+            ]
+        else:
+            node_type = self._ws.clusters.select_node_type(local_disk=True)
+            task_kwargs["new_cluster"] = compute.ClusterSpec(
+                spark_version=self._ws.clusters.select_spark_version(
+                    latest=True
+                ),
+                num_workers=1,
+                driver_node_type_id=node_type,
+                node_type_id=node_type,
+                data_security_mode=compute.DataSecurityMode.LEGACY_SINGLE_USER,
+            )
+            task_kwargs["libraries"] = self._onboarding_job_libraries(
+                dependency
+            )
+        submitted = self._ws.jobs.submit(
+            run_name=f"sdp-meta-quality-update-{pipeline_id}",
+            tasks=[
+                jobs.Task(
+                    task_key="quality_migrate",
+                    python_wheel_task=jobs.PythonWheelTask(
+                        package_name="databricks_labs_sdp_meta",
+                        entry_point="quality_migrate",
+                        named_parameters={
+                            "pipeline_id": pipeline_id,
+                            "spec_tables": json.dumps(spec_tables),
+                            "groups": json.dumps(groups),
+                        },
+                    ),
+                    **task_kwargs,
+                )
+            ],
+            environments=environments,
+        )
+        return submitted.result(timeout=timedelta(hours=3))
+
     def deploy(self, cmd: DeployCommand):
         pipeline_id = self._create_sdp_meta_pipeline(cmd)
-        update_response = self._ws.pipelines.start_update(pipeline_id=pipeline_id)
+        selected_layers = (
+            {"bronze", "silver"}
+            if cmd.layer == "bronze_silver"
+            else {cmd.layer}
+        )
+        migration_layers = set(cmd.quality_migration_layers or [])
+        pending_migration_layers = selected_layers & migration_layers
+        if pending_migration_layers:
+            update_response = self._run_managed_quality_update_job(
+                cmd, pipeline_id
+            )
+            update_id = getattr(update_response, "run_id", "<managed-job>")
+            _persist_quality_migration_layers(
+                sorted(migration_layers - pending_migration_layers)
+            )
+        else:
+            update_response = self._ws.pipelines.start_update(
+                pipeline_id=pipeline_id
+            )
+            update_id = update_response.update_id
         msg = (
             f"sdp-meta pipeline={pipeline_id} created and launched with "
-            f"update_id={update_response.update_id}, Please check the pipeline status in "
+            f"update_id={update_id}, Please check the pipeline status in "
             "databricks workspace under workflows -> Lakeflow Spark Declarative Pipelines tab"
         )
         logger.info(msg)
         print(
-            f"sdp-meta pipeline={pipeline_id} created and launched with update_id={update_response.update_id}, "
+            f"sdp-meta pipeline={pipeline_id} created and launched with update_id={update_id}, "
             f"url={self._ws.config.host}/#joblist/pipelines/{pipeline_id}?o={self._ws.get_workspace_id()}/"
         )
         _maybe_open_url(f"{self._ws.config.host}/#joblist/pipelines/{pipeline_id}?o={self._ws.get_workspace_id()}/")
@@ -1014,6 +1141,9 @@ class SDPMeta:
         deploy_cmd_dict = {}
         if load_from_ojd_json:
             oc_job_details_json = json.loads(oc_job_details_json)
+            deploy_cmd_dict["quality_migration_layers"] = (
+                oc_job_details_json.get("quality_migration_layers", [])
+            )
             deploy_cmd_dict["uc_enabled"] = self._wsi._choice(
                 "Deploy SDP-META with unity catalog enabled?", ["True", "False"])
             deploy_cmd_dict["uc_enabled"] = True if deploy_cmd_dict["uc_enabled"] == "True" else False
@@ -1176,6 +1306,9 @@ class SDPMeta:
 
         if load_from_ojd_json and oc_job_details_json:
             oc_job_details_json = json.loads(oc_job_details_json)
+            deploy_cmd_dict["quality_migration_layers"] = (
+                oc_job_details_json.get("quality_migration_layers", [])
+            )
             # The App envelope sends ``uc_enabled`` / ``serverless`` as the
             # STRINGS "1" / "0" (HTML radio button values). Python truthy-
             # checks accept both as True, but downstream ``self._ws.pipelines.
@@ -1302,7 +1435,10 @@ class SDPMeta:
             content = f.read()
 
         src_ext = os.path.splitext(cmd.onboarding_file_path)[1].lower()
-        rendered, _ = render_onboarding_template(content, src_ext, string_subs)
+        rendered, parsed = render_onboarding_template(
+            content, src_ext, string_subs
+        )
+        cmd.quality_migration_layers = _quality_migration_layers(parsed)
 
         if src_ext in (".yml", ".yaml"):
             rendered_basename = f"onboarding{src_ext}"
@@ -1499,6 +1635,25 @@ def _persist_dependency_to_onboarding_json(dependency: str) -> None:
             json.dump(data, fh, indent=4)
     except (OSError, ValueError) as exc:
         logger.warning("Unable to update %s with sdp_meta_dependency: %s", path, exc)
+
+
+def _persist_quality_migration_layers(layers) -> None:
+    """Persist pending migration intent for the next local deploy."""
+    path = "onboarding_job_details.json"
+    if not os.path.isfile(path):
+        return
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+        data["quality_migration_layers"] = sorted(set(layers or []))
+        with open(path, "w") as fh:
+            json.dump(data, fh, indent=4)
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning(
+            "Unable to update %s with quality migration layers: %s",
+            path,
+            exc,
+        )
 
 
 def _read_dependency_from_onboarding_json() -> str:

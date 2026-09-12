@@ -1,0 +1,21 @@
+- name: customer_id_required
+  criticality: error
+  check:
+    function: is_not_null
+    arguments:
+      column: customer_id
+- name: email_required
+  criticality: error
+  check:
+    function: is_not_null_and_not_empty
+    arguments:
+      column: email
+- name: status_recognized
+  criticality: warn
+  check:
+    function: is_in_list
+    arguments:
+      column: status
+      allowed:
+        - "'ACTIVE'"
+        - "'INACTIVE'"

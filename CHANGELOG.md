@@ -1,5 +1,48 @@
 # Changelog
 
+## [Unreleased]
+
+### ⚠️ Breaking Changes
+
+- **New and re-onboarded legacy quarantine-only specifications now also create
+  the main table.** Existing persisted rows preserve their previous topology
+  until re-onboarding stamps the current DQE contract.
+- **Legacy quarantine onboarding now requires an explicit target.** Any existing
+  onboarding row whose rules contain `expect_or_quarantine` must define
+  `bronze_quarantine_table` and/or `silver_quarantine_table` for the affected
+  layer before it is re-onboarded. Use
+  `<layer>_database_quarantine_<env>`,
+  `<layer>_catalog_quarantine_<env>`, and
+  `<layer>_quarantine_table_path` when the quarantine target differs from the
+  layer defaults. Already-onboarded rows remain tolerant: their next update
+  logs an error naming the missing field and skips quarantine. Re-onboarding
+  opts the row into strict validation and therefore requires the field.
+
+### Added
+
+- Added an opt-in built-in Lakeflow quality engine with valid-rule semantics,
+  disjoint main/quarantine routing, native expectation metrics, and structured
+  `_errors` diagnostics.
+- Added immutable `qualityConfig` snapshots and JSON/YAML onboarding fields
+  for engine selection and rules paths.
+- Added the experimental quality-engine SPI, installed entry-point discovery,
+  adapter drift checks, and a reusable plugin contract test kit.
+- Added built-in optional DQX support through
+  `pip install "databricks-labs-sdp-meta[dqx]"`, plus DAB/App preflight and
+  same-pipeline JSON/YAML integration scenarios.
+- Added managed selective quarantine full-refresh migrations with
+  compare-and-swap completion fingerprints.
+
+### Changed
+
+- New and re-onboarded legacy quarantine-only specifications now declare both
+  the main and quarantine targets.
+- DAB pipeline jobs use native `pipeline_task` entries by default; managed
+  quality migrations require the explicit `managed_quality_migrations`
+  scaffold option.
+- Managed quality migrations support both UC spec tables and path-based
+  Delta spec tables.
+
 ## [v0.1.0]
 ### ⚠️ Breaking Changes
 - **Project rename `dlt-meta` → `sdp-meta`** to align with the Lakeflow Spark Declarative Pipelines product naming. This affects the PyPI package, CLI command, Python import path, source layout, and main class name. A backward-compatibility wrapper is published so existing installations keep working with a deprecation warning. [PR](https://github.com/databrickslabs/sdp-meta/pull/289)

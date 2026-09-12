@@ -1,0 +1,5 @@
+{"row_key":"valid_1","store_id":10,"name":"San Francisco","country":"US","active":true}
+{"row_key":"valid_2","store_id":11,"name":"Toronto","country":"CA","active":true}
+{"row_key":"valid_3","store_id":12,"name":"London","country":"GB","active":false}
+{"row_key":"country_warning","store_id":13,"name":"Unknown Region","country":"XX","active":true}
+{"row_key":"missing_store_id","store_id":null,"name":"Unidentified","country":"US","active":true}

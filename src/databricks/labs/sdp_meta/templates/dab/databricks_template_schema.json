@@ -69,8 +69,21 @@
       "description": "Format for the onboarding file shipped with the bundle.",
       "enum": ["yaml", "json"]
     },
-    "dataflow_group": {
+    "quality_engine": {
       "order": 10,
+      "type": "string",
+      "default": "none",
+      "description": "Optional quality engine for each seeded layer. `lakeflow` is built in; `dqx` uses SDP-META's optional DQX dependency. Snapshot sources are not supported.",
+      "enum": ["none", "lakeflow", "dqx"]
+    },
+    "managed_quality_migrations": {
+      "order": 11,
+      "type": "boolean",
+      "default": false,
+      "description": "Use the SDP-META quality migration wrapper instead of native pipeline tasks. Enable only when reusing a quarantine table while changing quality engine or diagnostic schema with `<layer>_quality_engine_migration: full_refresh`."
+    },
+    "dataflow_group": {
+      "order": 12,
       "type": "string",
       "default": "my_group",
       "description": "data_flow_group used by the seeded flow(s) and referenced from the bronze/silver pipeline `configuration.*.group` settings.",
@@ -78,20 +91,20 @@
       "pattern_match_failure_message": "dataflow_group must be a regular SQL identifier (letters, digits, underscores; must start with a letter or underscore). It is written unquoted into the seeded onboarding YAML."
     },
     "wheel_source": {
-      "order": 11,
+      "order": 13,
       "type": "string",
       "default": "pypi",
       "description": "Where sdp-meta is installed from. `pypi` = pip-install at runtime from PyPI (works once databricks-labs-sdp-meta is published). `volume_path` = pip-install from a wheel uploaded to a Unity Catalog volume (use today, while sdp-meta isn't on PyPI). `bundle-prepare-wheel` builds + uploads the wheel and prints the path you paste into variables.yml.",
       "enum": ["pypi", "volume_path"]
     },
     "sdp_meta_dependency": {
-      "order": 12,
+      "order": 14,
       "type": "string",
       "default": "__SET_ME__",
       "description": "Concrete value the bundle pins for installs. If wheel_source=pypi: a coordinate like `databricks-labs-sdp-meta==0.1.0`. If wheel_source=volume_path: a UC volume path like `/Volumes/<catalog>/<schema>/<volume>/databricks_labs_sdp_meta-0.1.0-py3-none-any.whl`. You may keep the `__SET_ME__` sentinel and run `databricks labs sdp-meta bundle-prepare-wheel` next — both `bundle-validate` and the runtime will fail-fast until you replace the sentinel."
     },
     "author": {
-      "order": 13,
+      "order": 15,
       "type": "string",
       "default": "sdp-meta-user",
       "description": "Value written as `import_author` on the dataflowspec rows.",

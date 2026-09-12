@@ -17,6 +17,7 @@ from pyspark.sql.types import ArrayType, MapType, StringType, StructField, Struc
 from databricks.labs.sdp_meta.dataflow_spec import (
     BronzeDataflowSpec,
     DataflowSpecUtils,
+    DQE_CONTRACT_VERSION,
     SilverDataflowSpec,
     _coerce_scd_type_to_str,
 )
@@ -31,6 +32,29 @@ from databricks.labs.sdp_meta.identifiers import (
     validate_uc_identifier,
 )
 from databricks.labs.sdp_meta.metastore_ops import DeltaPipelinesInternalTableOps, DeltaPipelinesMetaStoreOps
+from databricks.labs.sdp_meta.quality.fields import (
+    quality_engine_field,
+    quality_migration_field,
+    quality_rules_path_field,
+)
+from databricks.labs.sdp_meta.quality.rules_loader import load_rule_document
+from databricks.labs.sdp_meta.quality.onboarding_preflight import (
+    collect_quality_configuration_errors,
+)
+from databricks.labs.sdp_meta.quality.migration import (
+    reconcile_migration_request,
+)
+from databricks.labs.sdp_meta.quality.spi import (
+    unpack_validation_result,
+)
+from databricks.labs.sdp_meta.quality.registry import resolve_quality_engine
+from databricks.labs.sdp_meta.quality.validation import (
+    InvalidQualityConfiguration,
+    build_lakeflow_quality_config,
+    build_plugin_quality_config,
+    schema_from_json,
+    validate_lakeflow_rules,
+)
 
 logger = logging.getLogger("databricks.labs.sdp_meta")
 logger.setLevel(logging.INFO)
@@ -271,6 +295,147 @@ class OnboardDataflowspec:
         self.__pre_validate_onboarding_uc_names()
         self.onboard_bronze_dataflow_spec()
         self.onboard_silver_dataflow_spec()
+
+    def __read_existing_dataflow_specs(self, dict_obj, layer):
+        """Return existing specs, or None for a flow's first onboarding."""
+        try:
+            if self.uc_enabled:
+                table_name = dict_obj[f"{layer}_dataflowspec_table"]
+                table = f"{dict_obj['database']}.{table_name}"
+                if not self.spark.catalog.tableExists(table):
+                    return None
+                return self.spark.read.format("delta").table(table)
+            return self.spark.read.format("delta").load(
+                dict_obj[f"{layer}_dataflowspec_path"]
+            )
+        except Exception as err:
+            message = str(err)
+            if (
+                "PATH_NOT_FOUND" in message
+                or "TABLE_OR_VIEW_NOT_FOUND" in message
+                or "doesn't exist" in message
+                or "does not exist" in message
+            ):
+                return None
+            raise
+
+    def __validate_quality_engine_switch(self, new_specs, dict_obj, layer):
+        """Reject incompatible diagnostic reuse before overwrite or MERGE."""
+        has_current_quality = (
+            new_specs.where(f.col("qualityConfig").isNotNull())
+            .limit(1)
+            .count()
+        )
+        if not has_current_quality:
+            return new_specs
+        existing = self.__read_existing_dataflow_specs(dict_obj, layer)
+        if existing is None:
+            return new_specs
+        previous_rows = {
+            row["dataFlowId"]: row.asDict(recursive=True)
+            for row in existing.collect()
+        }
+        current_rows = [
+            row.asDict(recursive=True) for row in new_specs.collect()
+        ]
+
+        def target_identity(spec_row):
+            details = spec_row.get("quarantineTargetDetails") or {}
+            identity = (
+                details.get("catalog"),
+                details.get("database"),
+                details.get("table"),
+            )
+            if not self.uc_enabled:
+                identity += (details.get("path"),)
+            return identity
+
+        for current in current_rows:
+            current_config_json = current.get("qualityConfig")
+            previous = previous_rows.get(current["dataFlowId"])
+            if not current_config_json or not previous:
+                continue
+            current_config = json.loads(current_config_json)
+            previous_config_json = previous.get("qualityConfig")
+            if previous_config_json:
+                previous_config = json.loads(previous_config_json)
+                changed = (
+                    current_config.get("engine")
+                    != previous_config.get("engine")
+                    or current_config.get("diagnostic_schema_fingerprint")
+                    != previous_config.get("diagnostic_schema_fingerprint")
+                )
+            else:
+                legacy_quality = previous.get("dataQualityExpectations")
+                if not legacy_quality:
+                    continue
+                try:
+                    legacy_document = json.loads(legacy_quality)
+                except (TypeError, json.JSONDecodeError):
+                    legacy_document = {}
+                changed = bool(
+                    legacy_document.get("expect_or_quarantine")
+                )
+            if not changed:
+                continue
+            old_target = target_identity(previous)
+            new_target = target_identity(current)
+            if (
+                old_target == new_target
+                and current_config.get("migration") != "full_refresh"
+            ):
+                raise InvalidQualityConfiguration(
+                    f"Flow {current['dataFlowId']} changes quality engine or "
+                    "diagnostic schema while reusing its quarantine table; "
+                    "configure a new table or set quality engine migration "
+                    "to 'full_refresh'"
+                )
+        previous_configs = {
+            flow_id: (
+                json.loads(row["qualityConfig"])
+                if row.get("qualityConfig")
+                else None
+            )
+            for flow_id, row in previous_rows.items()
+        }
+
+        def reconcile_config(flow_id, raw):
+            if not raw:
+                return raw
+            current = json.loads(raw)
+            reconciled = reconcile_migration_request(
+                current, previous_configs.get(flow_id)
+            )
+            return json.dumps(reconciled)
+
+        changed = False
+        for current in current_rows:
+            reconciled = reconcile_config(
+                current["dataFlowId"], current.get("qualityConfig")
+            )
+            if reconciled != current.get("qualityConfig"):
+                current["qualityConfig"] = reconciled
+                changed = True
+        if not changed:
+            return new_specs
+        return self.spark.createDataFrame(
+            current_rows, schema=new_specs.schema
+        )
+
+    def __ensure_quality_config_column(self, table_name, existing_columns):
+        """Add release metadata columns before a schema-preserving MERGE."""
+        columns = list(existing_columns)
+        if "qualityConfig" not in columns:
+            self.spark.sql(
+                f"ALTER TABLE {table_name} ADD COLUMNS (`qualityConfig` STRING)"
+            )
+            columns.append("qualityConfig")
+        if "dqeContract" not in columns:
+            self.spark.sql(
+                f"ALTER TABLE {table_name} ADD COLUMNS (`dqeContract` STRING)"
+            )
+            columns.append("dqeContract")
+        return columns
 
     def __pre_validate_onboarding_uc_names(self, layers=("bronze", "silver")):
         """Pre-flight validate every UC identifier in the onboarding file.
@@ -918,6 +1083,9 @@ class OnboardDataflowspec:
 
         silver_fields = [field.name for field in dataclasses.fields(SilverDataflowSpec)]
         silver_dataflow_spec_df = silver_dataflow_spec_df.select(silver_fields)
+        silver_dataflow_spec_df = self.__validate_quality_engine_switch(
+            silver_dataflow_spec_df, dict_obj, "silver"
+        )
         database = dict_obj["database"]
         table = dict_obj["silver_dataflowspec_table"]
 
@@ -946,11 +1114,14 @@ class OnboardDataflowspec:
                     dict_obj["silver_dataflowspec_path"]
                 )
             logger.info("In Merge block for Silver")
+            merge_columns = self.__ensure_quality_config_column(
+                f"{database}.{table}", original_dataflow_df.columns
+            )
             self.deltaPipelinesInternalTableOps.merge(
                 silver_dataflow_spec_df,
                 f"{database}.{table}",
                 ["dataFlowId"],
-                original_dataflow_df.columns,
+                merge_columns,
             )
         if not self.uc_enabled:
             self.register_silver_dataflow_spec_tables()
@@ -1019,6 +1190,9 @@ class OnboardDataflowspec:
         )
         bronze_fields = [field.name for field in dataclasses.fields(BronzeDataflowSpec)]
         bronze_dataflow_spec_df = bronze_dataflow_spec_df.select(bronze_fields)
+        bronze_dataflow_spec_df = self.__validate_quality_engine_switch(
+            bronze_dataflow_spec_df, dict_obj, "bronze"
+        )
         database = dict_obj["database"]
         table = dict_obj["bronze_dataflowspec_table"]
         if dict_obj["overwrite"] == "True":
@@ -1050,11 +1224,14 @@ class OnboardDataflowspec:
                 )
 
             logger.info("In Merge block for Bronze")
+            merge_columns = self.__ensure_quality_config_column(
+                f"{database}.{table}", original_dataflow_df.columns
+            )
             self.deltaPipelinesInternalTableOps.merge(
                 bronze_dataflow_spec_df,
                 f"{database}.{table}",
                 ["dataFlowId"],
-                original_dataflow_df.columns,
+                merge_columns,
             )
         if not self.uc_enabled:
             self.register_bronze_dataflow_spec_tables()
@@ -1305,6 +1482,8 @@ class OnboardDataflowspec:
             # and silently dropped on non-UC pipelines.
             "rowFilter",
             "quarantineRowFilter",
+            "qualityConfig",
+            "dqeContract",
         ]
         data_flow_spec_schema = StructType(
             [
@@ -1354,6 +1533,8 @@ class OnboardDataflowspec:
                 ),
                 StructField("rowFilter", StringType(), True),
                 StructField("quarantineRowFilter", StringType(), True),
+                StructField("qualityConfig", StringType(), True),
+                StructField("dqeContract", StringType(), True),
             ]
         )
         data = []
@@ -1498,6 +1679,7 @@ class OnboardDataflowspec:
             data_quality_expectations = None
             quarantine_target_details = {}
             quarantine_table_properties = {}
+            quality_config = None
             if f"bronze_data_quality_expectations_json_{env}" in onboarding_row:
                 bronze_data_quality_expectations_json = onboarding_row[
                     f"bronze_data_quality_expectations_json_{env}"
@@ -1506,10 +1688,27 @@ class OnboardDataflowspec:
                     data_quality_expectations = self.__get_data_quality_expecations(
                         bronze_data_quality_expectations_json
                     )
+                    self.__validate_quarantine_target(
+                        "bronze", onboarding_row, data_quality_expectations
+                    )
                     if onboarding_row["bronze_quarantine_table"]:
                         quarantine_target_details, quarantine_table_properties = self.__get_quarantine_details(
                             env, "bronze", onboarding_row
                         )
+            (
+                quality_config,
+                quality_quarantine_details,
+                quality_quarantine_properties,
+            ) = self.__get_quality_config(
+                env,
+                "bronze",
+                onboarding_row,
+                bronze_target_details,
+                schema,
+            )
+            if quality_config:
+                quarantine_target_details = quality_quarantine_details
+                quarantine_table_properties = quality_quarantine_properties
 
             append_flows, append_flows_schemas = self.get_append_flows_json(
                 onboarding_row, "bronze", env
@@ -1555,6 +1754,8 @@ class OnboardDataflowspec:
                 cdc_apply_changes_flows_schemas,
                 bronze_row_filter,
                 bronze_quarantine_row_filter,
+                quality_config,
+                DQE_CONTRACT_VERSION,
             )
             data.append(bronze_row)
             # logger.info(bronze_parition_columns)
@@ -1663,6 +1864,194 @@ class OnboardDataflowspec:
         raise Exception(
             f"Invalid {cluster_by_auto_key}: Expected boolean or string representation of boolean "
             f"but got {type(value).__name__}: '{value}'"
+        )
+
+    @staticmethod
+    def __validate_quarantine_target(layer, onboarding_row, data_quality_expectations):
+        """Require a quarantine table when legacy quarantine rules are configured."""
+        if not data_quality_expectations:
+            return
+        expectations = json.loads(data_quality_expectations)
+        if not expectations.get("expect_or_quarantine"):
+            return
+        field = f"{layer}_quarantine_table"
+        value = onboarding_row[field] if field in onboarding_row else None
+        if not value or not str(value).strip():
+            flow_id = onboarding_row["data_flow_id"] if "data_flow_id" in onboarding_row else "<unknown>"
+            raise ValueError(
+                f"Flow {flow_id} ({layer}) has expect_or_quarantine rules but "
+                f"{field} is missing or empty"
+            )
+
+    @staticmethod
+    def __onboarding_value(onboarding_row, field):
+        return onboarding_row[field] if field in onboarding_row else None
+
+    def __resolve_silver_quality_schema(
+        self, env, onboarding_row, source_details, target_table
+    ):
+        """Resolve the schema seen by Silver quality rules, when available."""
+        try:
+            if self.uc_enabled:
+                catalog = source_details.get("catalog")
+                table_name = ".".join(
+                    part
+                    for part in (
+                        catalog,
+                        source_details.get("database"),
+                        source_details.get("table"),
+                    )
+                    if part
+                )
+                if not table_name or not self.spark.catalog.tableExists(table_name):
+                    return None
+                source_df = self.spark.table(table_name)
+            else:
+                source_path = source_details.get("path")
+                if not source_path:
+                    return None
+                source_df = self.spark.read.format("delta").load(source_path)
+        except Exception as err:
+            error_class_getter = getattr(err, "getErrorClass", None)
+            error_class = error_class_getter() if error_class_getter else None
+            message = str(err)
+            if error_class in {
+                "PATH_NOT_FOUND",
+                "TABLE_OR_VIEW_NOT_FOUND",
+                "DELTA_TABLE_NOT_FOUND",
+            } or any(
+                marker in message
+                for marker in (
+                    "PATH_NOT_FOUND",
+                    "TABLE_OR_VIEW_NOT_FOUND",
+                    "DELTA_TABLE_NOT_FOUND",
+                    "does not exist",
+                    "doesn't exist",
+                )
+            ):
+                return None
+            raise InvalidQualityConfiguration(
+                f"Flow {onboarding_row['data_flow_id']} cannot resolve its "
+                f"Silver source schema: {err}"
+            ) from err
+
+        transformation_path = self.__onboarding_value(
+            onboarding_row, f"silver_transformation_json_{env}"
+        )
+        if not transformation_path:
+            return json.dumps(source_df.schema.jsonValue())
+
+        transformations = self._load_structured_file(transformation_path)
+        if not isinstance(transformations, list):
+            raise InvalidQualityConfiguration(
+                f"Silver transformations file '{transformation_path}' must "
+                "contain a list"
+            )
+        transformation = next(
+            (
+                entry
+                for entry in transformations
+                if isinstance(entry, dict)
+                and entry.get("target_table") == target_table
+            ),
+            None,
+        )
+        select_exp = transformation.get("select_exp") if transformation else None
+        if not select_exp:
+            return json.dumps(source_df.schema.jsonValue())
+        try:
+            transformed_schema = source_df.selectExpr(*select_exp).schema
+        except Exception as err:
+            raise InvalidQualityConfiguration(
+                f"Flow {onboarding_row['data_flow_id']} cannot resolve its "
+                f"Silver select transformation schema: {err}"
+            ) from err
+        return json.dumps(transformed_schema.jsonValue())
+
+    def __get_quality_config(
+        self,
+        env,
+        layer,
+        onboarding_row,
+        target_details,
+        source_schema=None,
+    ):
+        """Validate new-engine onboarding fields and build an immutable snapshot."""
+        row_values = (
+            onboarding_row.asDict(recursive=True)
+            if hasattr(onboarding_row, "asDict")
+            else dict(onboarding_row)
+        )
+        preflight_errors = collect_quality_configuration_errors(
+            [row_values],
+            env=env,
+            uc_enabled=self.uc_enabled,
+        )
+        if preflight_errors:
+            raise InvalidQualityConfiguration("\n".join(preflight_errors))
+
+        engine_field = quality_engine_field(layer)
+        rules_path_field = quality_rules_path_field(layer, env)
+        migration_field = quality_migration_field(layer)
+        engine = self.__onboarding_value(onboarding_row, engine_field)
+        rules_path = self.__onboarding_value(onboarding_row, rules_path_field)
+        migration = self.__onboarding_value(onboarding_row, migration_field)
+        if not engine:
+            return None, None, None
+        engine = str(engine).lower()
+
+        quarantine_details, quarantine_properties = self.__get_quarantine_details(
+            env, layer, onboarding_row
+        )
+        document, raw_text = load_rule_document(self.spark, rules_path)
+        schema = schema_from_json(source_schema)
+        plugin = resolve_quality_engine(engine, self.spark)
+        reserved_columns = plugin.reserved_columns()
+        conflicts = (
+            sorted(set(schema.fieldNames()) & set(reserved_columns))
+            if schema is not None
+            else []
+        )
+        if conflicts:
+            raise InvalidQualityConfiguration(
+                f"Flow {onboarding_row['data_flow_id']} source schema contains "
+                f"reserved quality columns: {', '.join(conflicts)}"
+            )
+        if engine == "lakeflow":
+            normalized, analysis_required = validate_lakeflow_rules(
+                self.spark, document, schema
+            )
+            quality_config = build_lakeflow_quality_config(
+                rules_path=rules_path,
+                raw_text=raw_text,
+                document=document,
+                normalized_rules=normalized,
+                analysis_required=analysis_required,
+                target_details=target_details,
+                quarantine_target_details=quarantine_details,
+                migration=migration,
+            )
+        else:
+            result = plugin.validate(document, {"schema": schema})
+            normalized, analysis_required = unpack_validation_result(
+                result
+            )
+            quality_config = build_plugin_quality_config(
+                engine=engine,
+                plugin=plugin,
+                rules_path=rules_path,
+                raw_text=raw_text,
+                document=document,
+                normalized_rules=normalized,
+                analysis_required=analysis_required,
+                target_details=target_details,
+                quarantine_target_details=quarantine_details,
+                migration=migration,
+            )
+        return (
+            json.dumps(quality_config, sort_keys=True),
+            quarantine_details,
+            quarantine_properties,
         )
 
     def __get_quarantine_details(self, env, layer, onboarding_row):
@@ -2276,6 +2665,8 @@ class OnboardDataflowspec:
             # and silently dropped on non-UC pipelines.
             "rowFilter",
             "quarantineRowFilter",
+            "qualityConfig",
+            "dqeContract",
         ]
         data_flow_spec_schema = StructType(
             [
@@ -2312,6 +2703,8 @@ class OnboardDataflowspec:
                 StructField("cdcApplyChangesFlows", StringType(), True),
                 StructField("rowFilter", StringType(), True),
                 StructField("quarantineRowFilter", StringType(), True),
+                StructField("qualityConfig", StringType(), True),
+                StructField("dqeContract", StringType(), True),
             ]
         )
         data = []
@@ -2507,6 +2900,7 @@ class OnboardDataflowspec:
             silver_quarantine_target_details = None
             silver_quarantine_table_properties = None
             silver_quarantine_cluster_by = None
+            quality_config = None
             if f"silver_data_quality_expectations_json_{env}" in onboarding_row:
                 silver_data_quality_expectations_json = onboarding_row[
                     f"silver_data_quality_expectations_json_{env}"
@@ -2515,6 +2909,9 @@ class OnboardDataflowspec:
                     data_quality_expectations = self.__get_data_quality_expecations(
                         silver_data_quality_expectations_json
                     )
+                    self.__validate_quarantine_target(
+                        "silver", onboarding_row, data_quality_expectations
+                    )
                 silver_quarantine_target_details, silver_quarantine_table_properties = self.__get_quarantine_details(
                     env, "silver", onboarding_row
                 )
@@ -2522,6 +2919,32 @@ class OnboardDataflowspec:
                     onboarding_row,
                     silver_quarantine_table_properties,
                     "silver_quarantine_cluster_by"
+                )
+            (
+                quality_config,
+                quality_quarantine_details,
+                quality_quarantine_properties,
+            ) = self.__get_quality_config(
+                env,
+                "silver",
+                onboarding_row,
+                silver_target_details,
+                self.__resolve_silver_quality_schema(
+                    env,
+                    onboarding_row,
+                    bronze_target_details,
+                    silver_target_details["table"],
+                )
+                if self.__onboarding_value(
+                    onboarding_row, quality_engine_field("silver")
+                )
+                else None,
+            )
+            if quality_config:
+                silver_quarantine_target_details = quality_quarantine_details
+                silver_quarantine_table_properties = quality_quarantine_properties
+                silver_quarantine_cluster_by = DataflowSpecUtils.get_partition_cols(
+                    quality_quarantine_details.get("cluster_by")
                 )
             append_flows, append_flow_schemas = self.get_append_flows_json(
                 onboarding_row, layer="silver", env=env
@@ -2577,6 +3000,8 @@ class OnboardDataflowspec:
                 silver_cdc_apply_changes_flows,
                 silver_row_filter,
                 silver_quarantine_row_filter,
+                quality_config,
+                DQE_CONTRACT_VERSION,
             )
             data.append(silver_row)
             logger.info(f"silver_data ==== {data}")

@@ -1,0 +1,23 @@
+- name: product_id_required
+  criticality: error
+  check:
+    function: is_not_null
+    arguments:
+      column: product_id
+- name: non_negative_price
+  criticality: error
+  check:
+    function: is_not_less_than
+    arguments:
+      column: price
+      limit: 0
+- name: category_warning
+  criticality: warn
+  check:
+    function: is_in_list
+    arguments:
+      column: category
+      allowed:
+        - "'electronics'"
+        - "'furniture'"
+        - "'grocery'"

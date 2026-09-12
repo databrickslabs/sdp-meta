@@ -11,7 +11,11 @@ import pyspark.sql.types as T
 from pyspark.sql import DataFrame
 from tests.utils import SDPFrameworkTestCase
 from unittest.mock import MagicMock, patch
-from databricks.labs.sdp_meta.dataflow_spec import BronzeDataflowSpec, SilverDataflowSpec
+from databricks.labs.sdp_meta.dataflow_spec import (
+    BronzeDataflowSpec,
+    DQE_CONTRACT_VERSION,
+    SilverDataflowSpec,
+)
 
 # The legacy ``dlt`` module has been replaced by ``pyspark.pipelines`` (imported
 # as ``dp``). On the test runner we don't have a Spark version that ships
@@ -852,6 +856,196 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
             expected_quarantine_table = f"{q_cl_name}{q_db}.{q_table_name}"
             self.assertEqual(quarantine_kwargs["name"], expected_quarantine_table)
 
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_legacy_quarantine_only_declares_main_and_quarantine(self, mock_dp):
+        """Strict-contract quarantine-only rules declare both output tables."""
+        mock_dp.table.side_effect = lambda func, **kwargs: func
+        mock_dp.expect_all_or_drop.side_effect = lambda rules: lambda func: func
+        rules = {"expect_or_quarantine": {"invalid_id": "id IS NULL"}}
+
+        for spec_class, spec_map, layer in (
+            (BronzeDataflowSpec, self.bronze_dataflow_spec_map, "bronze"),
+            (SilverDataflowSpec, self.silver_dataflow_spec_map, "silver"),
+        ):
+            with self.subTest(layer=layer):
+                mock_dp.reset_mock()
+                spec_values = copy.deepcopy(spec_map)
+                spec_values["dataQualityExpectations"] = json.dumps(rules)
+                spec_values["cdcApplyChanges"] = None
+                spec_values["dqeContract"] = DQE_CONTRACT_VERSION
+                spec_values["quarantineTargetDetails"] = {
+                    "database": f"{layer}_quarantine",
+                    "table": "invalid_rows",
+                }
+                spec = spec_class(**spec_values)
+                pipeline = DataflowPipeline(
+                    self.spark, spec, f"{spec.targetDetails['table']}_inputview"
+                )
+
+                pipeline.write_layer_with_dqe()
+
+                self.assertEqual(mock_dp.table.call_count, 2)
+                declared_names = [
+                    call.kwargs["name"] for call in mock_dp.table.call_args_list
+                ]
+                self.assertEqual(
+                    declared_names,
+                    [
+                        pipeline._get_target_table_info()[1],
+                        f"{layer}_quarantine.invalid_rows",
+                    ],
+                )
+                mock_dp.expect_all_or_drop.assert_called_once_with(
+                    rules["expect_or_quarantine"]
+                )
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_pre_upgrade_quarantine_only_preserves_old_topology(self, mock_dp):
+        """Pre-upgrade quarantine-only rows do not gain a new main table."""
+        mock_dp.table.side_effect = lambda func, **kwargs: func
+        mock_dp.expect_all_or_drop.side_effect = lambda rules: lambda func: func
+        spec_values = copy.deepcopy(self.bronze_dataflow_spec_map)
+        spec_values["dataQualityExpectations"] = json.dumps(
+            {"expect_or_quarantine": {"invalid_id": "id IS NULL"}}
+        )
+        spec_values["cdcApplyChanges"] = None
+        spec_values["dqeContract"] = None
+        spec_values["quarantineTargetDetails"] = {
+            "database": "bronze_quarantine",
+            "table": "invalid_rows",
+        }
+        pipeline = DataflowPipeline(
+            self.spark,
+            BronzeDataflowSpec(**spec_values),
+            "customer_inputview",
+        )
+
+        with self.assertLogs(
+            "databricks.labs.sdp_meta", level="WARNING"
+        ) as captured:
+            pipeline.write_layer_with_dqe()
+
+        mock_dp.table.assert_called_once()
+        self.assertEqual(
+            mock_dp.table.call_args.kwargs["name"],
+            "bronze_quarantine.invalid_rows",
+        )
+        self.assertIn("main table not declared", "\n".join(captured.output))
+
+    @patch.object(DataflowPipeline, "cdc_apply_changes")
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_legacy_cdc_with_quarantine_keeps_cdc_main_and_quarantine(
+        self, mock_dp, mock_cdc_apply_changes
+    ):
+        """Legacy CDC owns the main target while quarantine remains separate."""
+        mock_dp.table.side_effect = lambda func, **kwargs: func
+        mock_dp.expect_all_or_drop.side_effect = lambda rules: lambda func: func
+        spec_values = copy.deepcopy(self.bronze_dataflow_spec_map)
+        rules = {"expect_or_quarantine": {"invalid_id": "id IS NULL"}}
+        spec_values["dataQualityExpectations"] = json.dumps(rules)
+        spec_values["cdcApplyChanges"] = json.dumps(self.silver_cdc_apply_changes)
+        spec_values["quarantineTargetDetails"] = {
+            "database": "bronze_quarantine",
+            "table": "invalid_rows",
+        }
+        spec = BronzeDataflowSpec(**spec_values)
+        pipeline = DataflowPipeline(
+            self.spark, spec, f"{spec.targetDetails['table']}_inputview"
+        )
+
+        pipeline.write_layer_with_dqe()
+
+        mock_cdc_apply_changes.assert_called_once_with()
+        mock_dp.table.assert_called_once()
+        self.assertEqual(
+            mock_dp.table.call_args.kwargs["name"],
+            "bronze_quarantine.invalid_rows",
+        )
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_strict_contract_empty_quarantine_target_raises(self, mock_dp):
+        """Strict-contract rows fail if their quarantine target is empty."""
+        mock_dp.table.side_effect = lambda func, **kwargs: func
+        mock_dp.expect_all_or_drop.side_effect = lambda rules: lambda func: func
+        for spec_class, spec_map, layer in (
+            (BronzeDataflowSpec, self.bronze_dataflow_spec_map, "bronze"),
+            (SilverDataflowSpec, self.silver_dataflow_spec_map, "silver"),
+        ):
+            with self.subTest(layer=layer):
+                spec_values = copy.deepcopy(spec_map)
+                spec_values["dataQualityExpectations"] = json.dumps(
+                    {"expect_or_quarantine": {"invalid_id": "id IS NULL"}}
+                )
+                spec_values["cdcApplyChanges"] = None
+                spec_values["dqeContract"] = DQE_CONTRACT_VERSION
+                spec_values["quarantineTargetDetails"] = {
+                    "database": f"{layer}_quarantine",
+                    "table": "",
+                }
+                spec = spec_class(**spec_values)
+                pipeline = DataflowPipeline(
+                    self.spark,
+                    spec,
+                    f"{spec.targetDetails['table']}_inputview",
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    rf"Flow .* \({layer}\).*"
+                    rf"{layer}_quarantine_table is missing or empty",
+                ):
+                    pipeline.write_layer_with_dqe()
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_pre_upgrade_empty_quarantine_target_logs_and_skips(self, mock_dp):
+        """Pre-upgrade rows retain tolerant missing-target behavior."""
+        mock_dp.table.side_effect = lambda func, **kwargs: func
+        mock_dp.expect_all_or_drop.side_effect = lambda rules: lambda func: func
+        for spec_class, spec_map, layer in (
+            (BronzeDataflowSpec, self.bronze_dataflow_spec_map, "bronze"),
+            (SilverDataflowSpec, self.silver_dataflow_spec_map, "silver"),
+        ):
+            with self.subTest(layer=layer):
+                mock_dp.reset_mock()
+                spec_values = copy.deepcopy(spec_map)
+                spec_values["dataQualityExpectations"] = json.dumps(
+                    {"expect_or_quarantine": {"invalid_id": "id IS NULL"}}
+                )
+                spec_values["cdcApplyChanges"] = None
+                spec_values["dqeContract"] = None
+                spec_values["quarantineTargetDetails"] = {
+                    "database": f"{layer}_quarantine",
+                    "table": "",
+                }
+                pipeline = DataflowPipeline(
+                    self.spark,
+                    spec_class(**spec_values),
+                    f"{layer}_inputview",
+                )
+
+                with self.assertLogs(
+                    "databricks.labs.sdp_meta", level="ERROR"
+                ) as captured:
+                    pipeline.write_layer_with_dqe()
+
+                mock_dp.table.assert_not_called()
+                message = "\n".join(captured.output)
+                self.assertIn(
+                    f"{layer}_quarantine_table is missing or empty",
+                    message,
+                )
+                self.assertIn("quarantine skipped", message)
+
+    def test_legacy_inverse_quarantine_predicate_routing(self):
+        """Legacy quarantine predicates continue to describe invalid rows."""
+        rows = self.spark.createDataFrame([(1,), (None,)], "id int")
+        invalid = rows.filter(expr("id IS NULL")).collect()
+        main = rows.collect()
+
+        self.assertEqual(len(main), 2)
+        self.assertEqual(len(invalid), 1)
+        self.assertIsNone(invalid[0]["id"])
+
     @patch.object(DataflowPipeline, 'get_silver_schema', new_callable=MagicMock)
     @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
     @patch.object(DataflowPipeline, "create_streaming_table", new_callable=MagicMock)
@@ -1005,9 +1199,24 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
         mock_create_auto_cdc_flow = MagicMock(return_value=None)
         mock_dlt.create_auto_cdc_flow = mock_create_auto_cdc_flow
         onboarding_params_map = copy.deepcopy(self.onboarding_bronze_silver_params_map)
-        onboarding_params_map['onboarding_file_path'] = self.onboarding_json_v7_file
-        o_dfs = OnboardDataflowspec(self.spark, onboarding_params_map)
-        o_dfs.onboard_bronze_dataflow_spec()
+        with open(self.onboarding_json_v7_file, encoding="utf-8") as handle:
+            legacy_rows = json.load(handle)
+        legacy_rows = [
+            row for row in legacy_rows if row["data_flow_id"] == "100"
+        ]
+        legacy_rows[0]["bronze_database_quarantine_dev"] = "bronze"
+        legacy_rows[0]["bronze_quarantine_table"] = "customers_quarantine"
+        legacy_rows[0]["bronze_quarantine_table_path_dev"] = (
+            "tests/resources/data/bronze/customers_quarantine"
+        )
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", encoding="utf-8"
+        ) as filtered:
+            json.dump(legacy_rows, filtered)
+            filtered.flush()
+            onboarding_params_map['onboarding_file_path'] = filtered.name
+            o_dfs = OnboardDataflowspec(self.spark, onboarding_params_map)
+            o_dfs.onboard_bronze_dataflow_spec()
         bronze_dataflowSpec_df = self.spark.read.format("delta").load(
             self.onboarding_bronze_silver_params_map['bronze_dataflowspec_path']
         )
@@ -1518,6 +1727,125 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
         pipeline = DataflowPipeline(self.spark, bronze_dataflow_spec, view_name, None)
         pipeline.write_bronze()
         assert mock_write_layer_with_dqe.called
+
+    @patch.object(DataflowPipeline, "write_layer_with_quality_engine")
+    def test_write_bronze_dispatches_quality_config(self, mock_quality_writer):
+        """qualityConfig selects the new writer before legacy topology branches."""
+        spec_values = copy.deepcopy(self.bronze_dataflow_spec_map)
+        spec_values["dataQualityExpectations"] = None
+        spec_values["cdcApplyChanges"] = None
+        spec_values["qualityConfig"] = json.dumps({"engine": "lakeflow"})
+        spec = BronzeDataflowSpec(**spec_values)
+        pipeline = DataflowPipeline(
+            self.spark, spec, f"{spec.targetDetails['table']}_inputview"
+        )
+
+        pipeline.write_bronze()
+
+        mock_quality_writer.assert_called_once_with()
+
+    @patch("databricks.labs.sdp_meta.dataflow_pipeline.DLTSinkWriter")
+    def test_quality_preflight_rejects_mixed_config_before_sinks(
+        self, mock_sink_writer
+    ):
+        """Hand-edited mixed rows fail before any sink or table declaration."""
+        spec_values = copy.deepcopy(self.bronze_dataflow_spec_map)
+        spec_values["qualityConfig"] = json.dumps({"engine": "lakeflow"})
+        spec_values["sinks"] = json.dumps([{"name": "audit"}])
+        spec = BronzeDataflowSpec(**spec_values)
+        pipeline = DataflowPipeline(
+            self.spark, spec, f"{spec.targetDetails['table']}_inputview"
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "cannot combine qualityConfig with dataQualityExpectations"
+        ):
+            pipeline.write()
+
+        mock_sink_writer.assert_not_called()
+
+    def test_quality_preflight_rejects_unsupported_topologies(self):
+        """Persisted new-engine rows cannot bypass source-mode restrictions."""
+        scenarios = {
+            "cdcApplyChanges": "{}",
+            "cdcApplyChangesFlows": "{}",
+            "applyChangesFromSnapshot": "{}",
+            "appendFlows": "[]",
+        }
+        for field, value in scenarios.items():
+            with self.subTest(field=field):
+                spec_values = copy.deepcopy(self.bronze_dataflow_spec_map)
+                spec_values["dataQualityExpectations"] = None
+                spec_values["cdcApplyChanges"] = None
+                spec_values["qualityConfig"] = json.dumps({"engine": "lakeflow"})
+                spec = BronzeDataflowSpec(**spec_values)
+                pipeline = DataflowPipeline(
+                    self.spark, spec, f"{spec.targetDetails['table']}_inputview"
+                )
+                setattr(pipeline.dataflowSpec, field, value)
+
+                with patch(
+                    "databricks.labs.sdp_meta.quality.validation."
+                    "validate_runtime_quality_config"
+                ):
+                    with self.assertRaisesRegex(ValueError, field):
+                        pipeline._validate_quality_preflight()
+
+    def test_quality_preflight_rejects_incomplete_quarantine_target(self):
+        """New engines always require a complete quarantine output target."""
+        self.spark.conf.set("spark.databricks.unityCatalog.enabled", "False")
+        spec_values = copy.deepcopy(self.bronze_dataflow_spec_map)
+        spec_values["dataQualityExpectations"] = None
+        spec_values["cdcApplyChanges"] = None
+        spec_values["qualityConfig"] = json.dumps({"engine": "lakeflow"})
+        spec_values["quarantineTargetDetails"] = {
+            "database": "bronze_quarantine",
+            "table": "",
+            "path": "",
+        }
+        spec = BronzeDataflowSpec(**spec_values)
+        pipeline = DataflowPipeline(
+            self.spark, spec, f"{spec.targetDetails['table']}_inputview"
+        )
+
+        with patch(
+            "databricks.labs.sdp_meta.quality.validation."
+            "validate_runtime_quality_config"
+        ):
+            with self.assertRaisesRegex(
+                ValueError, r"missing: table, path"
+            ):
+                pipeline._validate_quality_preflight()
+
+    def test_quality_preflight_rejects_snapshot_target_divergence(self):
+        """Runtime output targets must match the immutable snapshot."""
+        spec_values = copy.deepcopy(self.bronze_dataflow_spec_map)
+        spec_values["dataQualityExpectations"] = None
+        spec_values["cdcApplyChanges"] = None
+        snapshot_quarantine = dict(
+            spec_values["quarantineTargetDetails"]
+        )
+        snapshot_quarantine["table"] = "different_quarantine"
+        spec_values["qualityConfig"] = json.dumps({
+            "engine": "lakeflow",
+            "output_targets": {
+                "main": dict(spec_values["targetDetails"]),
+                "quarantine": snapshot_quarantine,
+            },
+        })
+        spec = BronzeDataflowSpec(**spec_values)
+        pipeline = DataflowPipeline(
+            self.spark, spec, f"{spec.targetDetails['table']}_inputview"
+        )
+
+        with patch(
+            "databricks.labs.sdp_meta.quality.validation."
+            "validate_runtime_quality_config"
+        ):
+            with self.assertRaisesRegex(
+                ValueError, "immutable qualityConfig snapshot: quarantine"
+            ):
+                pipeline._validate_quality_preflight()
 
     @patch.object(DataflowPipeline, 'cdc_apply_changes', return_value=None)
     def test_write_bronze_cdc_apply_changes(self, mock_cdc_apply_changes):

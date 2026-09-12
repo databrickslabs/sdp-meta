@@ -41,6 +41,20 @@ def _setup_kwargs(setup_py: Path) -> dict:
     raise AssertionError(f"no setup() call found in {setup_py}")
 
 
+def _literal_assignment(setup_py: Path, name: str):
+    tree = ast.parse(setup_py.read_text(encoding="utf-8"), str(setup_py))
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == name
+                for target in node.targets
+            )
+        ):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"{name} is not assigned in {setup_py}")
+
+
 class PythonSupportMetadataTests(unittest.TestCase):
 
     def setUp(self):
@@ -121,6 +135,31 @@ class McpDependencyMetadataTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn(f'MCP_REQUIREMENTS = ["{expected}"]', setup_text)
         self.assertIn(expected, requirements_text.splitlines())
+
+
+class RequirementManifestSyncTests(unittest.TestCase):
+
+    def test_runtime_requirements_match_setup(self):
+        required = _literal_assignment(PRIMARY_SETUP, "INSTALL_REQUIRES")
+        manifest = (
+            REPO_ROOT / "requirements.txt"
+        ).read_text(encoding="utf-8").splitlines()
+        for dependency in required:
+            self.assertIn(dependency, manifest)
+
+    def test_development_requirements_match_setup(self):
+        required = []
+        for name in (
+            "DEV_REQUIREMENTS",
+            "IT_REQUIREMENTS",
+            "MCP_REQUIREMENTS",
+        ):
+            required.extend(_literal_assignment(PRIMARY_SETUP, name))
+        manifest = (
+            REPO_ROOT / "requirements-dev.txt"
+        ).read_text(encoding="utf-8").splitlines()
+        for dependency in required:
+            self.assertIn(dependency, manifest)
 
 
 if __name__ == "__main__":

@@ -24,7 +24,7 @@ end-to-end with no CLI setup required.
 
 | Stage | Feature |
 |-------|---------|
-| 1 | Setup — UC catalog, schemas, volume, **row-filter UDF**, config files, synthetic data |
+| 1 | Setup — UC catalog, schemas, volume, **row-filter UDF**, selected quality-engine rules, synthetic data |
 | 2 | Onboarding — JSON → DataflowSpec tables (`bronze_dataflowspec`, `silver_dataflowspec`) |
 | 3 | Pipeline creation and first run (fully automated via Databricks SDK) |
 | 4 | Validate initial Bronze + Silver tables, quarantine tables, SCD Type 2 history |
@@ -41,7 +41,8 @@ end-to-end with no CLI setup required.
 
 - Metadata-driven onboarding (JSON or YAML → DataflowSpec → generic pipeline)
 - CloudFiles (Autoloader) ingestion with schema enforcement
-- Data quality rules: `expect_or_drop` and `expect_or_quarantine`
+- Selectable Bronze quality implementation: legacy DQE, built-in Lakeflow, or Databricks Labs DQX
+- DQX error/warning diagnostic columns and compatible dependency installation when DQX is selected
 - Quarantine tables for bad records
 - CDC with `apply_changes` (SCD Type 2)
 - Liquid clustering (`cluster_by_auto`)
@@ -71,6 +72,7 @@ The notebook is fully driven by widgets at the top — same ones the headless la
 | `uc_schema_name` | text, default `retail_data` | Schema within the catalog. Same identifier rules as above. The demo creates `<schema>_bronze`, `<schema>_silver`, `<schema>_pipeline_default` underneath. |
 | `data_source` | dropdown `dbdatagen` (default) / `github` | `dbdatagen` generates synthetic retail data with `dbldatagen` (no internet needed); `github` downloads fixed CSVs from the sdp-meta repo (requires outbound internet from the workspace). |
 | `onboarding_format` | dropdown `json` (default) / `yml` | Whether the rendered onboarding spec + silver-transformations files are written as JSON or YAML. The demo reads back the matching `demo/conf/<format>/sample_onboarding.<ext>` template. |
+| `quality_engine` | dropdown `legacy` (default) / `lakeflow` / `dqx` | Quality implementation for the standard customers, transactions, products, and stores Bronze feeds. `lakeflow` and `dqx` populate the new `bronze_quality_*` onboarding fields. Silver uses CDC and retains its existing legacy expectations. DQX is installed only when selected. |
 | `install_source` | dropdown `git_branch` (default) / `whl_file` | Where to install SDP-META from. `git_branch` runs `pip install git+https://github.com/databrickslabs/sdp-meta.git@<git_branch>`; `whl_file` runs `pip install <whl_file_path>` against a Volume / Workspace path. Use `whl_file` when validating local changes that aren't pushed yet. |
 | `whl_file_path` | text, default empty | Path to the wheel when `install_source=whl_file`, e.g. `/Volumes/<catalog>/<schema>/<volume>/databricks_labs_sdp_meta-<version>-py3-none-any.whl`. Required when `install_source=whl_file`; ignored otherwise. |
 | `validate_counts` | dropdown `false` (default) / `true` | When `true`, the final cell turns the demo into a smoke test: it asserts deterministic row counts (`bronze.orders == 7`, `bronze.iot_events == 5`, snapshot tables `>= LOAD_2 size`, multi-source CDC bronze `customers_{us,eu,apac}_cdc == 5` each, silver `customers_regional == 6`) and non-empty for every demo-produced bronze / silver / quarantine table, raising a single `AssertionError` listing every failure. Use in CI / pre-release smoke runs. |
@@ -104,6 +106,7 @@ python demo/launch_interactive_demo.py \
     --install-source whl_file \
     --whl-file-path /Volumes/<catalog>/<schema>/<volume>/databricks_labs_sdp_meta-<version>-py3-none-any.whl \
     --data-source dbdatagen \
+    --quality-engine dqx \
     --validate-counts true \
     --cleanup true \
     --timeout-minutes 25
@@ -133,6 +136,7 @@ Run `python demo/launch_interactive_demo.py --help` for the full flag surface. S
 | `--build-and-upload-whl` | sets `install_source=whl_file` + `whl_file_path=<uploaded path>` | Builds the local sdp-meta wheel via `bundle_prepare_wheel` and uploads it to `/Volumes/<catalog>/<uc-schema-name>/<uc-volume-name>/`. Requires `--uc-schema-name` and `--uc-volume-name`. |
 | `--data-source` | `data_source` | `dbdatagen` (default) or `github`. |
 | `--onboarding-format` | `onboarding_format` | `json` (default) or `yml`. |
+| `--quality-engine` | `quality_engine` | `legacy` (default), `lakeflow`, or `dqx`. |
 | `--validate-counts` | `validate_counts` | `true` (default for the launcher) or `false`. When `true`, the job FAILS on row-count regression. |
 | `--cleanup` | `cleanup` | `false` (default) or `true`. Set `true` for CI runs that need to leave the workspace clean. |
 | `--timeout-minutes` | n/a (driver) | Max wall-clock for the launcher to wait on the job. Default 90; for cold workspaces with all 4 pipelines, 20-25 is comfortable. |

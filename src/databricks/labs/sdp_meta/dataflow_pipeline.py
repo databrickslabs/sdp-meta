@@ -7,7 +7,12 @@ from pyspark import pipelines as dp
 from pyspark.sql import DataFrame
 from pyspark.sql.functions import expr, struct
 from pyspark.sql.types import StructType, StructField
-from databricks.labs.sdp_meta.dataflow_spec import BronzeDataflowSpec, SilverDataflowSpec, DataflowSpecUtils
+from databricks.labs.sdp_meta.dataflow_spec import (
+    BronzeDataflowSpec,
+    DataflowSpecUtils,
+    DQE_CONTRACT_VERSION,
+    SilverDataflowSpec,
+)
 from databricks.labs.sdp_meta.pipeline_writers import AppendFlowWriter, DLTSinkWriter
 from databricks.labs.sdp_meta.__about__ import __version__
 from databricks.labs.sdp_meta.pipeline_readers import PipelineReaders
@@ -159,6 +164,13 @@ class DataflowPipeline:
     def table_has_expectations(self):
         """Table has expectations check."""
         return self.dataflowSpec.dataQualityExpectations is not None
+
+    def _legacy_dqe_strict(self):
+        """Whether this row was onboarded under the strict legacy-DQE contract."""
+        return (
+            getattr(self.dataflowSpec, "dqeContract", None)
+            == DQE_CONTRACT_VERSION
+        )
 
     def _get_row_filter(self):
         """Return rowFilter when UC is enabled — row filters are a UC-only feature.
@@ -350,6 +362,7 @@ class DataflowPipeline:
 
     def write(self):
         """Write DLT."""
+        self._validate_quality_preflight()
         if self.dataflowSpec.sinks:
             dlt_sinks = DataflowSpecUtils.get_sinks(self.dataflowSpec.sinks, self.spark)
             for dlt_sink in dlt_sinks:
@@ -360,6 +373,95 @@ class DataflowPipeline:
             self.write_silver()
         else:
             raise Exception(f"Dataflow write not supported for type= {type(self.dataflowSpec)}")
+
+    def _validate_quality_preflight(self):
+        """Reject invalid quality-engine rows before declaring output datasets."""
+        quality_config_json = getattr(self.dataflowSpec, "qualityConfig", None)
+        legacy_config = getattr(self.dataflowSpec, "dataQualityExpectations", None)
+        if quality_config_json and legacy_config:
+            raise ValueError(
+                f"Flow {self.dataflowSpec.dataFlowId} cannot combine "
+                "qualityConfig with dataQualityExpectations"
+            )
+        if not quality_config_json:
+            return
+        try:
+            quality_config = json.loads(quality_config_json)
+        except (TypeError, json.JSONDecodeError) as err:
+            raise ValueError(
+                f"Flow {self.dataflowSpec.dataFlowId} has invalid qualityConfig JSON"
+            ) from err
+        from databricks.labs.sdp_meta.quality.validation import (
+            validate_runtime_quality_config,
+        )
+        validate_runtime_quality_config(quality_config)
+
+        unsupported = []
+        if getattr(self.dataflowSpec, "cdcApplyChanges", None):
+            unsupported.append("cdcApplyChanges")
+        if getattr(self.dataflowSpec, "cdcApplyChangesFlows", None):
+            unsupported.append("cdcApplyChangesFlows")
+        if getattr(self.dataflowSpec, "applyChangesFromSnapshot", None):
+            unsupported.append("applyChangesFromSnapshot")
+        if getattr(self.dataflowSpec, "appendFlows", None):
+            unsupported.append("appendFlows")
+        if (
+            isinstance(self.dataflowSpec, BronzeDataflowSpec)
+            and getattr(self.dataflowSpec, "sourceFormat", "").lower() == "snapshot"
+        ):
+            unsupported.append("snapshot sourceFormat")
+        if unsupported:
+            raise ValueError(
+                f"Flow {self.dataflowSpec.dataFlowId} quality engine does not support: "
+                f"{', '.join(unsupported)}"
+            )
+
+        quarantine_target = self._get_quarantine_target_details()
+        missing = [
+            field for field in ("database", "table")
+            if not str(quarantine_target.get(field, "")).strip()
+        ]
+        if not self.uc_enabled and not str(quarantine_target.get("path", "")).strip():
+            missing.append("path")
+        if missing:
+            raise ValueError(
+                f"Flow {self.dataflowSpec.dataFlowId} quality engine requires complete "
+                f"quarantineTargetDetails; missing: {', '.join(missing)}"
+            )
+        identity_fields = ["catalog", "database", "table"]
+        if not self.uc_enabled:
+            identity_fields.append("path")
+
+        def target_identity(details):
+            return tuple(
+                details.get(field) or None
+                for field in identity_fields
+            )
+
+        configured_targets = {
+            "main": self._get_target_details(),
+            "quarantine": quarantine_target,
+        }
+        snapshot_targets = quality_config["output_targets"]
+        mismatches = [
+            name
+            for name, configured in configured_targets.items()
+            if target_identity(configured)
+            != target_identity(snapshot_targets[name])
+        ]
+        if mismatches:
+            raise ValueError(
+                f"Flow {self.dataflowSpec.dataFlowId} output target details "
+                "differ from its immutable qualityConfig snapshot: "
+                + ", ".join(mismatches)
+            )
+
+    def write_layer_with_quality_engine(self):
+        """Declare main and quarantine outputs through the shared quality writer."""
+        # Keep optional quality-engine dependencies off the legacy import path.
+        from databricks.labs.sdp_meta.quality.writer import QualityEngineWriter
+
+        return QualityEngineWriter(self).write()
 
     def _get_target_table_info(self):
         """Extract target table information from dataflow spec."""
@@ -407,6 +509,9 @@ class DataflowPipeline:
     def write_layer_table(self):
         """Write Bronze or Silver tables using unified logic."""
         is_bronze = isinstance(self.dataflowSpec, BronzeDataflowSpec)
+        if getattr(self.dataflowSpec, "qualityConfig", None):
+            self.write_layer_with_quality_engine()
+            return
         # Handle special cases first
         if is_bronze:
             bronze_spec = self.dataflowSpec
@@ -613,6 +718,7 @@ class DataflowPipeline:
     def write_layer_with_dqe(self):
         """Write Bronze or Silver table with data quality expectations."""
         is_bronze = isinstance(self.dataflowSpec, BronzeDataflowSpec)
+        flow_id = getattr(self.dataflowSpec, "dataFlowId", "<unknown>")
         data_quality_expectations_json = json.loads(self.dataflowSpec.dataQualityExpectations)
 
         dlt_table_with_expectation = None
@@ -686,6 +792,29 @@ class DataflowPipeline:
                 else:
                     dlt_table_with_expectation = dp.expect_all_or_drop(expect_all_or_drop_dict)(
                         dlt_table_with_expectation)
+            if (
+                expect_or_quarantine_dict
+                and not expect_all_dict
+                and not expect_all_or_fail_dict
+                and not expect_all_or_drop_dict
+            ):
+                if self._legacy_dqe_strict():
+                    dlt_table_with_expectation = dp.table(
+                        self.write_to_delta,
+                        name=f"{target_table}",
+                        table_properties=self.dataflowSpec.tableProperties,
+                        partition_cols=DataflowSpecUtils.get_partition_cols(self.dataflowSpec.partitionColumns),
+                        cluster_by=DataflowSpecUtils.get_partition_cols(self.dataflowSpec.clusterBy),
+                        cluster_by_auto=cluster_by_auto,
+                        path=target_path,
+                        comment=target_comment,
+                        row_filter=self._get_row_filter(),
+                    )
+                else:
+                    logger.warning(
+                        f"Flow {flow_id}: pre-upgrade quarantine-only spec; "
+                        "main table not declared. Re-onboard to declare it."
+                    )
             # Handle quarantine table (Bronze and Silver layers)
         if expect_or_quarantine_dict:
             q_partition_cols = None
@@ -717,7 +846,18 @@ class DataflowPipeline:
 
             # Check if quarantine_table_name is not empty (handles both None and empty string)
             if not quarantine_table_name or quarantine_table_name.strip() == '':
-                logger.warning("Quarantine table name is empty or None. Skipping quarantine table creation.")
+                layer_name = "bronze" if is_bronze else "silver"
+                msg = (
+                    f"Flow {flow_id} ({layer_name}) has expect_or_quarantine rules but "
+                    f"{layer_name}_quarantine_table is missing or empty"
+                )
+                if self._legacy_dqe_strict():
+                    raise ValueError(msg)
+                logger.error(
+                    msg
+                    + "; quarantine skipped for this pre-upgrade spec row. "
+                    "Re-onboard with the field set to enable quarantine."
+                )
                 return
 
             quarantine_table = self._build_table_name(quarantine_cl, quarantine_db, quarantine_table_name)

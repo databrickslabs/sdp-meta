@@ -30,7 +30,13 @@ The Bronze layer ingests raw data from source systems into Delta tables with min
 | `kafka` | Apache Kafka streaming source |
 | `snapshot` | Snapshot-based CDC using `create_auto_cdc_from_snapshot_flow` |
 
-When a Bronze flow has data quality expectations with the `drop` action, failing rows are automatically written to `<target_table>_quarantine`. SDP-META creates the quarantine table with the target schema plus an `_error` column. Liquid clustering is supported on both tables.
+`expect_or_drop` failures are discarded and are not written to quarantine.
+Quarantine routing requires `expect_or_quarantine` plus an explicitly
+configured quarantine catalog/schema/table (and path for non-UC pipelines);
+SDP-META never derives the quarantine table name. The opt-in Lakeflow quality
+engine retains structured `_errors` diagnostics in quarantine, while the
+legacy path adds no diagnostic column. Liquid clustering is supported on both
+main and quarantine tables.
 
 ## Silver layer
 

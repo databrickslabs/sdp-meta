@@ -1297,6 +1297,8 @@ class EndToEndRenderTests(unittest.TestCase):
             "pipeline_mode": "split",
             "source_format": "cloudFiles",
             "onboarding_file_format": "yaml",
+            "quality_engine": "none",
+            "managed_quality_migrations": False,
             "dataflow_group": "demo_group",
             "wheel_source": "pypi",
             "sdp_meta_dependency": "databricks-labs-sdp-meta==0.1.0",
@@ -1347,6 +1349,12 @@ class EndToEndRenderTests(unittest.TestCase):
         else:
             self.assertEqual(set(pipes), {"bronze", "silver"})
 
+        runner = pipelines_doc["resources"]["jobs"]["pipelines"]
+        for task in runner["tasks"]:
+            self.assertIn("pipeline_task", task)
+            self.assertNotIn("python_wheel_task", task)
+        self.assertNotIn("environments", runner)
+
         # Every pipeline carries the sdp_meta tag (wired to the
         # sdp_meta_version bundle variable) so the SDP-META App and the
         # workspace UI tag search find bundle-deployed pipelines the same
@@ -1383,6 +1391,130 @@ class EndToEndRenderTests(unittest.TestCase):
         with _tempdir() as tmp:
             rendered = self._render(self._common_answers(), tmp)
             self._assert_rendered_bundle_is_valid(rendered, expect_ext="yml", expect_layer="bronze_silver")
+
+    def test_bronze_silver_yaml_lakeflow_quality_engine(self):
+        with _tempdir() as tmp:
+            rendered = self._render(
+                self._common_answers(
+                    layer="bronze_silver",
+                    quality_engine="lakeflow",
+                ),
+                tmp,
+            )
+            onboarding = yaml.safe_load(
+                (rendered / "conf" / "onboarding.yml").read_text()
+            )[0]
+            self.assertEqual(onboarding["bronze_quality_engine"], "lakeflow")
+            self.assertEqual(
+                onboarding["bronze_quarantine_table"],
+                "example_table_quarantine",
+            )
+            self.assertNotIn(
+                "bronze_data_quality_expectations_json_dev", onboarding
+            )
+            self.assertEqual(onboarding["silver_quality_engine"], "lakeflow")
+            self.assertEqual(
+                onboarding["silver_quarantine_table"],
+                "example_table_quarantine",
+            )
+            for layer in ("bronze", "silver"):
+                rules = (
+                    rendered / "conf" / "quality" / "example_table"
+                    / f"{layer}_rules.yml"
+                )
+                self.assertTrue(rules.is_file())
+                self.assertIn(
+                    "expect_or_quarantine", yaml.safe_load(rules.read_text())
+                )
+
+    def test_managed_quality_migration_runner_is_explicit(self):
+        with _tempdir() as tmp:
+            rendered = self._render(
+                self._common_answers(
+                    layer="bronze",
+                    quality_engine="lakeflow",
+                    managed_quality_migrations=True,
+                ),
+                tmp,
+            )
+            pipelines_doc = yaml.safe_load(
+                (
+                    rendered
+                    / "resources"
+                    / "sdp_meta_pipelines.yml"
+                ).read_text()
+            )
+            runner = pipelines_doc["resources"]["jobs"]["pipelines"]
+            task = runner["tasks"][0]
+            self.assertIn("python_wheel_task", task)
+            self.assertNotIn("pipeline_task", task)
+            self.assertEqual(
+                task["python_wheel_task"]["entry_point"],
+                "quality_migrate",
+            )
+            self.assertIn("environments", runner)
+
+    def test_lakeflow_snapshot_bundle_fails_static_validation(self):
+        with _tempdir() as tmp:
+            rendered = self._render(
+                self._common_answers(
+                    layer="bronze",
+                    source_format="snapshot",
+                    quality_engine="lakeflow",
+                ),
+                tmp,
+            )
+            errors = _sdp_meta_sanity_checks(rendered)
+            self.assertTrue(
+                any("with snapshot sources" in error for error in errors),
+                errors,
+            )
+
+    def test_snapshot_bronze_with_standard_silver_quality_is_valid(self):
+        with _tempdir() as tmp:
+            rendered = self._render(
+                self._common_answers(
+                    layer="bronze_silver",
+                    source_format="snapshot",
+                    quality_engine="lakeflow",
+                ),
+                tmp,
+            )
+            onboarding_path = rendered / "conf" / "onboarding.yml"
+            onboarding = yaml.safe_load(onboarding_path.read_text())
+            flow = onboarding[0]
+            flow.pop("bronze_quality_engine", None)
+            for key in list(flow):
+                if key.startswith("bronze_quality_rules_path_"):
+                    flow.pop(key)
+            onboarding_path.write_text(
+                yaml.safe_dump(onboarding, sort_keys=False)
+            )
+
+            errors = _sdp_meta_sanity_checks(rendered)
+
+            self.assertFalse(
+                any("with snapshot sources" in error for error in errors),
+                errors,
+            )
+
+    def test_delta_lakeflow_rules_do_not_reference_rescued_data(self):
+        with _tempdir() as tmp:
+            rendered = self._render(
+                self._common_answers(
+                    layer="bronze",
+                    source_format="delta",
+                    quality_engine="lakeflow",
+                ),
+                tmp,
+            )
+            rules = yaml.safe_load(
+                (
+                    rendered / "conf" / "quality" / "example_table"
+                    / "bronze_rules.yml"
+                ).read_text()
+            )
+            self.assertEqual(rules["expect"], {})
 
     def test_rendered_databricks_yml_keeps_run_as_block_commented(self):
         """E2E lock-in: the run_as guidance lives in the rendered bundle so

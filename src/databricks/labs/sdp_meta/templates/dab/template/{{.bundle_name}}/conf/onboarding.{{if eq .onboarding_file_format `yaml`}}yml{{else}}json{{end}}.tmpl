@@ -57,7 +57,14 @@ in variables.yml).
   {{- end}}
   bronze_table_path_dev: ""
   bronze_partition_columns: ""
+  {{- if ne .quality_engine "none"}}
+  bronze_quality_engine: "{{.quality_engine}}"
+  bronze_quality_rules_path_dev: "${workspace.file_path}/conf/quality/example_table/bronze_rules.yml"
+  bronze_database_quarantine_dev: "{{.uc_catalog_name}}.{{.bronze_target_schema}}"
+  bronze_quarantine_table: "example_table_quarantine"
+  {{- else}}
   bronze_data_quality_expectations_json_dev: "${workspace.file_path}/conf/dqe/example_table/bronze_expectations.yml"
+  {{- end}}
   {{- end}}
   {{- if or (eq .layer "silver") (eq .layer "bronze_silver")}}
   silver_database_dev: "{{.uc_catalog_name}}.{{.silver_target_schema}}"
@@ -66,6 +73,12 @@ in variables.yml).
   silver_partition_columns: ""
   silver_table_path_dev: ""
   silver_transformation_json_dev: "${workspace.file_path}/conf/silver_transformations.yml"
+  {{- if ne .quality_engine "none"}}
+  silver_quality_engine: "{{.quality_engine}}"
+  silver_quality_rules_path_dev: "${workspace.file_path}/conf/quality/example_table/silver_rules.yml"
+  silver_database_quarantine_dev: "{{.uc_catalog_name}}.{{.silver_target_schema}}"
+  silver_quarantine_table: "example_table_quarantine"
+  {{- end}}
   {{- end}}
 {{- else}}
 [
@@ -114,7 +127,14 @@ in variables.yml).
     }{{else}}{}{{end}},
     "bronze_table_path_dev": "",
     "bronze_partition_columns": "",
+    {{- if ne .quality_engine "none"}}
+    "bronze_quality_engine": "{{.quality_engine}}",
+    "bronze_quality_rules_path_dev": "${workspace.file_path}/conf/quality/example_table/bronze_rules.json",
+    "bronze_database_quarantine_dev": "{{.uc_catalog_name}}.{{.bronze_target_schema}}",
+    "bronze_quarantine_table": "example_table_quarantine"
+    {{- else}}
     "bronze_data_quality_expectations_json_dev": "${workspace.file_path}/conf/dqe/example_table/bronze_expectations.json"
+    {{- end}}
     {{- end}}
     {{- if or (eq .layer "silver") (eq .layer "bronze_silver")}},
     "silver_database_dev": "{{.uc_catalog_name}}.{{.silver_target_schema}}",
@@ -123,6 +143,12 @@ in variables.yml).
     "silver_partition_columns": "",
     "silver_table_path_dev": "",
     "silver_transformation_json_dev": "${workspace.file_path}/conf/silver_transformations.json"
+    {{- if ne .quality_engine "none"}},
+    "silver_quality_engine": "{{.quality_engine}}",
+    "silver_quality_rules_path_dev": "${workspace.file_path}/conf/quality/example_table/silver_rules.json",
+    "silver_database_quarantine_dev": "{{.uc_catalog_name}}.{{.silver_target_schema}}",
+    "silver_quarantine_table": "example_table_quarantine"
+    {{- end}}
     {{- end}}
   }
 ]

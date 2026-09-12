@@ -57,3 +57,6 @@ resources:
             client: "1"
             dependencies:
               - ${var.sdp_meta_dependency}
+{{- if eq .quality_engine "dqx"}}
+              - databricks-labs-dqx>=0.14,<0.17
+{{- end}}

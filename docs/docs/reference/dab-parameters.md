@@ -12,7 +12,7 @@ This page covers all parameters exposed when scaffolding a bundle with `databric
 
 ## Bundle Init Prompts
 
-When you run `databricks labs sdp-meta bundle-init`, the template walks you through 13 prompts. Pass `--quickstart` to skip all prompts and accept developer defaults.
+When you run `databricks labs sdp-meta bundle-init`, the template walks you through 15 prompts. Pass `--quickstart` to skip all prompts and accept developer defaults.
 
 | # | Prompt Key | Default | Description |
 |---|---|---|---|
@@ -25,10 +25,12 @@ When you run `databricks labs sdp-meta bundle-init`, the template walks you thro
 | 7 | `pipeline_mode` | `split` | Only relevant when `layer=bronze_silver`. `split` deploys two pipelines (silver depends on bronze); `combined` deploys a single pipeline with both layers in one DAG |
 | 8 | `source_format` | `cloudFiles` | Seed format for the example flow: `cloudFiles`, `delta`, `kafka`, `eventhub`, or `snapshot` |
 | 9 | `onboarding_file_format` | `yaml` | File format for generated onboarding and transformation files: `yaml` or `json` |
-| 10 | `dataflow_group` | `my_group` | The `data_flow_group` value used in the seeded onboarding file — must match the pipeline's `*.group` configuration |
-| 11 | `wheel_source` | `pypi` | Where sdp-meta is installed from: `pypi` or `volume_path` |
-| 12 | `sdp_meta_dependency` | `__SET_ME__` | Concrete install specification: a PyPI coordinate (e.g. `databricks-labs-sdp-meta==0.1.0`) or a `/Volumes/...` wheel path |
-| 13 | `author` | `sdp-meta-user` | Written to the `import_author` column on dataflowspec rows |
+| 10 | `quality_engine` | `none` | Quality rules scaffolded for each seeded layer: `none` keeps the legacy example, `lakeflow` uses built-in valid-row rules, and `dqx` uses the optional DQX engine |
+| 11 | `managed_quality_migrations` | `false` | Replace native pipeline tasks with SDP-META's migration-aware wheel task. Enable only for an acknowledged `full_refresh` migration |
+| 12 | `dataflow_group` | `my_group` | The `data_flow_group` value used in the seeded onboarding file — must match the pipeline's `*.group` configuration |
+| 13 | `wheel_source` | `pypi` | Where sdp-meta is installed from: `pypi` or `volume_path` |
+| 14 | `sdp_meta_dependency` | `__SET_ME__` | Concrete install specification: a PyPI coordinate (e.g. `databricks-labs-sdp-meta==0.1.0`) or a `/Volumes/...` wheel path |
+| 15 | `author` | `sdp-meta-user` | Written to the `import_author` column on dataflowspec rows |
 
 :::warning
 The `__SET_ME__` sentinel in `sdp_meta_dependency` is intentional. `bundle-validate` and the runner notebook both reject it, so deployment is blocked until you set a real value.
@@ -38,7 +40,10 @@ The `__SET_ME__` sentinel in `sdp_meta_dependency` is intentional. `bundle-valid
 
 ## `resources/variables.yml` Keys
 
-After scaffolding, every prompt answer is stored as a bundle variable in `resources/variables.yml`. You can override individual variables per target without editing other files.
+After scaffolding, deployment-time answers are stored as bundle variables in
+`resources/variables.yml`. Scaffolding choices such as `quality_engine` and
+`managed_quality_migrations` select generated files and task types at render
+time.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -66,6 +71,20 @@ You can change `pipeline_mode` in `resources/variables.yml` at any time, then re
 
 ---
 
+## Managed quality migrations
+
+The default pipelines job uses native `pipeline_task` entries. If you change a
+quality engine or diagnostic schema while reusing its quarantine table, set
+`<layer>_quality_engine_migration: full_refresh` and scaffold with
+`managed_quality_migrations=true`. The generated wheel task selectively
+full-refreshes the affected quarantine table, records completion, and then
+runs the normal pipeline graph.
+
+Do not enable the wrapper for ordinary quality-enabled pipelines; selecting a
+quality engine does not itself require a migration.
+
+---
+
 ## Choosing `wheel_source`
 
 | Source | When to use |
@@ -86,7 +105,8 @@ You can change `pipeline_mode` in `resources/variables.yml` at any time, then re
 | `notebooks/init_sdp_meta_pipeline.py` | Pipeline runner notebook — pip-installs sdp-meta from `${var.sdp_meta_dependency}` and calls `DataflowPipeline.invoke_dlt_pipeline(spark, layer)` |
 | `conf/onboarding.{yml,json}` | Seeded flow definition, branched by `source_format` at scaffold time |
 | `conf/silver_transformations.{yml,json}` | Per-target SELECT projections for silver layers |
-| `conf/dqe/example_table/bronze_expectations.{yml,json}` | Example DQE expectations for the bronze table |
+| `conf/dqe/example_table/bronze_expectations.{yml,json}` | Legacy DQE example emitted when `quality_engine=none`; its quarantine predicates use the legacy invalid-row convention |
+| `conf/quality/example_table/{bronze,silver}_rules.{yml,json}` | Engine-specific valid-row Lakeflow rules or native DQX checks emitted when an opt-in engine is selected |
 | `.gitignore` | Ignores `.databricks/`, `.venv/`, `__pycache__/` |
 
 ---

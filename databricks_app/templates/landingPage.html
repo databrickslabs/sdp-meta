@@ -1818,7 +1818,7 @@
                 <div class="spec-editor-bar">
                     <select id="specType">
                         <option value="onboarding">Onboarding</option>
-                        <option value="dqe">DQE Rules</option>
+                        <option value="dqe">Quality Rules (legacy / Lakeflow)</option>
                         <option value="silver_transform">Silver Transformation</option>
                     </select>
                     <select id="specFormat">
@@ -3985,8 +3985,16 @@
                 var rows = d.parsed;
                 previewEl.innerHTML = '<div class="form-card"><div class="form-card-title">Preview — ' + rows.length + ' flow(s)</div>' +
                     '<div class="data-grid-wrap"><table class="data-grid">' +
-                    '<thead><tr><th>#</th><th>id</th><th>group</th><th>source_format</th><th>bronze_table</th><th>silver_table</th></tr></thead>' +
+                    '<thead><tr><th>#</th><th>id</th><th>group</th><th>source_format</th><th>bronze_table</th><th>silver_table</th><th>quality_engine</th><th>quality_rules_path</th></tr></thead>' +
                     '<tbody>' + rows.map(function(r, i) {
+                        var qualityEngines = [
+                            r.bronze_quality_engine ? 'bronze: ' + r.bronze_quality_engine : '',
+                            r.silver_quality_engine ? 'silver: ' + r.silver_quality_engine : ''
+                        ].filter(Boolean).join(', ') || '—';
+                        var qualityPaths = [
+                            r['bronze_quality_rules_path_' + env] || '',
+                            r['silver_quality_rules_path_' + env] || ''
+                        ].filter(Boolean).join(', ') || '—';
                         return '<tr>' +
                             '<td style="color:var(--ink-40)">' + (i+1) + '</td>' +
                             '<td>' + escapeHtml(r.data_flow_id || '—') + '</td>' +
@@ -3994,6 +4002,8 @@
                             '<td>' + escapeHtml(r.source_format || '—') + '</td>' +
                             '<td>' + escapeHtml(r.bronze_table || '—') + '</td>' +
                             '<td>' + escapeHtml(r.silver_table || '—') + '</td>' +
+                            '<td>' + escapeHtml(qualityEngines) + '</td>' +
+                            '<td>' + escapeHtml(qualityPaths) + '</td>' +
                             '</tr>';
                     }).join('') + '</tbody></table></div></div>';
             } else {

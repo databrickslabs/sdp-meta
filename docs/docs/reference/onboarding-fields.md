@@ -128,15 +128,25 @@ Example:
 | `bronze_table_properties` | object | Declarative Pipeline table properties, e.g. `{"pipelines.autoOptimize.managed": "false", "pipelines.reset.allowed": "false"}` |
 | `bronze_sink` | object | Declarative Pipeline Sink API configuration for writing to an external Delta table or Kafka topic — see [DLT Sink guide](../guides/dlt-sink) |
 | `bronze_data_quality_expectations_json_{env}` | string | Path to the DQE rules JSON/YAML file for bronze — see [DQ Rules](./dq-rules) |
+| `bronze_quality_engine` | string | Opt-in quality engine: `lakeflow` or `dqx`. Omit it to use the legacy path. |
+| `bronze_quality_rules_path_{env}` | string | Path to the selected engine's JSON/YAML rules document |
+| `bronze_quality_engine_migration` | string | Set to `full_refresh` only when changing engine or diagnostic schema while reusing the quarantine table |
 | `bronze_catalog_quarantine_{env}` | string | Unity Catalog name for the quarantine table |
 | `bronze_database_quarantine_{env}` | string | Schema name for the quarantine table |
-| `bronze_quarantine_table` | string | Quarantine table name (receives rows that fail `expect_or_drop` rules) |
+| `bronze_quarantine_table` | string | Explicit quarantine table name for `expect_or_quarantine` routing |
 | `bronze_quarantine_table_comment` | string | Comment applied to the quarantine table |
 | `bronze_quarantine_table_path_{env}` | string | External storage path for the quarantine table |
 | `bronze_quarantine_table_partitions` | array | Partition columns for the quarantine table |
 | `bronze_quarantine_table_cluster_by` | array | Liquid clustering columns for the quarantine table |
 | `bronze_quarantine_table_properties` | object | Table properties for the quarantine table |
 | `bronze_append_flows` | array | Additional `append_flow` definitions — each element specifies an extra source that appends to the same bronze target. See [Multi-Source CDC guide](../guides/multi-source-cdc) |
+
+:::warning
+If legacy or opt-in rules contain `expect_or_quarantine`,
+`bronze_quarantine_table` is required. Non-UC pipelines also require
+`bronze_quarantine_table_path_{env}`. SDP-META does not derive a quarantine
+table name.
+:::
 
 ---
 
@@ -153,6 +163,24 @@ Example:
 | `silver_cluster_by` | array | List of column names for liquid clustering |
 | `silver_cluster_by_auto` | boolean | Enable automatic liquid clustering on the silver table |
 | `silver_data_quality_expectations_json_{env}` | string | Path to the DQE rules file for silver — see [DQ Rules](./dq-rules) |
+| `silver_quality_engine` | string | Opt-in quality engine: `lakeflow` or `dqx`. Omit it to use the legacy path. |
+| `silver_quality_rules_path_{env}` | string | Path to the selected engine's JSON/YAML rules document |
+| `silver_quality_engine_migration` | string | Set to `full_refresh` only when changing engine or diagnostic schema while reusing the quarantine table |
+| `silver_catalog_quarantine_{env}` | string | Unity Catalog name for the quarantine table |
+| `silver_database_quarantine_{env}` | string | Schema name for the quarantine table |
+| `silver_quarantine_table` | string | Explicit quarantine table name for `expect_or_quarantine` routing |
+| `silver_quarantine_table_comment` | string | Comment applied to the quarantine table |
+| `silver_quarantine_table_path_{env}` | string | External storage path for the quarantine table |
+| `silver_quarantine_table_partitions` | array | Partition columns for the quarantine table |
+| `silver_quarantine_table_cluster_by` | array | Liquid clustering columns for the quarantine table |
+| `silver_quarantine_table_properties` | object | Table properties for the quarantine table |
 | `silver_append_flows` | array | Additional `append_flow` definitions for the silver layer |
 | `silver_sink` | object | Declarative Pipeline Sink API configuration for silver output — see [DLT Sink guide](../guides/dlt-sink) |
 | `silver_transformation_json_{env}` | string | Path to the silver transformations JSON/YAML file — see [Silver Transformations](./silver-transformations) |
+
+:::warning
+If legacy or opt-in rules contain `expect_or_quarantine`,
+`silver_quarantine_table` is required. Non-UC pipelines also require
+`silver_quarantine_table_path_{env}`. SDP-META does not derive a quarantine
+table name.
+:::

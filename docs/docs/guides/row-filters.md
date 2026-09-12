@@ -103,7 +103,7 @@ This pattern combines naturally with [Silver Fanout](./silver-fanout). Run addit
 | Feature | Row Filters (`where_clause`) | DQ Rules (`expect_or_drop`) |
 |---|---|---|
 | Configured in | Silver transformations file | DQE rules file |
-| Effect | Rows not matching are silently excluded | Rows failing are dropped (and optionally quarantined) |
+| Effect | Rows not matching are silently excluded | Action is explicit per rule: retain, drop, quarantine, or fail the update |
 | Metrics tracked | No | Yes |
 | Applies to layer | Silver | Bronze or Silver |
 

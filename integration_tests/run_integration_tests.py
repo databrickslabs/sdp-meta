@@ -209,6 +209,12 @@ class SDPMetaRunnerConf:
     # snapshot info
     snapshot_template: str = "integration_tests/conf/json/snapshot-onboarding.template"
 
+    # Release A native Lakeflow quality scenario
+    quality_template: str = "integration_tests/conf/json/quality/onboarding.template"
+    quality_dqx_template: str = (
+        "integration_tests/conf/json/quality_dqx/onboarding.template"
+    )
+
     # multi-source AUTO CDC info (issue #294): three regional bronze CDC
     # sources -> one unified silver SCD-1 ``customers`` table via
     # ``silver_cdc_apply_changes_flows``. No A2 incremental step; no
@@ -241,6 +247,10 @@ class SDPMetaRunnerConf:
             self.eventhub_template = self._to_yaml_variant(self.eventhub_template)
             self.kafka_template = self._to_yaml_variant(self.kafka_template)
             self.snapshot_template = self._to_yaml_variant(self.snapshot_template)
+            self.quality_template = self._to_yaml_variant(self.quality_template)
+            self.quality_dqx_template = self._to_yaml_variant(
+                self.quality_dqx_template
+            )
             self.multi_source_cdc_template = self._to_yaml_variant(
                 self.multi_source_cdc_template
             )
@@ -365,6 +375,8 @@ class SDPMETARunner:
             "eventhub": "./integration_tests/notebooks/eventhub_runners/",
             "kafka": "./integration_tests/notebooks/kafka_runners/",
             "snapshot": "./integration_tests/notebooks/snapshot_runners/",
+            "quality": "./integration_tests/notebooks/quality_runners/",
+            "quality_dqx": "./integration_tests/notebooks/quality_dqx_runners/",
             "multi_source_cdc": (
                 "./integration_tests/notebooks/multi_source_cdc_runners/"
             ),
@@ -374,7 +386,7 @@ class SDPMETARunner:
         except KeyError:
             raise Exception(
                 "Given source is not supported. Supported sources are: "
-                "cloudfiles, eventhub, kafka, snapshot, multi_source_cdc"
+                "cloudfiles, eventhub, kafka, snapshot, quality, quality_dqx, multi_source_cdc"
             )
 
         return runner_conf
@@ -461,12 +473,15 @@ class SDPMETARunner:
 
     def create_workflow_spec(self, runner_conf: SDPMetaRunnerConf):
         """Create the Databricks Workflow Job given the DLT Meta configuration specs"""
+        dependencies = [runner_conf.remote_whl_path]
+        if runner_conf.source == "quality_dqx":
+            dependencies.append("databricks-labs-dqx==0.16.0")
         sdp_meta_environments = [
             jobs.JobEnvironment(
                 environment_key="dl_meta_int_env",
                 spec=compute.Environment(
                     client="1",
-                    dependencies=[runner_conf.remote_whl_path],
+                    dependencies=dependencies,
                 ),
             )
         ]
@@ -533,7 +548,12 @@ class SDPMETARunner:
                             else (
                                 "setup_sdp_meta_pipeline_spec"
                                 if runner_conf.source
-                                in ("snapshot", "multi_source_cdc")
+                                in (
+                                    "snapshot",
+                                    "quality",
+                                    "quality_dqx",
+                                    "multi_source_cdc",
+                                )
                                 else "publish_events"
                             )
                         )
@@ -567,6 +587,8 @@ class SDPMETARunner:
                         ),
                         "output_file_path": f"/Workspace{runner_conf.test_output_file_path}",
                         "run_id": runner_conf.run_id,
+                        "sdp_meta_schema": runner_conf.sdp_meta_schema,
+                        "bronze_pipeline_id": runner_conf.bronze_pipeline_id,
                     },
                 ),
             ),
@@ -759,6 +781,20 @@ class SDPMETARunner:
             # 3-task shape: setup -> sdp-meta-pipeline -> validate. No
             # A2 step, no publish_events (seed JSON is already on volume).
             pass
+        elif runner_conf.source in ("quality", "quality_dqx"):
+            # A second update against the same pipeline/checkpoint proves that
+            # the deterministic input is not appended again.
+            tasks.append(
+                jobs.Task(
+                    task_key="quality_second_update",
+                    depends_on=[
+                        jobs.TaskDependency(task_key="bronze_dlt_pipeline")
+                    ],
+                    pipeline_task=jobs.PipelineTask(
+                        pipeline_id=runner_conf.bronze_pipeline_id
+                    ),
+                )
+            )
         else:
             if runner_conf.source == "eventhub":
                 base_parameters = {
@@ -811,6 +847,8 @@ class SDPMETARunner:
             # on that task directly instead of on a separate silver
             # task.
             return "sdp-meta-pipeline"
+        elif source in ("quality", "quality_dqx"):
+            return "quality_second_update"
         else:
             return "bronze_dlt_pipeline"
 
@@ -897,6 +935,10 @@ class SDPMETARunner:
             template_path = runner_conf.kafka_template
         elif runner_conf.source == "snapshot":
             template_path = runner_conf.snapshot_template
+        elif runner_conf.source == "quality":
+            template_path = runner_conf.quality_template
+        elif runner_conf.source == "quality_dqx":
+            template_path = runner_conf.quality_dqx_template
         elif runner_conf.source == "multi_source_cdc":
             template_path = runner_conf.multi_source_cdc_template
 
@@ -1094,6 +1136,8 @@ class SDPMETARunner:
 
         for notebook in os.listdir(runner_conf.runners_full_local_path):
             local_path = os.path.join(runner_conf.runners_full_local_path, notebook)
+            if not os.path.isfile(local_path):
+                continue
             with open(local_path, "rb") as nb_file:
                 self.ws.workspace.upload(
                     path=f"{runner_conf.runners_nb_path}/runners/{notebook}",
@@ -1246,6 +1290,7 @@ class SDPMETARunner:
         except Exception as e:
             print(e)
             traceback.print_exc()
+            raise
         # finally:
         #     self.clean_up(runner_conf)
 
@@ -1280,10 +1325,18 @@ def process_arguments() -> dict[str:str]:
         ],
         [
             "source",
-            "Provide source type: cloudfiles, eventhub, kafka, snapshot, multi_source_cdc",
+            "Provide source type: cloudfiles, eventhub, kafka, snapshot, quality, multi_source_cdc",
             str.lower,
             False,
-            ["cloudfiles", "eventhub", "kafka", "snapshot", "multi_source_cdc"],
+            [
+                "cloudfiles",
+                "eventhub",
+                "kafka",
+                "snapshot",
+                "quality",
+                "quality_dqx",
+                "multi_source_cdc",
+            ],
         ],
         [
             "onboarding_file_format",

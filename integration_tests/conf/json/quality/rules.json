@@ -1,0 +1,16 @@
+{
+  "expect": {
+    "known_status": "status IN ('active', 'inactive')"
+  },
+  "expect_or_drop": {
+    "row_key_required": "row_key IS NOT NULL"
+  },
+  "expect_or_fail": {
+    "status_required": "status IS NOT NULL"
+  },
+  "expect_or_quarantine": {
+    "id_required": "id IS NOT NULL",
+    "email_required": "email IS NOT NULL",
+    "positive_id": "id > 0"
+  }
+}

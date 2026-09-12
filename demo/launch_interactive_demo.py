@@ -64,6 +64,7 @@ databricks_labs_sdp_meta-0.1.0-py3-none-any.whl
         --uc-catalog-name main \\
         --profile DEFAULT \\
         --data-source github \\
+        --quality-engine lakeflow \\
         --git-branch main
 """
 
@@ -444,6 +445,16 @@ def main() -> int:
         help="Demo onboarding-format widget.",
     )
     parser.add_argument(
+        "--quality-engine",
+        default="legacy",
+        choices=["legacy", "lakeflow", "dqx"],
+        help="Bronze quality implementation demonstrated by the main "
+             "customers, transactions, products, and stores feeds. "
+             "'legacy' preserves the original DQE behavior; 'lakeflow' "
+             "uses SDP-META's built-in engine; 'dqx' installs the compatible "
+             "Databricks Labs DQX dependency declared by the SDP-META wheel.",
+    )
+    parser.add_argument(
         "--validate-counts",
         default="true",
         choices=["true", "false"],
@@ -604,6 +615,7 @@ def main() -> int:
         "uc_schema_name": demo_uc_schema_name,
         "data_source": args.data_source,
         "onboarding_format": args.onboarding_format,
+        "quality_engine": args.quality_engine,
         "install_source": install_source,
         "whl_file_path": whl_file_path,
         "pypi_version": args.pypi_version,

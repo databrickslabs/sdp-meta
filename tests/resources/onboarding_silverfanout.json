@@ -31,6 +31,9 @@
             "pipelines.autoOptimize.zOrderCols": "id,email"
         },
         "silver_transformation_json_dev": "tests/resources/silver_transformations_fanout.json",
-        "silver_data_quality_expectations_json_dev": "tests/resources/dqe/customers/silver_data_quality_expectations.json"
+        "silver_data_quality_expectations_json_dev": "tests/resources/dqe/customers/silver_data_quality_expectations.json",
+        "silver_database_quarantine_dev": "silver",
+        "silver_quarantine_table": "customers_quarantine",
+        "silver_quarantine_table_path_dev": "tests/resources/data/silver/customers_quarantine"
     }
 ]

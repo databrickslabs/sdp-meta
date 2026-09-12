@@ -1,0 +1,6 @@
+{"row_key":"valid_1","product_id":1001,"name":"Laptop","category":"electronics","price":999.00}
+{"row_key":"valid_2","product_id":1002,"name":"Desk","category":"furniture","price":250.00}
+{"row_key":"valid_3","product_id":1003,"name":"Coffee","category":"grocery","price":12.50}
+{"row_key":"category_warning","product_id":1004,"name":"Mystery Box","category":"unknown","price":20.00}
+{"row_key":"missing_product_id","product_id":null,"name":"Unnamed","category":"electronics","price":15.00}
+{"row_key":"negative_price","product_id":1006,"name":"Credit Item","category":"grocery","price":-5.00}

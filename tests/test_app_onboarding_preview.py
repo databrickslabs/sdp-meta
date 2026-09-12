@@ -436,6 +436,13 @@ class DetectEnvSuffixesTests(unittest.TestCase):
         }]
         self.assertEqual(app_mod._detect_env_suffixes(parsed), ["prod"])
 
+    def test_detects_quality_rules_path_suffix(self):
+        parsed = [{
+            "bronze_quality_engine": "lakeflow",
+            "bronze_quality_rules_path_dev": "/Volumes/cat/sch/vol/rules.yml",
+        }]
+        self.assertEqual(app_mod._detect_env_suffixes(parsed), ["dev"])
+
     def test_detects_mixed_env_suffixes_returns_sorted_unique_list(self):
         # A user error worth surfacing: half the rows use ``_demo`` and
         # half use ``_prod``. Whichever env the form picks, the other
@@ -476,6 +483,51 @@ class DetectEnvSuffixesTests(unittest.TestCase):
         # ``special_case_demo`` contains ``_`` so it's not a valid env
         # suffix candidate. Detection returns empty.
         self.assertEqual(app_mod._detect_env_suffixes(parsed), [])
+
+
+class QualityConfigurationPreflightTests(unittest.TestCase):
+    def test_accepts_complete_lakeflow_configuration(self):
+        app_mod._verify_quality_configuration([{
+            "data_flow_id": "100",
+            "source_format": "cloudFiles",
+            "bronze_quality_engine": "lakeflow",
+            "bronze_quality_rules_path_demo": "/Volumes/c/s/v/rules.yml",
+            "bronze_database_quarantine_demo": "c.quarantine",
+            "bronze_quarantine_table": "invalid_rows",
+        }], "demo")
+
+    def test_rejects_unsupported_mode_and_incomplete_target(self):
+        with self.assertRaisesRegex(
+            Exception,
+            "(?s)snapshot source.*bronze_database_quarantine_demo",
+        ):
+            app_mod._verify_quality_configuration([{
+                "data_flow_id": "100",
+                "source_format": "snapshot",
+                "bronze_quality_engine": "lakeflow",
+                "bronze_quality_rules_path_demo": "/Volumes/c/s/v/rules.yml",
+            }], "demo")
+
+    def test_accepts_snapshot_source_with_standard_silver_quality(self):
+        app_mod._verify_quality_configuration([{
+            "data_flow_id": "100",
+            "source_format": "snapshot",
+            "silver_quality_engine": "lakeflow",
+            "silver_quality_rules_path_demo": "/Volumes/c/s/v/rules.yml",
+            "silver_database_quarantine_demo": "c.quarantine",
+            "silver_quarantine_table": "invalid_rows",
+        }], "demo")
+
+    def test_rejects_legacy_and_lakeflow_mix(self):
+        with self.assertRaisesRegex(Exception, "cannot combine"):
+            app_mod._verify_quality_configuration([{
+                "data_flow_id": "100",
+                "bronze_quality_engine": "lakeflow",
+                "bronze_quality_rules_path_demo": "/Volumes/c/s/v/rules.yml",
+                "bronze_data_quality_expectations_json_demo": "/legacy.yml",
+                "bronze_database_quarantine_demo": "c.quarantine",
+                "bronze_quarantine_table": "invalid_rows",
+            }], "demo")
 
 
 class OnboardingEnvMismatchRejectionTests(unittest.TestCase):
@@ -1023,6 +1075,8 @@ class ExtractRequiredFilesTests(unittest.TestCase):
             "data_flow_id": "100",
             "bronze_data_quality_expectations_json_demo": "{uc_volume_path}/dqe/b.json",
             "silver_data_quality_expectations_json_demo": "{uc_volume_path}/dqe/s.json",
+            "bronze_quality_rules_path_demo": "{uc_volume_path}/quality/b.yml",
+            "silver_quality_rules_path_demo": "{uc_volume_path}/quality/s.yml",
             "silver_transformation_json_demo": "{uc_volume_path}/sxf.json",
         }]
         out = app_mod._extract_required_files(spec, self.SUBS)
@@ -1030,6 +1084,8 @@ class ExtractRequiredFilesTests(unittest.TestCase):
         self.assertEqual(set(fields), {
             "bronze_data_quality_expectations_json_demo",
             "silver_data_quality_expectations_json_demo",
+            "bronze_quality_rules_path_demo",
+            "silver_quality_rules_path_demo",
             "silver_transformation_json_demo",
         })
 

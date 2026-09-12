@@ -52,6 +52,7 @@
 # MAGIC | **UC Catalog Name** | Unity Catalog catalog for the demo |
 # MAGIC | **UC Schema Name** | Schema within the catalog |
 # MAGIC | **Data Source** | `dbdatagen` (generate synthetic data) or `github` (download from repo) |
+# MAGIC | **Bronze Quality Engine** | `legacy` (existing DQE expectations), `lakeflow` (built-in quality engine), or `dqx` (Databricks Labs DQX with row diagnostics) |
 # MAGIC | **Install Source** | `git_branch` (default — installs SDP-META from the GitHub branch above), `pypi` (installs `databricks-labs-sdp-meta` from PyPI — preferred for published releases), or `whl_file` (installs from a pre-built wheel — preferred when validating a local build) |
 # MAGIC | **Wheel File Path** | Required only when `Install Source = whl_file`. Path to the SDP-META wheel on a Volume / Workspace, e.g. `/Volumes/<catalog>/<schema>/<volume>/sdp_meta-<version>-py3-none-any.whl` |
 # MAGIC | **PyPI Version** | Optional version pin when `Install Source = pypi` (e.g. `0.1.0`). Leave blank to install the latest published `databricks-labs-sdp-meta` |
@@ -84,6 +85,12 @@ dbutils.widgets.dropdown(
     defaultValue="json",
     choices=["json", "yml"],
     label="Onboarding File Format"
+)
+dbutils.widgets.dropdown(
+    name="quality_engine",
+    defaultValue="legacy",
+    choices=["legacy", "lakeflow", "dqx"],
+    label="Bronze Quality Engine"
 )
 # Lets the demo install SDP-META either from the GitHub branch
 # (default — anyone can run the demo without building) or from a
@@ -142,6 +149,7 @@ uc_catalog_name = dbutils.widgets.get("uc_catalog_name")
 uc_schema_name = dbutils.widgets.get("uc_schema_name")
 data_source = dbutils.widgets.get("data_source")
 onboarding_format = dbutils.widgets.get("onboarding_format")
+quality_engine = dbutils.widgets.get("quality_engine")
 install_source = dbutils.widgets.get("install_source")
 whl_file_path = dbutils.widgets.get("whl_file_path").strip()
 pypi_version = dbutils.widgets.get("pypi_version").strip()
@@ -228,6 +236,7 @@ print(f"UC Catalog         : {uc_catalog_name}")
 print(f"UC Schema          : {uc_schema_name}")
 print(f"Data Source        : {data_source}")
 print(f"Onboarding Format  : {onboarding_format}")
+print(f"Bronze Quality     : {quality_engine}")
 print(f"Install Source     : {install_source}")
 print(f"Install Target     : {sdp_meta_install_target}")
 
@@ -243,10 +252,35 @@ print(f"Install Target     : {sdp_meta_install_target}")
 
 # COMMAND ----------
 
-# dbldatagen is only needed for the "dbdatagen" data source option
+# Install the core package first. If DQX is selected, read the compatible
+# DQX requirement from the installed SDP-META distribution metadata rather
+# than duplicating a version range in this demo.
 extra_packages = " dbldatagen" if data_source == "dbdatagen" else ""
 packages = sdp_meta_install_target + extra_packages
-%pip install $packages  # noqa: E999
+%pip install $packages
+
+quality_engine_dependency = "packaging"
+if quality_engine == "dqx":
+    from importlib.metadata import requires as _distribution_requires
+    from packaging.requirements import Requirement as _Requirement
+    from packaging.utils import canonicalize_name as _canonicalize_name
+
+    for _requirement_text in (
+        _distribution_requires("databricks-labs-sdp-meta") or ()
+    ):
+        _requirement = _Requirement(_requirement_text)
+        if _canonicalize_name(_requirement.name) == "databricks-labs-dqx":
+            quality_engine_dependency = (
+                f"'{_requirement.name}{_requirement.specifier}'"
+            )
+            break
+    else:
+        raise RuntimeError(
+            "Installed SDP-META package metadata does not declare the DQX "
+            "optional dependency. Rebuild/reinstall SDP-META with its dqx extra."
+        )
+
+%pip install $quality_engine_dependency
 dbutils.library.restartPython()
 
 # COMMAND ----------
@@ -276,7 +310,7 @@ dbutils.library.restartPython()
 # MAGIC - Metadata-driven onboarding (JSON or YAML → DataflowSpec tables, controlled by the `Onboarding File Format` widget)
 # MAGIC - CloudFiles (Autoloader) ingestion
 # MAGIC - CDC with `apply_changes` (SCD Type 2)
-# MAGIC - Data quality (`expect_or_drop`, `expect_or_quarantine`)
+# MAGIC - Selectable Bronze quality: legacy DQE, built-in Lakeflow, or Databricks Labs DQX
 # MAGIC - Quarantine tables for bad data
 # MAGIC - Liquid clustering (`cluster_by`, `cluster_by_auto`)
 # MAGIC - Silver transformations (column selection, expressions)
@@ -323,6 +357,7 @@ uc_catalog_name = dbutils.widgets.get("uc_catalog_name")
 uc_schema_name = dbutils.widgets.get("uc_schema_name")
 data_source = dbutils.widgets.get("data_source")
 onboarding_format = dbutils.widgets.get("onboarding_format")
+quality_engine = dbutils.widgets.get("quality_engine")
 install_source = dbutils.widgets.get("install_source")
 whl_file_path = dbutils.widgets.get("whl_file_path").strip()
 pypi_version = dbutils.widgets.get("pypi_version").strip()
@@ -352,6 +387,29 @@ else:
         f"git+https://github.com/databrickslabs/"
         f"sdp-meta.git@{git_branch}"
     )
+
+# Resolve the DQX dependency from this installed wheel's optional-extra
+# metadata. Pipeline runner notebooks use this exact compatible requirement.
+quality_engine_dependency = "packaging"
+if quality_engine == "dqx":
+    from importlib.metadata import requires as _distribution_requires
+    from packaging.requirements import Requirement as _Requirement
+    from packaging.utils import canonicalize_name as _canonicalize_name
+
+    for _requirement_text in (
+        _distribution_requires("databricks-labs-sdp-meta") or ()
+    ):
+        _requirement = _Requirement(_requirement_text)
+        if _canonicalize_name(_requirement.name) == "databricks-labs-dqx":
+            quality_engine_dependency = (
+                f"'{_requirement.name}{_requirement.specifier}'"
+            )
+            break
+    else:
+        raise RuntimeError(
+            "Installed SDP-META package metadata does not declare its DQX "
+            "optional dependency."
+        )
 
 # Re-validate after re-reading widgets in this cell to match the strict
 # regular SQL identifier rule used everywhere else (issue #261). Cheap
@@ -531,6 +589,7 @@ ddl_path = f"{resources_path}/ddl"
 incremental_data_path = f"{resources_path}/incremental_data"
 conf_path = f"{demo_path}/conf"
 dqe_path = f"{conf_path}/dqe"
+quality_path = f"{conf_path}/quality/{quality_engine}"
 transformation_path = conf_path
 onboarding_file_path = f"{uc_volume_path}/onboarding.{onboarding_format}"
 af_data_path = f"{data_path}/append_flow"
@@ -539,7 +598,7 @@ sink_path = f"{uc_volume_path}/data/sink"
 
 for path in [
     demo_path, resources_path, data_path, ddl_path,
-    incremental_data_path, conf_path, dqe_path,
+    incremental_data_path, conf_path, dqe_path, quality_path,
     af_data_path, snapshot_data_path, sink_path,
 ]:
     os.makedirs(path, exist_ok=True)
@@ -548,6 +607,7 @@ print(f"Volume path       : {uc_volume_path}")
 print(f"Data path         : {data_path}")
 print(f"DDL path          : {ddl_path}")
 print(f"DQE path          : {dqe_path}")
+print(f"Quality path      : {quality_path}")
 print(f"Append Flow path  : {af_data_path}")
 print(f"Snapshot path     : {snapshot_data_path}")
 print(f"Sink path         : {sink_path}")
@@ -558,14 +618,16 @@ print(f"Onboarding file   : {onboarding_file_path}")
 # MAGIC %md
 # MAGIC ### 1.4 Create Configuration Files
 # MAGIC
-# MAGIC DDL schemas, data quality expectations, and silver transformation
+# MAGIC DDL schemas, selectable Bronze quality rules, and silver transformation
 # MAGIC configs are created inline so the notebook is fully self-contained.
 # MAGIC
 # MAGIC > **DDL Schemas**: define column types for each source.
 # MAGIC > See: [demo/resources/ddl/](https://github.com/databrickslabs/sdp-meta/tree/main/demo/resources/ddl)
 # MAGIC
-# MAGIC > **Data Quality**: `expect_or_drop` and `expect_or_quarantine`.
-# MAGIC > See: [json/dqe/](https://github.com/databrickslabs/sdp-meta/tree/main/demo/conf/json/dqe) or [yml/dqe/](https://github.com/databrickslabs/sdp-meta/tree/main/demo/conf/yml/dqe)
+# MAGIC > **Data Quality**: choose legacy DQE, built-in Lakeflow rules, or
+# MAGIC > Databricks Labs DQX checks. The selected engine is applied to the
+# MAGIC > standard Bronze feeds; Silver CDC retains legacy expectations because
+# MAGIC > it uses the existing `apply_changes` path.
 # MAGIC
 # MAGIC > **Silver Transformations**: column selection and expressions.
 # MAGIC > See: [json/silver_transformations.json](https://github.com/databrickslabs/sdp-meta/blob/main/demo/conf/json/silver_transformations.json) or [yml/silver_transformations.yml](https://github.com/databrickslabs/sdp-meta/blob/main/demo/conf/yml/silver_transformations.yml)
@@ -681,6 +743,77 @@ bronze_dqe = {
     },
 }
 
+# New quality-engine rules use valid-row semantics. Lakeflow routes a row to
+# quarantine when any ``expect_or_quarantine`` predicate is false. DQX routes
+# error-level check failures to quarantine and keeps its diagnostic columns.
+lakeflow_quality = {
+    "customers": {
+        "expect_or_drop": {
+            "no_rescued_data": "_rescued_data IS NULL",
+        },
+        "expect_or_quarantine": {
+            "customer_id_required": "customer_id IS NOT NULL",
+        },
+    },
+    "transactions": {
+        "expect_or_drop": {
+            "no_rescued_data": "_rescued_data IS NULL",
+        },
+        "expect_or_quarantine": {
+            "transaction_id_required": "transaction_id IS NOT NULL",
+            "customer_id_required": "customer_id IS NOT NULL",
+        },
+    },
+    "products": {
+        "expect_or_drop": {
+            "no_rescued_data": "_rescued_data IS NULL",
+        },
+        "expect_or_quarantine": {
+            "product_id_required": "product_id IS NOT NULL",
+        },
+    },
+    "stores": {
+        "expect_or_drop": {
+            "no_rescued_data": "_rescued_data IS NULL",
+        },
+        "expect_or_quarantine": {
+            "store_id_required": "store_id IS NOT NULL",
+        },
+    },
+}
+
+
+def _dqx_required_checks(*columns):
+    return [
+        {
+            "name": f"{column}_required",
+            "criticality": "error",
+            "check": {
+                "function": "is_not_null",
+                "arguments": {"column": column},
+            },
+        }
+        for column in columns
+    ]
+
+
+dqx_quality = {
+    "customers": _dqx_required_checks("customer_id"),
+    "transactions": _dqx_required_checks(
+        "transaction_id", "customer_id"
+    ),
+    "products": _dqx_required_checks("product_id"),
+    "stores": _dqx_required_checks("store_id"),
+}
+dqx_quality["customers"].append({
+    "name": "email_present_warning",
+    "criticality": "warn",
+    "check": {
+        "function": "is_not_null_and_not_empty",
+        "arguments": {"column": "email"},
+    },
+})
+
 silver_dqe = {
     "customers_silver_dqe": {
         "expect_or_drop": {
@@ -715,6 +848,27 @@ for dqe_set in [bronze_dqe, silver_dqe]:
         out_path = f"{dqe_path}/{basename}.{conf_ext}"
         _write_conf(content, out_path)
         print(f"  Created: {out_path}")
+
+if quality_engine in ("lakeflow", "dqx"):
+    selected_quality = (
+        lakeflow_quality if quality_engine == "lakeflow" else dqx_quality
+    )
+    for basename, content in selected_quality.items():
+        out_path = f"{quality_path}/{basename}.{conf_ext}"
+        _write_conf(content, out_path)
+        print(f"  Created: {out_path}")
+
+
+def _configure_bronze_quality(feed, basename):
+    """Apply the selected Bronze quality mode without mixing old/new fields."""
+    if quality_engine == "legacy":
+        return feed
+    feed.pop("bronze_data_quality_expectations_json_prod", None)
+    feed["bronze_quality_engine"] = quality_engine
+    feed["bronze_quality_rules_path_prod"] = (
+        f"{quality_path}/{basename}.{conf_ext}"
+    )
+    return feed
 
 # COMMAND ----------
 
@@ -1507,27 +1661,38 @@ rendered_text = Template(sample_text).safe_substitute(
     silver_schema=silver_schema,
 )
 
-print(
-    f"--- {sample_onboarding_source} (rendered as {onboarding_format}) ---\n"
-)
-print(rendered_text)
-
 if conf_ext in ("yml", "yaml"):
     onboarding_json = yaml.safe_load(rendered_text)
 else:
     onboarding_json = json.loads(rendered_text)
 
+for feed in onboarding_json:
+    _configure_bronze_quality(feed, feed["bronze_table"])
+
+print(
+    f"--- {sample_onboarding_source} "
+    f"(rendered as {onboarding_format}, quality={quality_engine}) ---\n"
+)
+if conf_ext in ("yml", "yaml"):
+    print(yaml.dump(
+        onboarding_json, default_flow_style=False, allow_unicode=True
+    ))
+else:
+    print(json.dumps(onboarding_json, indent=2))
+
 _write_onboarding(onboarding_json, onboarding_file_path)
 
 print(f"Onboarding file: {onboarding_file_path}")
 print(f"Data flows: {len(onboarding_json)} (customers, transactions)")
+print(f"Bronze quality engine: {quality_engine}")
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ### 2.2 Verify the Onboarding File on the UC Volume
 # MAGIC
-# MAGIC Cell 2.1 printed the *rendered template*. This cell prints the
+# MAGIC Cell 2.1 printed the rendered template after applying the selected
+# MAGIC Bronze quality engine. This cell prints the
 # MAGIC bytes that actually landed on the UC volume after
 # MAGIC `_write_onboarding(...)` serialized them — confirming round-trip
 # MAGIC fidelity in the format you selected. This is the exact file the
@@ -1633,7 +1798,9 @@ notebook_dir = (
 runner_content = (
     "# Databricks notebook source\n"
     'sdp_meta_whl = spark.conf.get("sdp_meta_whl")\n'
-    "%pip install $sdp_meta_whl  # noqa: E999\n"
+    'quality_engine_dependency = spark.conf.get('
+    '"quality_engine_dependency", "packaging")\n'
+    "%pip install $sdp_meta_whl $quality_engine_dependency\n"
     "\n"
     "# COMMAND ----------\n"
     "\n"
@@ -1692,6 +1859,7 @@ pipeline_config = {
         f"{uc_catalog_name}.{uc_schema_name}.silver_dataflowspec"
     ),
     "sdp_meta_whl": git_url_for_pip,
+    "quality_engine_dependency": quality_engine_dependency,
 }
 
 # Create pipeline (idempotent: skip if already exists)
@@ -1843,8 +2011,10 @@ display(
 # MAGIC ### 4.3 Quarantine Tables — Bad Records
 # MAGIC
 # MAGIC Records with NULL primary keys or malformed data are routed
-# MAGIC here by `expect_or_quarantine` rules.
-# MAGIC See: [DQE config](https://github.com/databrickslabs/sdp-meta/blob/main/demo/conf/json/dqe/customers.json)
+# MAGIC here by the selected Bronze quality implementation. Lakeflow adds
+# MAGIC structured `_errors`; DQX adds `_errors`, `_warnings`, and check-dependent
+# MAGIC supplemental columns such as `_dq_info`; legacy mode preserves the
+# MAGIC original schema.
 
 # COMMAND ----------
 
@@ -1865,6 +2035,8 @@ display(
         ".transactions_quarantine LIMIT 20"
     )
 )
+
+print(f"Displayed quarantine diagnostics for quality_engine={quality_engine}")
 
 # COMMAND ----------
 
@@ -2013,6 +2185,9 @@ stores_feed = {
         f"{dqe_path}/stores_silver_dqe.{conf_ext}"
     ),
 }
+
+_configure_bronze_quality(products_feed, "products")
+_configure_bronze_quality(stores_feed, "stores")
 
 onboarding_json = _read_onboarding(onboarding_file_path)
 
@@ -4137,7 +4312,65 @@ else:
             f"{uc_catalog_name}.{silver_schema}.{domain}"
         )
 
-    # 6. Multi-source AUTO CDC (Stage 11) — every region seeds the
+    # 6. Selected quality engine — prove onboarding persisted the requested
+    # immutable snapshot and that the runtime produced diagnostic columns.
+    main_domains = {"customers", "transactions", "products", "stores"}
+    quality_rows = (
+        spark.table(
+            f"{uc_catalog_name}.{uc_schema_name}.bronze_dataflowspec"
+        )
+        .select("targetDetails", "qualityConfig")
+        .collect()
+    )
+    main_quality_rows = [
+        row for row in quality_rows
+        if row.targetDetails.get("table") in main_domains
+    ]
+    if len(main_quality_rows) != len(main_domains):
+        failures.append(
+            "bronze_dataflowspec: expected quality metadata for "
+            f"{len(main_domains)} main feeds, got {len(main_quality_rows)}"
+        )
+    for row in main_quality_rows:
+        table = row.targetDetails.get("table")
+        raw_config = row.qualityConfig
+        if quality_engine == "legacy":
+            if raw_config:
+                failures.append(
+                    f"{table}: legacy mode unexpectedly persisted qualityConfig"
+                )
+            continue
+        if not raw_config:
+            failures.append(
+                f"{table}: missing qualityConfig for {quality_engine}"
+            )
+            continue
+        persisted_engine = json.loads(raw_config).get("engine")
+        if persisted_engine != quality_engine:
+            failures.append(
+                f"{table}: qualityConfig engine={persisted_engine!r}, "
+                f"expected {quality_engine!r}"
+            )
+
+    if quality_engine in ("lakeflow", "dqx"):
+        expected_diagnostics = (
+            {"_errors"}
+            if quality_engine == "lakeflow"
+            else {"_errors", "_warnings"}
+        )
+        for domain in main_domains:
+            quarantine_fqn = (
+                f"{uc_catalog_name}.{bronze_schema}.{domain}_quarantine"
+            )
+            actual_columns = set(spark.table(quarantine_fqn).columns)
+            missing_diagnostics = expected_diagnostics - actual_columns
+            if missing_diagnostics:
+                failures.append(
+                    f"{quarantine_fqn}: missing {quality_engine} diagnostic "
+                    f"columns {sorted(missing_diagnostics)}"
+                )
+
+    # 7. Multi-source AUTO CDC (Stage 11) — every region seeds the
     # SAME shape: 3 INSERTs + 1 UPDATE + 1 DELETE = 5 raw bronze
     # rows. The silver target is SCD-1 with apply_as_deletes, so the
     # final live row count = (3 regions × 3 inserted) − (3 regions ×

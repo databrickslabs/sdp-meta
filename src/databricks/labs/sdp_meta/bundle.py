@@ -35,6 +35,9 @@ from databricks.labs.sdp_meta.identifiers import (
     validate_source_format,
     validate_uc_identifier,
 )
+from databricks.labs.sdp_meta.quality.onboarding_preflight import (
+    collect_quality_configuration_errors,
+)
 
 logger = logging.getLogger("databricks.labs.sdp_meta")
 
@@ -601,6 +604,15 @@ def _sdp_meta_sanity_checks(bundle_dir: Path) -> List[str]:
                             f"{value!r}. Replace it with a real value before "
                             "deploying."
                         )
+                    quality_errors = collect_quality_configuration_errors(
+                        onboarding_doc,
+                        env=None,
+                        uc_enabled=True,
+                        supported_engines=("lakeflow", "dqx"),
+                    )
+                    errors.extend(
+                        f"{rel}: {message}" for message in quality_errors
+                    )
 
     sdp_meta_dep = _default("sdp_meta_dependency")
     wheel_source = _default("wheel_source")
@@ -1265,7 +1277,7 @@ def _load_bundle_init_config(wsi) -> BundleInitCommand:
 # output) before deploy. Keeping the values here in one place means both the
 # CLI wrapper and the test that asserts the produced config-file is sound
 # read from the same source of truth.
-QUICKSTART_BUNDLE_INIT_DEFAULTS: Dict[str, str] = {
+QUICKSTART_BUNDLE_INIT_DEFAULTS: Dict[str, Any] = {
     "bundle_name": "my_sdp_meta_pipeline",
     "uc_catalog_name": "main",
     "sdp_meta_schema": "sdp_meta_dataflowspecs",
@@ -1275,6 +1287,8 @@ QUICKSTART_BUNDLE_INIT_DEFAULTS: Dict[str, str] = {
     "pipeline_mode": "split",
     "source_format": "cloudFiles",
     "onboarding_file_format": "yaml",
+    "quality_engine": "none",
+    "managed_quality_migrations": False,
     "dataflow_group": "my_group",
     "wheel_source": "pypi",
     "sdp_meta_dependency": "__SET_ME__",
@@ -1316,6 +1330,17 @@ def _nonempty_str_override(field: str):
     return _validate
 
 
+def _bool_override(field: str):
+    def _validate(value):
+        if not isinstance(value, bool):
+            raise ValueError(
+                f"quickstart override {field} must be a boolean, got {value!r}"
+            )
+        return value
+
+    return _validate
+
+
 def _bundle_name_override(value):
     if not isinstance(value, str) or not _BUNDLE_NAME_RE.match(value):
         raise ValueError(
@@ -1335,6 +1360,12 @@ _QUICKSTART_OVERRIDE_VALIDATORS: Dict[str, Any] = {
     "pipeline_mode": _enum_override_validator("pipeline_mode", ("split", "combined")),
     "source_format": lambda v: validate_source_format(v, kind="source_format"),
     "onboarding_file_format": _enum_override_validator("onboarding_file_format", ("yaml", "json")),
+    "quality_engine": _enum_override_validator(
+        "quality_engine", ("none", "lakeflow", "dqx")
+    ),
+    "managed_quality_migrations": _bool_override(
+        "managed_quality_migrations"
+    ),
     "dataflow_group": _nonempty_str_override("dataflow_group"),
     "author": _nonempty_str_override("author"),
     "sdp_meta_dependency": _nonempty_str_override("sdp_meta_dependency"),
@@ -1379,7 +1410,7 @@ def write_quickstart_config_file(
     ``databricks_template_schema.json`` with the developer-friendly defaults
     in :data:`QUICKSTART_BUNDLE_INIT_DEFAULTS`, so the user can scaffold a
     runnable-modulo-credentials bundle in one shot without wading through
-    13 prompts. They still need to point ``sdp_meta_dependency`` at a real
+    14 prompts. They still need to point ``sdp_meta_dependency`` at a real
     PyPI coordinate or wheel before deploy (the schema's default is the
     sentinel ``__SET_ME__`` and ``bundle-validate`` rejects it).
 

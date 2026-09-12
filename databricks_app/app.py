@@ -181,6 +181,9 @@ from services.onboarding.required_files import (  # noqa: E402, F401
     _check_required_files_existence,
     _extract_required_files,
 )
+from services.onboarding.quality_preflight import (  # noqa: E402, F401
+    _verify_quality_configuration,
+)
 
 
 if __name__ == '__main__':

@@ -4,7 +4,14 @@ from unittest.mock import MagicMock, patch, mock_open
 import json
 from databricks.sdk.service.catalog import VolumeType
 from databricks.labs.sdp_meta.__about__ import __version__
-from databricks.labs.sdp_meta.cli import SDP_META_RUNNER_NOTEBOOK, DeployCommand, SDPMeta, OnboardCommand, main
+from databricks.labs.sdp_meta.cli import (
+    SDP_META_RUNNER_NOTEBOOK,
+    DeployCommand,
+    OnboardCommand,
+    SDPMeta,
+    _quality_migration_layers,
+    main,
+)
 
 
 class CliTests(unittest.TestCase):
@@ -48,6 +55,19 @@ class CliTests(unittest.TestCase):
         update_paths=True,
     )
 
+    def test_quality_migration_layers_only_include_full_refresh(self):
+        self.assertEqual(
+            _quality_migration_layers([
+                {
+                    "bronze_quality_engine": "lakeflow",
+                    "bronze_quality_engine_migration": "full_refresh",
+                    "silver_quality_engine": "lakeflow",
+                    "silver_quality_engine_migration": None,
+                }
+            ]),
+            ["bronze"],
+        )
+
     deploy_cmd = DeployCommand(
         layer="bronze_silver",
         onboard_bronze_group="A1",
@@ -80,6 +100,53 @@ class CliTests(unittest.TestCase):
                 sdp_meta.copy_to_dbfs("file:/path/to/src", "/dbfs/path/to/dst")
                 self.assertEqual(mock_dbfs_upload.call_count, 3)
 
+    def test_managed_quality_update_uses_one_time_submit_run(self):
+        mock_ws = MagicMock()
+        waiter = mock_ws.jobs.submit.return_value
+        waiter.result.return_value = MagicMock(run_id="run_id")
+        sdp_meta = SDPMeta(mock_ws)
+
+        result = sdp_meta._run_managed_quality_update_job(
+            self.deploy_cmd, "pipeline_id"
+        )
+
+        mock_ws.jobs.submit.assert_called_once()
+        mock_ws.jobs.create.assert_not_called()
+        waiter.result.assert_called_once()
+        self.assertEqual(result.run_id, "run_id")
+
+    def test_non_uc_managed_quality_update_uses_classic_path_job(self):
+        mock_ws = MagicMock()
+        mock_ws.clusters.select_node_type.return_value = "i3.xlarge"
+        mock_ws.clusters.select_spark_version.return_value = "15.4.x-scala2.12"
+        waiter = mock_ws.jobs.submit.return_value
+        waiter.result.return_value = MagicMock(run_id="run_id")
+        sdp_meta = SDPMeta(mock_ws)
+        cmd = DeployCommand(
+            layer="bronze",
+            pipeline_name="non_uc_quality",
+            dlt_target_schema="bronze",
+            onboard_bronze_group="A1",
+            dataflowspec_bronze_path="dbfs:/specs/bronze",
+            num_workers=1,
+            uc_enabled=False,
+        )
+
+        sdp_meta._run_managed_quality_update_job(cmd, "pipeline_id")
+
+        submitted = mock_ws.jobs.submit.call_args.kwargs
+        self.assertIsNone(submitted["environments"])
+        task = submitted["tasks"][0]
+        self.assertIsNotNone(task.new_cluster)
+        self.assertIsNone(task.environment_key)
+        self.assertTrue(task.libraries)
+        spec_tables = json.loads(
+            task.python_wheel_task.named_parameters["spec_tables"]
+        )
+        self.assertEqual(
+            spec_tables, {"bronze": {"path": "dbfs:/specs/bronze"}}
+        )
+
     @patch("databricks.labs.sdp_meta.cli.WorkspaceClient")
     @patch("builtins.open", new_callable=MagicMock)
     def test_onboard_with_uc(self, mock_open, mock_workspace_client):
@@ -106,6 +173,7 @@ class CliTests(unittest.TestCase):
         )
         mock_workspace_client.jobs.create.assert_called_once()
         mock_workspace_client.jobs.run_now.assert_called_once_with(job_id="job_id")
+        mock_workspace_client.jobs.run_now.return_value.result.assert_not_called()
 
     @patch("databricks.labs.sdp_meta.cli.WorkspaceClient")
     @patch("builtins.open", new_callable=MagicMock)
@@ -322,7 +390,8 @@ class CliTests(unittest.TestCase):
         mock_schemas_api_instance.create.assert_not_called()
 
     @patch("databricks.labs.sdp_meta.cli.WorkspaceClient")
-    def test_deploy(self, mock_workspace_client):
+    def test_deploy_without_migration_starts_pipeline_directly(
+            self, mock_workspace_client):
         mock_pipelines_create = MagicMock()
         mock_pipelines_start_update = MagicMock()
         mock_workspace_client.pipelines.create = mock_pipelines_create
@@ -336,6 +405,9 @@ class CliTests(unittest.TestCase):
         sdp_meta._my_username = MagicMock(return_value="name")
 
         sdp_meta._create_sdp_meta_pipeline = MagicMock(return_value="pipeline_id")
+        sdp_meta._run_managed_quality_update_job = MagicMock(
+            return_value=MagicMock(run_id="run_id")
+        )
 
         deploy_cmd = DeployCommand(
             layer="bronze",
@@ -355,7 +427,69 @@ class CliTests(unittest.TestCase):
         sdp_meta.deploy(deploy_cmd)
 
         sdp_meta._create_sdp_meta_pipeline.assert_called_once_with(deploy_cmd)
-        mock_pipelines_start_update.assert_called_once_with(pipeline_id="pipeline_id")
+        sdp_meta._run_managed_quality_update_job.assert_not_called()
+        mock_pipelines_start_update.assert_called_once_with(
+            pipeline_id="pipeline_id"
+        )
+
+    @patch("databricks.labs.sdp_meta.cli.WorkspaceClient")
+    def test_deploy_with_pending_migration_uses_managed_job(
+            self, mock_workspace_client):
+        sdp_meta = SDPMeta(mock_workspace_client)
+        sdp_meta._create_sdp_meta_pipeline = MagicMock(
+            return_value="pipeline_id"
+        )
+        sdp_meta._run_managed_quality_update_job = MagicMock(
+            return_value=MagicMock(run_id="run_id")
+        )
+        deploy_cmd = DeployCommand(
+            layer="bronze",
+            onboard_bronze_group="A1",
+            sdp_meta_bronze_schema="sdp_meta",
+            pipeline_name="unittest_dlt_pipeline",
+            dataflowspec_bronze_table="dataflowspec_table",
+            dlt_target_schema="dlt_target_schema",
+            num_workers=1,
+            uc_catalog_name="uc_catalog",
+            uc_enabled=True,
+            serverless=False,
+            quality_migration_layers=["bronze"],
+        )
+
+        sdp_meta.deploy(deploy_cmd)
+
+        sdp_meta._run_managed_quality_update_job.assert_called_once_with(
+            deploy_cmd, "pipeline_id"
+        )
+        mock_workspace_client.pipelines.start_update.assert_not_called()
+
+    @patch("databricks.labs.sdp_meta.cli.WorkspaceClient")
+    def test_non_uc_deploy_with_pending_migration_uses_managed_job(
+            self, mock_workspace_client):
+        sdp_meta = SDPMeta(mock_workspace_client)
+        sdp_meta._create_sdp_meta_pipeline = MagicMock(
+            return_value="pipeline_id"
+        )
+        sdp_meta._run_managed_quality_update_job = MagicMock(
+            return_value=MagicMock(run_id="run_id")
+        )
+        deploy_cmd = DeployCommand(
+            layer="bronze",
+            onboard_bronze_group="A1",
+            pipeline_name="non_uc_quality",
+            dataflowspec_bronze_path="dbfs:/specs/bronze",
+            dlt_target_schema="bronze",
+            num_workers=1,
+            uc_enabled=False,
+            quality_migration_layers=["bronze"],
+        )
+
+        sdp_meta.deploy(deploy_cmd)
+
+        sdp_meta._run_managed_quality_update_job.assert_called_once_with(
+            deploy_cmd, "pipeline_id"
+        )
+        mock_workspace_client.pipelines.start_update.assert_not_called()
 
     @patch("databricks.labs.sdp_meta.cli.WorkspaceInstaller")
     @patch("databricks.labs.sdp_meta.cli.WorkspaceClient")

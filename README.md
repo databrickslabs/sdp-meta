@@ -33,7 +33,13 @@
 #### Metadata Interface
 
 - **Onboarding file** (JSON or YAML) — sources, targets, CDC config, DQE rules. Examples: [`demo/conf/json/onboarding.template`](https://github.com/databrickslabs/sdp-meta/blob/main/demo/conf/json/onboarding.template) · [`demo/conf/yml/onboarding.template.yml`](https://github.com/databrickslabs/sdp-meta/blob/main/demo/conf/yml/onboarding.template.yml)
-- **Data Quality Expectations** — per-table JSON or YAML rule files. Examples: [`demo/conf/json/dqe/customers/`](https://github.com/databrickslabs/sdp-meta/tree/main/demo/conf/json/dqe/customers) · [`demo/conf/yml/dqe/customers/`](https://github.com/databrickslabs/sdp-meta/tree/main/demo/conf/yml/dqe/customers)
+- **Data quality engines** — legacy expectations, the built-in Lakeflow engine,
+  and optional Databricks Labs DQX support. Install DQX with
+  `pip install "databricks-labs-sdp-meta[dqx]"`. See the
+  [data-quality guide](https://databrickslabs.github.io/sdp-meta/docs/concepts/data-quality)
+  and the new-engine [`examples/json/quality/`](examples/json/quality/) /
+  [`examples/yml/quality/`](examples/yml/quality/) rules. Files under
+  [`demo/conf/json/dqe/`](demo/conf/json/dqe/) use legacy predicate semantics.
 - **Silver transformation file** — SQL `select_exp` and `where_clause` definitions. Examples: [`demo/conf/json/silver_transformations.json`](https://github.com/databrickslabs/sdp-meta/blob/main/demo/conf/json/silver_transformations.json) · [`demo/conf/yml/silver_transformations.yml`](https://github.com/databrickslabs/sdp-meta/blob/main/demo/conf/yml/silver_transformations.yml)
 
 #### Generic Lakeflow Spark Declarative Pipeline
@@ -56,7 +62,7 @@
 | Medallion architecture | Bronze → Silver |
 | Bronze ↔ Silver pipeline chaining (`layer=bronze_silver`) | Both |
 | Custom transformation functions | Bronze, Silver |
-| Data Quality Expectations | Bronze, Silver |
+| Metadata-driven quality — legacy expectations, Lakeflow, optional DQX | Bronze, Silver |
 | Quarantine table | Bronze, Silver |
 | Liquid clustering | Bronze, Bronze Quarantine, Silver |
 | [`create_auto_cdc_flow`](https://docs.databricks.com/aws/en/ldp/developer/ldp-python-ref-apply-changes) — CDC via `bronze_cdc_apply_changes` | Bronze, Silver |

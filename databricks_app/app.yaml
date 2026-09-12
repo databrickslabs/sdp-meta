@@ -33,3 +33,6 @@ env:
   # (Warehouse button in the top bar → enter an existing ID or create a new serverless one).
   - name: DATABRICKS_SQL_WAREHOUSE_ID
     value: ""
+  # DQX runtime installed into App-created onboarding and pipeline environments.
+  - name: SDP_META_QUALITY_ENGINE_DEPENDENCY
+    value: "databricks-labs-dqx>=0.14,<0.17"

@@ -1,0 +1,102 @@
+[
+  {
+    "data_flow_id": "release_b_dqx_quality",
+    "data_flow_group": "A1",
+    "source_system": "INTEGRATION_TEST",
+    "source_format": "cloudFiles",
+    "source_details": {
+      "source_path_it": "{uc_volume_path}integration_tests/resources/data/quality_dqx/customers",
+      "source_schema_path": "{uc_volume_path}integration_tests/resources/quality_dqx_customers.ddl"
+    },
+    "bronze_catalog_it": "{uc_catalog_name}",
+    "bronze_database_it": "{bronze_schema}",
+    "bronze_table": "quality_customers",
+    "bronze_reader_options": {
+      "cloudFiles.format": "json",
+      "cloudFiles.inferColumnTypes": "false",
+      "cloudFiles.rescuedDataColumn": "_rescued_data"
+    },
+    "bronze_table_path_it": "{uc_volume_path}data/bronze/quality_dqx_customers",
+    "bronze_quality_engine": "dqx",
+    "bronze_quality_rules_path_it": "{uc_volume_path}integration_tests/conf/json/quality_dqx/rules.json",
+    "bronze_catalog_quarantine_it": "{uc_catalog_name}",
+    "bronze_database_quarantine_it": "{bronze_schema}",
+    "bronze_quarantine_table": "quality_customers_quarantine",
+    "bronze_quarantine_table_path_it": "{uc_volume_path}data/bronze/quality_dqx_customers_quarantine"
+  },
+  {
+    "data_flow_id": "release_b_dqx_transactions",
+    "data_flow_group": "A1",
+    "source_system": "INTEGRATION_TEST",
+    "source_format": "cloudFiles",
+    "source_details": {
+      "source_path_it": "{uc_volume_path}integration_tests/resources/data/quality_dqx/transactions",
+      "source_schema_path": "{uc_volume_path}integration_tests/resources/quality_dqx_transactions.ddl"
+    },
+    "bronze_catalog_it": "{uc_catalog_name}",
+    "bronze_database_it": "{bronze_schema}",
+    "bronze_table": "quality_transactions",
+    "bronze_reader_options": {
+      "cloudFiles.format": "json",
+      "cloudFiles.inferColumnTypes": "false",
+      "cloudFiles.rescuedDataColumn": "_rescued_data"
+    },
+    "bronze_table_path_it": "{uc_volume_path}data/bronze/quality_dqx_transactions",
+    "bronze_quality_engine": "dqx",
+    "bronze_quality_rules_path_it": "{uc_volume_path}integration_tests/conf/json/quality_dqx/transactions_rules.json",
+    "bronze_catalog_quarantine_it": "{uc_catalog_name}",
+    "bronze_database_quarantine_it": "{bronze_schema}",
+    "bronze_quarantine_table": "quality_transactions_quarantine",
+    "bronze_quarantine_table_path_it": "{uc_volume_path}data/bronze/quality_dqx_transactions_quarantine"
+  },
+  {
+    "data_flow_id": "release_b_dqx_stores",
+    "data_flow_group": "A1",
+    "source_system": "INTEGRATION_TEST",
+    "source_format": "cloudFiles",
+    "source_details": {
+      "source_path_it": "{uc_volume_path}integration_tests/resources/data/quality_dqx/stores",
+      "source_schema_path": "{uc_volume_path}integration_tests/resources/quality_dqx_stores.ddl"
+    },
+    "bronze_catalog_it": "{uc_catalog_name}",
+    "bronze_database_it": "{bronze_schema}",
+    "bronze_table": "quality_stores",
+    "bronze_reader_options": {
+      "cloudFiles.format": "json",
+      "cloudFiles.inferColumnTypes": "false",
+      "cloudFiles.rescuedDataColumn": "_rescued_data"
+    },
+    "bronze_table_path_it": "{uc_volume_path}data/bronze/quality_dqx_stores",
+    "bronze_quality_engine": "dqx",
+    "bronze_quality_rules_path_it": "{uc_volume_path}integration_tests/conf/json/quality_dqx/stores_rules.json",
+    "bronze_catalog_quarantine_it": "{uc_catalog_name}",
+    "bronze_database_quarantine_it": "{bronze_schema}",
+    "bronze_quarantine_table": "quality_stores_quarantine",
+    "bronze_quarantine_table_path_it": "{uc_volume_path}data/bronze/quality_dqx_stores_quarantine"
+  },
+  {
+    "data_flow_id": "release_b_dqx_products",
+    "data_flow_group": "A1",
+    "source_system": "INTEGRATION_TEST",
+    "source_format": "cloudFiles",
+    "source_details": {
+      "source_path_it": "{uc_volume_path}integration_tests/resources/data/quality_dqx/products",
+      "source_schema_path": "{uc_volume_path}integration_tests/resources/quality_dqx_products.ddl"
+    },
+    "bronze_catalog_it": "{uc_catalog_name}",
+    "bronze_database_it": "{bronze_schema}",
+    "bronze_table": "quality_products",
+    "bronze_reader_options": {
+      "cloudFiles.format": "json",
+      "cloudFiles.inferColumnTypes": "false",
+      "cloudFiles.rescuedDataColumn": "_rescued_data"
+    },
+    "bronze_table_path_it": "{uc_volume_path}data/bronze/quality_dqx_products",
+    "bronze_quality_engine": "dqx",
+    "bronze_quality_rules_path_it": "{uc_volume_path}integration_tests/conf/json/quality_dqx/products_rules.json",
+    "bronze_catalog_quarantine_it": "{uc_catalog_name}",
+    "bronze_database_quarantine_it": "{bronze_schema}",
+    "bronze_quarantine_table": "quality_products_quarantine",
+    "bronze_quarantine_table_path_it": "{uc_volume_path}data/bronze/quality_dqx_products_quarantine"
+  }
+]

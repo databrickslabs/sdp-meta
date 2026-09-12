@@ -35,6 +35,9 @@ from services.onboarding.path_resolver import (
     _preflight_parse_onboarding,
     _resolve_local_onboarding_path,
 )
+from services.onboarding.quality_preflight import (
+    _verify_quality_configuration,
+)
 from services.onboarding.required_files import (
     _check_required_files_existence,
     _extract_required_files,
@@ -172,6 +175,9 @@ def handle_onboard_form():
     _form_env = (request.form.get('environment') or 'demo').strip()
     try:
         _verify_env_matches_template(_parsed_onboarding, _form_env)
+        _verify_quality_configuration(
+            _parsed_onboarding, _form_env, uc_enabled=uc_enabled
+        )
     except _OnboardingFileError as exc:
         if _tmp_onboarding and os.path.exists(_tmp_onboarding):
             try:
@@ -209,6 +215,9 @@ def handle_onboard_form():
         "command": "onboard_ui",
         "flags": {"log_level": "info"},
     }
+    quality_dependency = os.getenv("SDP_META_QUALITY_ENGINE_DEPENDENCY")
+    if quality_dependency:
+        json_data["quality_engine_dependency"] = quality_dependency
     json_string = json.dumps(json_data)
 
     # Spawn the CLI subprocess in a background thread so the frontend
@@ -362,6 +371,12 @@ def handle_onboarding_preview():
         # the form. The real /onboarding POST path enforces the match.
         detected_envs = _detect_env_suffixes(parsed_pre)
         form_env = (request.form.get('environment') or 'demo').strip()
+        try:
+            _verify_quality_configuration(
+                parsed_pre, form_env, uc_enabled=uc_enabled
+            )
+        except _OnboardingFileError as exc:
+            return jsonify({'error': str(exc)}), 400
         env_warning = None
         if detected_envs and form_env not in detected_envs:
             env_warning = (

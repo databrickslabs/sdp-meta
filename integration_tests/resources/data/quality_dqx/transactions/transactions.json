@@ -1,0 +1,6 @@
+{"row_key":"valid_1","transaction_id":101,"customer_id":1,"store_id":10,"product_id":1001,"amount":25.50,"status":"completed"}
+{"row_key":"valid_2","transaction_id":102,"customer_id":2,"store_id":11,"product_id":1002,"amount":49.99,"status":"completed"}
+{"row_key":"valid_3","transaction_id":103,"customer_id":3,"store_id":10,"product_id":1003,"amount":10.00,"status":"refunded"}
+{"row_key":"status_warning","transaction_id":104,"customer_id":4,"store_id":12,"product_id":1001,"amount":15.75,"status":"pending_review"}
+{"row_key":"missing_transaction_id","transaction_id":null,"customer_id":5,"store_id":11,"product_id":1002,"amount":30.00,"status":"completed"}
+{"row_key":"negative_amount","transaction_id":106,"customer_id":6,"store_id":10,"product_id":1003,"amount":-4.50,"status":"completed"}

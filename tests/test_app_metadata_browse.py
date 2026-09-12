@@ -27,6 +27,53 @@ if _APP_DIR not in sys.path:
 import app as app_mod  # noqa: E402  (deliberate post-sys.path-insert import)
 
 
+class QualitySpecEditorValidationTests(unittest.TestCase):
+    def setUp(self):
+        app_mod.app.testing = True
+        self.client = app_mod.app.test_client()
+
+    def _parse(self, row):
+        response = self.client.post(
+            "/api/metadata/parse-spec",
+            data=json.dumps({
+                "content": json.dumps([row]),
+                "format": "json",
+                "spec_type": "onboarding",
+                "env": "dev",
+            }),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        return response.get_json()
+
+    def test_lakeflow_fields_are_exposed_and_rules_path_is_warned(self):
+        body = self._parse({
+            "data_flow_id": "100",
+            "bronze_quality_engine": "lakeflow",
+            "bronze_quality_rules_path_dev": "/Volumes/c/s/v/rules.yml",
+            "bronze_database_quarantine_dev": "bronze",
+            "bronze_quarantine_table": "invalid_rows",
+        })
+        self.assertEqual(body["errors"], [])
+        self.assertTrue(
+            any("bronze_quality_rules_path_dev" in warning
+                for warning in body["warnings"])
+        )
+
+    def test_lakeflow_rejects_legacy_conflict(self):
+        body = self._parse({
+            "data_flow_id": "100",
+            "bronze_quality_engine": "lakeflow",
+            "bronze_quality_rules_path_dev": "/Volumes/c/s/v/rules.yml",
+            "bronze_data_quality_expectations_json_dev": "/Volumes/c/s/v/legacy.yml",
+            "bronze_database_quarantine_dev": "bronze",
+            "bronze_quarantine_table": "invalid_rows",
+        })
+        self.assertTrue(
+            any("cannot combine" in error for error in body["errors"])
+        )
+
+
 class TableDataLimitValidationTests(unittest.TestCase):
     """``limit`` validation runs before any SDK / SQL work."""
 
