@@ -1,0 +1,23 @@
+[
+  {
+    "data_flow_id": "quality-1",
+    "data_flow_group": "QUALITY",
+    "source_system": "MYSQL",
+    "source_format": "cloudFiles",
+    "source_details": {
+      "source_path_dev": "tests/resources/data/customers",
+      "source_schema_path": "tests/resources/schema/customer_schema.ddl"
+    },
+    "bronze_database_dev": "bronze",
+    "bronze_table": "quality_customers",
+    "bronze_table_path_dev": "tests/resources/delta/quality_customers",
+    "bronze_reader_options": {
+      "cloudFiles.format": "json"
+    },
+    "bronze_quality_engine": "lakeflow",
+    "bronze_quality_rules_path_dev": "tests/resources/quality/lakeflow_rules.json",
+    "bronze_database_quarantine_dev": "bronze",
+    "bronze_quarantine_table": "quality_customers_quarantine",
+    "bronze_quarantine_table_path_dev": "tests/resources/delta/quality_customers_quarantine"
+  }
+]

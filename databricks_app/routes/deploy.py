@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 
 from flask import Blueprint, jsonify, request
 
@@ -142,6 +143,9 @@ def handle_deploy_form():
         "dataflowspec_bronze_table": bronze_spec_table,
         "dataflowspec_silver_table": silver_spec_table,
     }
+    quality_dependency = os.getenv("SDP_META_QUALITY_ENGINE_DEPENDENCY")
+    if quality_dependency:
+        json_data["quality_engine_dependency"] = quality_dependency
     json_string = json.dumps(json_data)
 
     # Background-thread + polling pattern shared with /onboarding so

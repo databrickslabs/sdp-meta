@@ -1,0 +1,21 @@
+[
+  {
+    "data_flow_id": "customers_quality",
+    "data_flow_group": "QUALITY",
+    "source_system": "CRM",
+    "source_format": "cloudFiles",
+    "source_details": {
+      "source_path_dev": "/Volumes/main/landing/files/customers",
+      "source_schema_path": "/Volumes/main/landing/ddl/customers.ddl"
+    },
+    "bronze_database_dev": "main.bronze",
+    "bronze_table": "customers",
+    "bronze_reader_options": {
+      "cloudFiles.format": "json"
+    },
+    "bronze_quality_engine": "lakeflow",
+    "bronze_quality_rules_path_dev": "/Volumes/main/config/quality/bronze_lakeflow_rules.json",
+    "bronze_database_quarantine_dev": "main.bronze",
+    "bronze_quarantine_table": "customers_quarantine"
+  }
+]

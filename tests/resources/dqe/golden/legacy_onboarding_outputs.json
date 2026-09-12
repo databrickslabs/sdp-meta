@@ -1,0 +1,109 @@
+{
+  "fixtures": {
+    "customers/bronze_data_quality_expectations.json": "customers_bronze",
+    "customers/silver_data_quality_expectations.json": "customers_silver",
+    "iot_cdc/bronze_data_quality_expectations.json": "operation_quarantine",
+    "iot_cdc/silver_data_quality_expectations.json": "operation_quarantine",
+    "product/products.json": "product_full",
+    "product/silver_data_quality_expectations.json": "product_silver_full",
+    "products.json": "product_quarantine",
+    "products.yml": "product_quarantine",
+    "stores.json": "store_quarantine",
+    "stores/silver_data_quality_expectations.json": "store_quarantine",
+    "stores/stores.json": "store_quarantine",
+    "transactions/bronze_data_quality_expectations.json": "operation_quarantine",
+    "transactions/silver_data_quality_expectations.json": "operation_quarantine"
+  },
+  "profiles": {
+    "customers_bronze": {
+      "expect_or_drop": {
+        "no_rescued_data": "_rescued_data IS NULL",
+        "valid_id": "id IS NOT NULL",
+        "valid_operation": "operation IN ('APPEND', 'DELETE', 'UPDATE')"
+      }
+    },
+    "customers_silver": {
+      "expect_or_drop": {
+        "no_rescued_data": "_rescued_data IS NULL",
+        "valid_id": "id IS NOT NULL",
+        "valid_operation": "operation IN ('APPEND', 'DELETE', 'UPDATE')"
+      },
+      "expect_or_quarantine": {
+        "valid_operation": "operation IN ('DELETE')"
+      }
+    },
+    "operation_quarantine": {
+      "expect": {
+        "no_rescued_data": "_rescued_data IS NULL",
+        "valid_id": "id IS NOT NULL"
+      },
+      "expect_or_quarantine": {
+        "valid_operation": "operation IN ('APPEND', 'DELETE', 'UPDATE')"
+      }
+    },
+    "product_full": {
+      "expect": {
+        "valid_product_id": "product_id IS NOT NULL"
+      },
+      "expect_all": {
+        "valid_product_id": "product_id IS NOT NULL"
+      },
+      "expect_or_fail": {
+        "no_rescued_data": "_rescued_data IS NULL",
+        "valid_product_id": "product_id IS NOT NULL"
+      },
+      "expect_or_drop": {
+        "no_rescued_data": "_rescued_data IS NULL",
+        "valid_product_id": "product_id IS NOT NULL"
+      },
+      "expect_or_quarantine": {
+        "quarantine_rule": "_rescued_data IS NOT NULL OR product_id IS NULL"
+      }
+    },
+    "product_quarantine": {
+      "expect_or_drop": {
+        "no_rescued_data": "_rescued_data IS NULL",
+        "valid_product_id": "product_id IS NOT NULL"
+      },
+      "expect_or_quarantine": {
+        "quarantine_rule": "_rescued_data IS NOT NULL OR product_id IS NULL"
+      }
+    },
+    "product_silver_full": {
+      "expect": {
+        "valid_product_id": "product_id IS NOT NULL"
+      },
+      "expect_all": {
+        "valid_product_id": "product_id IS NOT NULL"
+      },
+      "expect_all_or_fail": {
+        "no_rescued_data": "_rescued_data IS NULL",
+        "valid_product_id": "product_id IS NOT NULL"
+      },
+      "expect_or_fail": {
+        "no_rescued_data": "_rescued_data IS NULL",
+        "valid_product_id": "product_id IS NOT NULL"
+      },
+      "expect_all_or_drop": {
+        "no_rescued_data": "_rescued_data IS NULL",
+        "valid_product_id": "product_id IS NOT NULL"
+      },
+      "expect_or_drop": {
+        "no_rescued_data": "_rescued_data IS NULL",
+        "valid_product_id": "product_id IS NOT NULL"
+      },
+      "expect_or_quarantine": {
+        "quarantine_rule": "_rescued_data IS NOT NULL OR product_id IS NULL"
+      }
+    },
+    "store_quarantine": {
+      "expect_or_drop": {
+        "no_rescued_data": "_rescued_data IS NULL",
+        "valid_store_id": "store_id IS NOT NULL"
+      },
+      "expect_or_quarantine": {
+        "quarantine_rule": "_rescued_data IS NOT NULL OR store_id IS NULL"
+      }
+    }
+  }
+}

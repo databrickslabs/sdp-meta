@@ -134,6 +134,60 @@ resources:
       name: "${bundle.name} - run pipelines"
       description: "Runs the sdp-meta SDP Pipeline(s) end-to-end."
       tasks:
+{{- if .managed_quality_migrations}}
+{{- if eq .layer "bronze"}}
+        - task_key: bronze
+          python_wheel_task:
+            package_name: databricks_labs_sdp_meta
+            entry_point: quality_migrate
+            named_parameters:
+              pipeline_id: ${resources.pipelines.bronze.id}
+              spec_tables: '{"bronze":"${var.uc_catalog_name}.${var.sdp_meta_schema}.${var.bronze_dataflowspec_table}"}'
+              groups: '{"bronze":"${var.dataflow_group}"}'
+          environment_key: quality_migration
+{{- else if eq .layer "silver"}}
+        - task_key: silver
+          python_wheel_task:
+            package_name: databricks_labs_sdp_meta
+            entry_point: quality_migrate
+            named_parameters:
+              pipeline_id: ${resources.pipelines.silver.id}
+              spec_tables: '{"silver":"${var.uc_catalog_name}.${var.sdp_meta_schema}.${var.silver_dataflowspec_table}"}'
+              groups: '{"silver":"${var.dataflow_group}"}'
+          environment_key: quality_migration
+{{- else if and (eq .layer "bronze_silver") (eq .pipeline_mode "combined")}}
+        - task_key: bronze_silver
+          python_wheel_task:
+            package_name: databricks_labs_sdp_meta
+            entry_point: quality_migrate
+            named_parameters:
+              pipeline_id: ${resources.pipelines.bronze_silver.id}
+              spec_tables: '{"bronze":"${var.uc_catalog_name}.${var.sdp_meta_schema}.${var.bronze_dataflowspec_table}","silver":"${var.uc_catalog_name}.${var.sdp_meta_schema}.${var.silver_dataflowspec_table}"}'
+              groups: '{"bronze":"${var.dataflow_group}","silver":"${var.dataflow_group}"}'
+          environment_key: quality_migration
+{{- else}}
+        - task_key: bronze
+          python_wheel_task:
+            package_name: databricks_labs_sdp_meta
+            entry_point: quality_migrate
+            named_parameters:
+              pipeline_id: ${resources.pipelines.bronze.id}
+              spec_tables: '{"bronze":"${var.uc_catalog_name}.${var.sdp_meta_schema}.${var.bronze_dataflowspec_table}"}'
+              groups: '{"bronze":"${var.dataflow_group}"}'
+          environment_key: quality_migration
+        - task_key: silver
+          python_wheel_task:
+            package_name: databricks_labs_sdp_meta
+            entry_point: quality_migrate
+            named_parameters:
+              pipeline_id: ${resources.pipelines.silver.id}
+              spec_tables: '{"silver":"${var.uc_catalog_name}.${var.sdp_meta_schema}.${var.silver_dataflowspec_table}"}'
+              groups: '{"silver":"${var.dataflow_group}"}'
+          environment_key: quality_migration
+          depends_on:
+            - task_key: bronze
+{{- end}}
+{{- else}}
 {{- if eq .layer "bronze"}}
         - task_key: bronze
           pipeline_task:
@@ -160,4 +214,16 @@ resources:
             full_refresh: false
           depends_on:
             - task_key: bronze
+{{- end}}
+{{- end}}
+{{- if .managed_quality_migrations}}
+      environments:
+        - environment_key: quality_migration
+          spec:
+            client: "1"
+            dependencies:
+              - ${var.sdp_meta_dependency}
+{{- if eq .quality_engine "dqx"}}
+              - databricks-labs-dqx>=0.14,<0.17
+{{- end}}
 {{- end}}

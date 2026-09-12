@@ -115,7 +115,21 @@
 
         The workflow is a minimal 3-task fan-in: `setup_sdp_meta_pipeline_spec → sdp-meta-pipeline → validate_results` (no A2 incremental step, no publish-events step). The `sdp-meta-pipeline` task runs **one** combined Lakeflow Spark Declarative Pipeline configured with `layer=bronze_silver` (groups `bronze.group=A1` and `silver.group=A1`), so all three regional bronze CDC tables AND the unified silver multi-source AUTO CDC merge execute inside a single observable DLT flow graph — matching Stage 11 of the interactive demo notebook and the standalone `demo/launch_multi_source_cdc_demo.py`. Seed data lives under [`integration_tests/resources/data/multi_source_cdc/`](resources/data/multi_source_cdc/) and the onboarding template is [`integration_tests/conf/json/multi-source-cdc-onboarding.template`](conf/json/multi-source-cdc-onboarding.template) (YAML sibling: [`conf/yml/multi-source-cdc-onboarding.template.yml`](conf/yml/multi-source-cdc-onboarding.template.yml)).
 
-    > **Tip:** any of the five sources (`cloudfiles`, `eventhub`, `kafka`, `snapshot`, `multi_source_cdc`) accepts ```--onboarding_file_format=yaml``` to run the same test against the YAML onboarding spec.
+    - 9f. Run the dedicated **Release A native quality** scenario
+        ```commandline
+        python integration_tests/run_integration_tests.py --source=quality --uc_catalog_name=<<uc catalog name>> --profile=<<DEFAULT>>
+        ```
+
+      Add `--onboarding_file_format=yaml` to exercise the equivalent YAML onboarding and rules. This scenario onboards a non-null Lakeflow `qualityConfig`, processes a deterministic eight-row input (five main, three quarantine, including `NULL` and multi-rule failures), runs the same serverless pipeline a second time to prove idempotency, and validates exact row keys plus ordered `_errors` diagnostics. It also checks native expectation failure counts when the workspace exposes pipeline event-log metrics to the workflow identity; lack of event-log access is recorded in the result artifact while content and diagnostic assertions remain mandatory.
+
+    - 9g. Run the built-in **DQX quality** scenario
+        ```commandline
+        python integration_tests/run_integration_tests.py --source=quality_dqx --uc_catalog_name=<<uc catalog name>> --profile=<<DEFAULT>>
+        ```
+
+      This scenario runs customer, transaction, store, and product feeds in one pipeline. Each feed has independent DQX rules and main/quarantine targets. Validation checks exact error routing, warning-only overlap, diagnostics, immutable snapshots, and second-update stability.
+
+    > **Tip:** any of the seven sources (`cloudfiles`, `eventhub`, `kafka`, `snapshot`, `quality`, `quality_dqx`, `multi_source_cdc`) accepts ```--onboarding_file_format=yaml``` to run the same test against the YAML onboarding spec.
 
 
 10. Once finished integration output file will be copied locally to

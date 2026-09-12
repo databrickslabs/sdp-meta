@@ -13,6 +13,8 @@ from pyspark.sql.window import Window
 logger = logging.getLogger("sdp-meta")
 logger.setLevel(logging.INFO)
 
+DQE_CONTRACT_VERSION = "v2"
+
 
 def _coerce_scd_type_to_str(payload: dict) -> dict:
     """Coerce an integer ``scd_type`` in ``payload`` to its string form.
@@ -83,6 +85,12 @@ class BronzeDataflowSpec:
     # :attr:`DataflowSpecUtils.additional_bronze_df_columns`.
     rowFilter: str
     quarantineRowFilter: str
+    # Validated, immutable quality-engine snapshot. ``None`` selects the
+    # existing legacy/standard runtime paths.
+    qualityConfig: str = None
+    # ``None`` identifies rows onboarded before strict legacy-DQE validation.
+    # New/re-onboarded rows are stamped with :data:`DQE_CONTRACT_VERSION`.
+    dqeContract: str = None
 
 
 @dataclass
@@ -129,6 +137,10 @@ class SilverDataflowSpec:
     # :meth:`DataflowPipeline._get_quarantine_row_filter` helpers.
     rowFilter: str
     quarantineRowFilter: str
+    # Validated, immutable quality-engine snapshot. ``None`` selects the
+    # existing legacy/standard runtime paths.
+    qualityConfig: str = None
+    dqeContract: str = None
 
 
 @dataclass
@@ -324,6 +336,8 @@ class DataflowSpecUtils:
         # legacy dataflowspec rows.
         "rowFilter",
         "quarantineRowFilter",
+        "qualityConfig",
+        "dqeContract",
     ]
     additional_silver_df_columns = [
         "dataQualityExpectations",
@@ -342,6 +356,8 @@ class DataflowSpecUtils:
         # UC row-level security (issue #303). See bronze entry above.
         "rowFilter",
         "quarantineRowFilter",
+        "qualityConfig",
+        "dqeContract",
     ]
     additional_cdc_apply_changes_columns = ["flow_name", "once"]
     apply_changes_from_snapshot_api_attributes = [

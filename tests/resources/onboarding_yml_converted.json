@@ -73,7 +73,10 @@
             "pipelines.autoOptimize.zOrderCols": "id,email"
         },
         "silver_transformation_json_dev": "tests/resources/silver_transformations.json",
-        "silver_data_quality_expectations_json_dev": "tests/resources/dqe/customers/silver_data_quality_expectations.json"
+        "silver_data_quality_expectations_json_dev": "tests/resources/dqe/customers/silver_data_quality_expectations.json",
+        "silver_database_quarantine_dev": "silver",
+        "silver_quarantine_table": "customers_quarantine",
+        "silver_quarantine_table_path_dev": "tests/resources/data/silver/customers_quarantine"
     },
     {
         "data_flow_id": "101",
@@ -145,7 +148,10 @@
             "pipelines.reset.allowed": "false",
             "pipelines.autoOptimize.zOrderCols": "id, customer_id"
         },
-        "silver_data_quality_expectations_json_dev": "tests/resources/dqe/transactions/silver_data_quality_expectations.json"
+        "silver_data_quality_expectations_json_dev": "tests/resources/dqe/transactions/silver_data_quality_expectations.json",
+        "silver_database_quarantine_dev": "silver",
+        "silver_quarantine_table": "transactions_quarantine",
+        "silver_quarantine_table_path_dev": "tests/resources/data/silver/transactions_quarantine"
     },
     {
         "data_flow_id": "103",
@@ -180,6 +186,9 @@
         "bronze_table_path_staging": "s3://db-sdp-meta-staging/demo/data/bronze/iot_cdc",
         "bronze_table_path_prd": "s3://db-sdp-meta-prod/demo/data/bronze/iot_cdc",
         "bronze_data_quality_expectations_json_dev": "tests/resources/dqe/iot_cdc/bronze_data_quality_expectations.json",
+        "bronze_database_quarantine_dev": "bronze",
+        "bronze_quarantine_table": "iot_cdc_quarantine",
+        "bronze_quarantine_table_path_dev": "tests/resources/data/bronze/iot_quarantine",
         "silver_catalog_dev": "silver_cl",
         "silver_catalog_staging": "silver_cl",
         "silver_catalog_prd": "silver_cl",
@@ -197,6 +206,9 @@
         },
         "silver_table_path_dev": "tests/resources/data/silver/iot_cdc",
         "silver_transformation_json_dev": "tests/resources/silver_transformations.json",
-        "silver_data_quality_expectations_json_dev": "tests/resources/dqe/iot_cdc/silver_data_quality_expectations.json"
+        "silver_data_quality_expectations_json_dev": "tests/resources/dqe/iot_cdc/silver_data_quality_expectations.json",
+        "silver_database_quarantine_dev": "silver",
+        "silver_quarantine_table": "iot_cdc_quarantine",
+        "silver_quarantine_table_path_dev": "tests/resources/data/silver/iot_quarantine"
     }
 ]

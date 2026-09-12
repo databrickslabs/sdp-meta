@@ -1,0 +1,14 @@
+{
+  "expect": {
+    "known_operation": "operation IN ('APPEND', 'DELETE', 'UPDATE')"
+  },
+  "expect_or_drop": {
+    "valid_email": "email IS NOT NULL"
+  },
+  "expect_or_fail": {
+    "valid_operation_date": "operation_date IS NOT NULL"
+  },
+  "expect_or_quarantine": {
+    "valid_id": "id IS NOT NULL"
+  }
+}

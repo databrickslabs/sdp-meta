@@ -1,0 +1,22 @@
+[
+    {
+        "data_flow_id": "435",
+        "data_flow_group": "A1",
+        "source_system": "dqx_demo",
+        "source_format": "cloudFiles",
+        "source_details": {
+            "source_path_demo": "/Volumes/sdp_meta/sdp_meta_dataflowspecs_dqx_demo_7a4f5ae925744a7baf5530b413dab4cc/dlt_meta_files//demo/resources/data/dqx_demo/data/customers",
+            "source_schema_path": "/Volumes/sdp_meta/sdp_meta_dataflowspecs_dqx_demo_7a4f5ae925744a7baf5530b413dab4cc/dlt_meta_files//demo/resources/data/dqx_demo/ddl/customers.ddl"
+        },
+        "bronze_catalog_demo": "sdp_meta",
+        "bronze_database_demo": "sdp_meta_bronze_dqx_demo_7a4f5ae925744a7baf5530b413dab4cc",
+        "bronze_table": "customers_raw",
+        "bronze_table_comment": "Raw customers for the SDP-META DQX demo",
+        "bronze_reader_options": {
+            "cloudFiles.format": "csv",
+            "cloudFiles.rescuedDataColumn": "_rescued_data",
+            "header": "true"
+        },
+        "bronze_cluster_by_auto": true
+    }
+]

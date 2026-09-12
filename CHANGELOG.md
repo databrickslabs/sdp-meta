@@ -27,6 +27,27 @@
 - Historical changelog entries and backward-compatibility test fixtures retain
   old names to describe and test their original releases.
 
+### Added
+- Added an opt-in built-in Lakeflow quality engine with valid-rule semantics,
+  disjoint main/quarantine routing, native expectation metrics, and structured
+  `_errors` diagnostics.
+- Added immutable `qualityConfig` snapshots and JSON/YAML onboarding fields
+  for engine selection and rules paths.
+- Added the experimental quality-engine SPI, installed entry-point discovery,
+  adapter drift checks, and a reusable plugin contract test kit.
+- Added built-in optional DQX support through
+  `pip install "databricks-labs-sdp-meta[dqx]"`, plus DAB/App preflight and
+  same-pipeline JSON/YAML integration scenarios.
+- Added managed selective quarantine full-refresh migrations with
+  compare-and-swap completion fingerprints.
+
+### Changed
+- DAB pipeline jobs use native `pipeline_task` entries by default; managed
+  quality migrations require the explicit `managed_quality_migrations`
+  scaffold option.
+- Managed quality migrations support both UC spec tables and path-based
+  Delta spec tables.
+
 ## [v0.1.1]
 ### Added
 - **Multiple pipeline topologies per DAB bundle**: `bundle-add-pipeline` adds independently configured bronze, silver, split, or combined pipelines with their own data-flow groups and target schemas. `bundle-validate` validates each pipeline and its job wiring independently. [Issue #446](https://github.com/databrickslabs/sdp-meta/issues/446)

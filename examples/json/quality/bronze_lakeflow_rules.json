@@ -1,0 +1,15 @@
+{
+  "expect": {
+    "recognized_operation": "operation IN ('APPEND', 'DELETE', 'UPDATE')"
+  },
+  "expect_or_drop": {
+    "source_was_parsed": "_rescued_data IS NULL"
+  },
+  "expect_or_fail": {
+    "operation_date_required": "operation_date IS NOT NULL"
+  },
+  "expect_or_quarantine": {
+    "customer_id_required": "id IS NOT NULL",
+    "email_required": "email IS NOT NULL"
+  }
+}

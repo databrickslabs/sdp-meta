@@ -1,0 +1,41 @@
+{{- if eq .quality_engine "dqx"}}
+{{- if eq .onboarding_file_format "yaml"}}
+- name: id_required
+  criticality: error
+  check:
+    function: is_not_null
+    arguments:
+      column: id
+{{- else}}
+[
+  {
+    "name": "id_required",
+    "criticality": "error",
+    "check": {
+      "function": "is_not_null",
+      "arguments": {"column": "id"}
+    }
+  }
+]
+{{- end}}
+{{- else if eq .onboarding_file_format "yaml"}}
+# Every expression describes a valid row. NULL evaluates as a failure.
+expect:{{if eq .source_format "cloudFiles"}}
+  source_parsed: _rescued_data IS NULL
+{{- else}} {}{{end}}
+expect_or_drop: {}
+expect_or_fail: {}
+expect_or_quarantine:
+  id_required: id IS NOT NULL
+{{- else}}
+{
+  "expect": {{if eq .source_format "cloudFiles"}}{
+    "source_parsed": "_rescued_data IS NULL"
+  }{{else}}{}{{end}},
+  "expect_or_drop": {},
+  "expect_or_fail": {},
+  "expect_or_quarantine": {
+    "id_required": "id IS NOT NULL"
+  }
+}
+{{- end}}

@@ -24,6 +24,8 @@ from .path_resolver import _OnboardingFileError
 _ENV_REQUIRED_FIELD_PREFIXES = (
     "bronze_data_quality_expectations_json",
     "silver_data_quality_expectations_json",
+    "bronze_quality_rules_path",
+    "silver_quality_rules_path",
     "bronze_database_quarantine",
     "bronze_catalog_quarantine",
     "bronze_quarantine_table_path",

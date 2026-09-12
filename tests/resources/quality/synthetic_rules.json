@@ -1,0 +1,5 @@
+{
+  "rules": {
+    "positive_id": "id > 0"
+  }
+}

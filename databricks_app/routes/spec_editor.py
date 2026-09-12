@@ -16,6 +16,9 @@ import io
 import json
 import logging
 
+from databricks.labs.sdp_meta.quality.onboarding_preflight import (
+    collect_quality_configuration_errors,
+)
 from flask import Blueprint, jsonify, request
 
 logger = logging.getLogger(__name__)
@@ -140,6 +143,14 @@ def parse_spec():
         pass
 
     if spec_type == 'onboarding' and isinstance(parsed, list):
+        errors.extend(
+            collect_quality_configuration_errors(
+                parsed,
+                env=env,
+                uc_enabled=True,
+                supported_engines=("lakeflow", "dqx"),
+            )
+        )
         for i, row in enumerate(parsed):
             if not isinstance(row, dict):
                 continue
@@ -189,6 +200,8 @@ def parse_spec():
                         errors.append(pfx + f"{cdc_key}.scd_type must be '1' or '2', got {scd!r}")
             # Layer 3 \u2014 file reference warnings
             for field in (f'bronze_data_quality_expectations_json_{env}',
+                          f'bronze_quality_rules_path_{env}',
+                          f'silver_quality_rules_path_{env}',
                           f'silver_transformation_json_{env}',
                           'source_schema_path'):
                 if row.get(field):

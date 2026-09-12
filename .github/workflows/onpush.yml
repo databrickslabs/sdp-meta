@@ -51,7 +51,10 @@ jobs:
       # The MCP server is part of the measured src/ tree. Install its optional
       # runtime so tests/test_mcp_server.py runs instead of skipping MCP tests.
       - name: Install package and dependencies
-        run: pip install -e ".[dev,mcp]"
+        run: pip install -e ".[dev,mcp,dqx]"
+
+      - name: Install synthetic quality-engine fixture
+        run: pip install tests/fixtures/synthetic_quality_plugin
 
       # tests/test_app_*.py import databricks_app, whose runtime deps (flask,
       # ...) are declared here rather than in setup.py's [dev] extra. Without
