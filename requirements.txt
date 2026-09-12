@@ -9,5 +9,5 @@
 # For development and test dependencies, use requirements-dev.txt instead.
 
 setuptools>=65,<83
-databricks-sdk>=0.20,<1
+databricks-sdk>=0.137.0,<1
 PyYAML>=6.0.3,<7
