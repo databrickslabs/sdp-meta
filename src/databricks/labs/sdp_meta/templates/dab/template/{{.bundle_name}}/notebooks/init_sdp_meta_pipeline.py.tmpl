@@ -13,7 +13,7 @@
 # entries on the pipeline definition, so we cannot install the wheel from
 # `resources/sdp_meta_pipelines.yml` either -- it has to happen here.
 sdp_meta_dependency = spark.conf.get("sdp_meta_dependency")
-%pip install $sdp_meta_dependency  # noqa: E999
+%pip install --force-reinstall $sdp_meta_dependency  # noqa: E999
 
 # COMMAND ----------
 

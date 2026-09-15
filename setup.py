@@ -90,10 +90,18 @@ MCP_REQUIREMENTS = ["mcp>=2.0.0,<3.0"]
 
 
 class BuildPyWithExamples(build_py):
-    """Copy onboarding examples into the importable package in release wheels."""
+    """Copy non-package runtime assets into release wheels."""
 
     def run(self):
         source_root = Path(__file__).resolve().parent / "examples"
+        templates_source = (
+            Path(__file__).resolve().parent
+            / "src"
+            / "databricks"
+            / "labs"
+            / "sdp_meta"
+            / "templates"
+        )
         missing_directories = [
             name for name in ("json", "yml") if not (source_root / name).is_dir()
         ]
@@ -101,6 +109,10 @@ class BuildPyWithExamples(build_py):
             raise FileNotFoundError(
                 "Cannot package MCP examples: expected examples/json and "
                 f"examples/yml below {source_root}; missing {missing_directories}."
+            )
+        if not templates_source.is_dir():
+            raise FileNotFoundError(
+                f"Cannot package DAB templates: expected {templates_source}."
             )
         package_root = (
             Path(self.build_lib) / "databricks" / "labs" / "sdp_meta"
@@ -117,11 +129,16 @@ class BuildPyWithExamples(build_py):
             if destination.exists():
                 shutil.rmtree(destination)
             shutil.copytree(source, destination)
+        shutil.copytree(
+            templates_source,
+            package_root / "templates",
+            dirs_exist_ok=True,
+        )
 
 
 setup(
     name="databricks-labs-sdp-meta",
-    version="0.1.0",
+    version="0.1.1",
     # Ceiling matches compat/setup.py: the pyspark 3.5.5 stack this framework
     # runs against is incompatible with Python 3.13+ (pickle/cloudpickle
     # changes; see GETTING_STARTED.md prerequisites). Keeping both packages'

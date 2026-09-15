@@ -113,12 +113,14 @@ Usage
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 import traceback
 import uuid
 import warnings
@@ -197,8 +199,20 @@ class BCRunnerConf:
     #               the same git URL via JobEnvironment.dependencies.
     #               Faster local iteration; requires the cluster to
     #               have egress to ``git_repo_url``.
+    #   ``pypi``:     post-release verification. No wheels are built or
+    #                 uploaded; Phase 1 installs
+    #                 ``dlt-meta==<source_package_version>`` and Phase 2
+    #                 installs ``dlt-meta==<target_package_version>``
+    #                 straight from the live PyPI index, proving the
+    #                 published redirect + primary packages upgrade a
+    #                 running deployment in place. Requires cluster
+    #                 egress to pypi.org.
     install_mode: str = "local"
     git_repo_url: str = "https://github.com/databrickslabs/sdp-meta.git"
+    # Exact ``dlt-meta`` version Phase 1 installs when
+    # ``install_mode == "pypi"``. Derived from ``source_ref`` (a ``vX.Y.Z``
+    # tag with the ``v`` stripped) unless passed explicitly.
+    source_package_version: Optional[str] = None
     # Pipeline execution and publishing mode:
     #
     #   ``serverless_dpm`` (default) creates serverless pipelines with
@@ -355,6 +369,11 @@ class BackwardCompatRunner:
     # compat_wheelhouse. Without it a stalled PyPI/proxy fetch would hang
     # the whole orchestrator with no diagnostic.
     COMPAT_DOWNLOAD_TIMEOUT_SEC = 600
+    PHASE_OUTPUT_DOWNLOAD_ATTEMPTS = 3
+    PHASE_OUTPUT_RETRY_DELAY_SEC = 2
+    # Contract with validate_phase1.py and validate_phase2.py: validation
+    # failures are persisted as human-readable rows containing this marker.
+    VALIDATION_FAILURE_MARKER = "Failed!"
 
     def __init__(self, args: dict, ws: WorkspaceClient) -> None:
         self.args = args
@@ -383,9 +402,37 @@ class BackwardCompatRunner:
         )
 
         install_mode = (self.args.get("install_mode") or "local").lower()
-        if install_mode not in ("local", "git"):
+        if install_mode not in ("local", "git", "pypi"):
             raise ValueError(
-                f"--install_mode must be 'local' or 'git'; got {install_mode!r}"
+                "--install_mode must be 'local', 'git', or 'pypi'; "
+                f"got {install_mode!r}"
+            )
+
+        def _pypi_version_from_ref(ref: str, *, flag: str) -> str:
+            """Derive a PyPI version from a ``vX.Y.Z``-style tag."""
+            match = re.fullmatch(r"v?(\d+(?:\.\d+)+(?:[.\-+][A-Za-z0-9.]+)?)", ref)
+            if not match:
+                raise ValueError(
+                    f"--install_mode=pypi could not derive a PyPI version "
+                    f"from {flag}={ref!r}. Pass a release tag (e.g. "
+                    f"'v0.1.0') or set the corresponding "
+                    "--source_package_version/--target_package_version "
+                    "explicitly. Note: pip versions carry no 'v' prefix "
+                    "(dlt-meta==0.1.0, not ==v0.1.0)."
+                )
+            return match.group(1)
+
+        source_package_version = self.args.get("source_package_version")
+        if source_package_version is not None and not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9.!+_-]*", source_package_version
+        ):
+            raise ValueError(
+                "--source_package_version must be a valid single-token "
+                f"package version; got {source_package_version!r}."
+            )
+        if install_mode == "pypi" and source_package_version is None:
+            source_package_version = _pypi_version_from_ref(
+                source_ref, flag="--source_version"
             )
 
         build_target_from_worktree = bool(
@@ -431,6 +478,10 @@ class BackwardCompatRunner:
             raise ValueError(
                 "--target_package_version must be a valid single-token "
                 f"package version; got {target_package_version!r}."
+            )
+        if install_mode == "pypi" and target_package_version is None:
+            target_package_version = _pypi_version_from_ref(
+                target_ref, flag="--target_version"
             )
 
         compat_python_version = (
@@ -482,6 +533,7 @@ class BackwardCompatRunner:
             pipeline_num_workers=pipeline_num_workers,
             build_target_from_worktree=build_target_from_worktree,
             target_install_surface=target_install_surface,
+            source_package_version=source_package_version,
             target_package_version=target_package_version,
             compat_python_version=compat_python_version,
         )
@@ -538,6 +590,14 @@ class BackwardCompatRunner:
             print(
                 f"=== install_mode=git: skipping local wheel build; "
                 f"all installs will resolve from {conf.git_repo_url!r} ==="
+            )
+            return
+        if conf.install_mode == "pypi":
+            print(
+                "=== install_mode=pypi: skipping local wheel build; "
+                f"Phase 1 installs dlt-meta=={conf.source_package_version}, "
+                f"Phase 2 installs dlt-meta=={conf.target_package_version} "
+                "from the live PyPI index ==="
             )
             return
 
@@ -848,6 +908,8 @@ class BackwardCompatRunner:
 
     def install_spec_source_main(self, conf: BCRunnerConf) -> str:
         """Pip-installable spec for the SOURCE main wheel."""
+        if conf.install_mode == "pypi":
+            return f"dlt-meta=={conf.source_package_version}"
         if conf.install_mode == "git":
             return self._git_install_spec(conf, conf.source_ref)
         return conf.source_main_whl_remote
@@ -855,6 +917,11 @@ class BackwardCompatRunner:
     def install_spec_target_main(self, conf: BCRunnerConf) -> str:
         """Pip-installable spec for the TARGET main wheel."""
         if conf.target_install_surface == "compat_wheelhouse":
+            return f"dlt-meta=={conf.target_package_version}"
+        if conf.install_mode == "pypi":
+            # The published ``dlt-meta`` redirect resolves the primary
+            # ``databricks-labs-sdp-meta`` distribution from live PyPI —
+            # exactly what an existing customer's unpinned upgrade does.
             return f"dlt-meta=={conf.target_package_version}"
         if conf.install_mode == "git":
             return self._git_install_spec(conf, conf.target_ref)
@@ -879,7 +946,10 @@ class BackwardCompatRunner:
         making the corresponding module importable from the isolated
         pipeline environment.
         """
-        if conf.target_install_surface != "compat_wheelhouse":
+        if (
+            conf.target_install_surface != "compat_wheelhouse"
+            and conf.install_mode != "pypi"
+        ):
             return content
 
         runner_name = os.path.basename(conf.source_profile.runner_notebook_local_path)
@@ -887,18 +957,35 @@ class BackwardCompatRunner:
             return content
 
         text = content.decode("utf-8")
-        replacements = {
-            "%pip install $dlt_meta_whl": (
-                f"%pip install --force-reinstall --no-index --find-links "
-                f"{conf.target_wheelhouse_remote} "
-                "$dlt_meta_whl"
-            ),
-            "%pip install $target_main_whl": (
-                f"%pip install --force-reinstall --no-index --find-links "
-                f"{conf.target_wheelhouse_remote} "
-                "$target_main_whl"
-            ),
-        }
+        if conf.install_mode == "pypi":
+            # Live-PyPI installs keep index access but still need
+            # ``--force-reinstall``: serverless environment reuse can
+            # expose base-runtime (or prior-update) distribution
+            # metadata to pip without making the corresponding module
+            # importable from the isolated pipeline environment, so a
+            # plain install may be skipped as "already satisfied" and
+            # ``databricks.labs.sdp_meta`` then fails to import.
+            replacements = {
+                "%pip install $dlt_meta_whl": (
+                    "%pip install --force-reinstall $dlt_meta_whl"
+                ),
+                "%pip install $target_main_whl": (
+                    "%pip install --force-reinstall $target_main_whl"
+                ),
+            }
+        else:
+            replacements = {
+                "%pip install $dlt_meta_whl": (
+                    f"%pip install --force-reinstall --no-index --find-links "
+                    f"{conf.target_wheelhouse_remote} "
+                    "$dlt_meta_whl"
+                ),
+                "%pip install $target_main_whl": (
+                    f"%pip install --force-reinstall --no-index --find-links "
+                    f"{conf.target_wheelhouse_remote} "
+                    "$target_main_whl"
+                ),
+            }
         old = next((line for line in replacements if line in text), None)
         if old is None:
             raise RuntimeError(
@@ -990,10 +1077,10 @@ class BackwardCompatRunner:
                         overwrite=True,
                     )
 
-        if conf.install_mode == "git":
+        if conf.install_mode in ("git", "pypi"):
             print(
-                "  install_mode=git: skipping wheel uploads "
-                "(cluster will resolve git URLs at install time)."
+                f"  install_mode={conf.install_mode}: skipping wheel uploads "
+                "(cluster resolves install specs at install time)."
             )
         else:
             # Wheels go under wheels/<source|target>/ so the same upload
@@ -1541,14 +1628,45 @@ class BackwardCompatRunner:
         print(f"=== {label} run finished ===")
         return run
 
-    def download_phase_output(self, ws_path: str, local_name: str) -> None:
-        try:
-            payload = self.ws.workspace.download(ws_path)
-            with open(local_name, "wb") as out:
-                out.write(payload.read())
-            print(f"  downloaded -> {local_name}")
-        except Exception as exc:
-            print(f"  warn: failed to download {ws_path}: {exc}")
+    def download_phase_output(self, ws_path: str, local_name: str) -> str:
+        """Download a phase report and fail if it contains failed assertions."""
+        content = None
+        for attempt in range(1, self.PHASE_OUTPUT_DOWNLOAD_ATTEMPTS + 1):
+            try:
+                payload = self.ws.workspace.download(ws_path)
+                content = payload.read()
+                break
+            except Exception as exc:
+                if attempt == self.PHASE_OUTPUT_DOWNLOAD_ATTEMPTS:
+                    raise RuntimeError(
+                        f"Could not download backward-compat validation report "
+                        f"{ws_path!r} after {attempt} attempts; validation status "
+                        "is unavailable."
+                    ) from exc
+                print(
+                    f"  validation report download attempt {attempt} failed "
+                    f"for {ws_path}: {exc}; retrying..."
+                )
+                time.sleep(self.PHASE_OUTPUT_RETRY_DELAY_SEC * attempt)
+
+        assert content is not None
+        with open(local_name, "wb") as out:
+            out.write(content)
+        print(f"  downloaded -> {local_name}")
+
+        with open(local_name, newline="", encoding="utf-8") as report:
+            failures = [
+                cell
+                for row in csv.reader(report)
+                for cell in row
+                if self.VALIDATION_FAILURE_MARKER in cell
+            ]
+        if failures:
+            details = "\n".join(f"  - {failure}" for failure in failures)
+            raise AssertionError(
+                f"Backward-compat validation failed in {local_name}:\n{details}"
+            )
+        return local_name
 
     # ----- cleanup -------------------------------------------------------
 
@@ -1659,8 +1777,11 @@ class BackwardCompatRunner:
                 f"backward_compat_phase1_{conf.run_id}.csv",
             )
 
-            if conf.target_install_surface == "compat_wheelhouse":
-                print("=== Uploading Phase 2 offline-install runner notebooks ===")
+            if (
+                conf.target_install_surface == "compat_wheelhouse"
+                or conf.install_mode == "pypi"
+            ):
+                print("=== Uploading Phase 2 target-install runner notebooks ===")
                 self.upload_runner_notebooks(conf, phase2=True)
 
             print(
@@ -1754,7 +1875,7 @@ def parse_cli() -> dict:
     p.add_argument(
         "--install_mode",
         default="local",
-        choices=["local", "git"],
+        choices=["local", "git", "pypi"],
         help=(
             "How wheels reach the cluster. "
             "'local' (default): build with GitRefWheelBuilder + upload "
@@ -1762,7 +1883,24 @@ def parse_cli() -> dict:
             "pre-built artifact, no GitHub egress required). "
             "'git': skip the local build; runners and wheel-tasks "
             "resolve via 'pip install git+<repo>@<ref>'. Faster local "
-            "iteration; the cluster MUST have egress to --git_repo_url."
+            "iteration; the cluster MUST have egress to --git_repo_url. "
+            "'pypi': post-release verification -- no build, no upload; "
+            "Phase 1 installs dlt-meta==<source_package_version> and "
+            "Phase 2 installs dlt-meta==<target_package_version> from "
+            "the LIVE PyPI index, proving the published packages "
+            "upgrade a running deployment in place. Versions derive "
+            "from --source_version/--target_version tags (v stripped) "
+            "unless pinned explicitly."
+        ),
+    )
+    p.add_argument(
+        "--source_package_version",
+        default=None,
+        help=(
+            "Exact dlt-meta version Phase 1 installs when "
+            "--install_mode=pypi (e.g. 0.0.10 -- no 'v' prefix; pip "
+            "versions never carry one). Omit to derive it from "
+            "--source_version."
         ),
     )
     p.add_argument(

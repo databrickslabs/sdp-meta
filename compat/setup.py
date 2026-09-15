@@ -77,7 +77,7 @@ class bdist_wheel_with_pth_file(_bdist_wheel):
 
 setup(
     name="dlt-meta",
-    version="0.1.0",
+    version="0.1.1",
     # Match the primary package's Python floor and ceiling: pyspark
     # 3.5.5 (a transitive runtime dep) is incompatible with Python
     # 3.13's pickle changes, so cap at <3.13. Re-evaluate when pyspark
@@ -86,7 +86,7 @@ setup(
     install_requires=[
         # Keep this redirect on the release series that provides the legacy
         # dlt_meta and src.* compatibility surfaces.
-        "databricks-labs-sdp-meta>=0.1.0,<0.2.0",
+        "databricks-labs-sdp-meta>=0.1.1,<0.2.0",
     ],
     author="Ravi Gawai",
     author_email="databrickslabs@databricks.com",

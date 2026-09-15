@@ -722,7 +722,11 @@ class SDPMeta:
                 }
             )
         named_parameters = self._get_onboarding_named_parameters(cmd)
-        sdp_meta_dependency = cmd.sdp_meta_dependency or f"sdp-meta=={self.version}"
+        # Default to the PyPI *distribution* name (databricks-labs-sdp-meta),
+        # not the labs project name (sdp-meta) — the latter does not exist on
+        # PyPI and fails at job run time during environment install. Must
+        # stay in sync with the deploy fallback in _create_sdp_meta_pipeline.
+        sdp_meta_dependency = cmd.sdp_meta_dependency or f"databricks-labs-sdp-meta=={self.version}"
         sdp_meta_environments = [
             jobs.JobEnvironment(
                 environment_key="sdp_meta_cli_env",

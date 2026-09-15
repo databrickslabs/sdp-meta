@@ -3,6 +3,7 @@
 import os
 import tempfile
 import zipfile
+from io import BytesIO
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import MagicMock, call as mock_call, patch
@@ -254,6 +255,110 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
             phase2_upload.kwargs["content"],
         )
 
+    def test_pypi_phase2_rewrites_runner_with_force_reinstall(self):
+        self.conf.install_mode = "pypi"
+        source = (
+            b"dlt_meta_whl = spark.conf.get('dlt_meta_whl')\n"
+            b"%pip install $dlt_meta_whl\n"
+        )
+
+        rendered = self.runner._notebook_source_for_upload(
+            self.conf, "init_dlt_meta_pipeline.py", source
+        )
+
+        self.assertIn(
+            b"%pip install --force-reinstall $dlt_meta_whl",
+            rendered,
+        )
+
+    def test_pypi_run_reuploads_phase2_runner(self):
+        self.conf.install_mode = "pypi"
+        self.runner._build_runner_conf = MagicMock(return_value=self.conf)
+        for method_name in (
+            "build_wheels",
+            "initialize_uc_resources",
+            "generate_onboarding_files",
+            "upload_files",
+            "create_all_pipelines",
+            "launch_job",
+            "download_phase_output",
+            "swap_pipelines_to_target",
+        ):
+            setattr(self.runner, method_name, MagicMock())
+        self.runner.build_phase1_job = MagicMock(
+            return_value=SimpleNamespace(job_id=1)
+        )
+        self.runner.build_phase2_job = MagicMock(
+            return_value=SimpleNamespace(job_id=2)
+        )
+        self.runner.upload_runner_notebooks = MagicMock()
+
+        self.assertEqual(self.runner.run(), 0)
+
+        self.runner.upload_runner_notebooks.assert_called_once_with(
+            self.conf, phase2=True
+        )
+
+    def test_download_phase_output_rejects_failed_assertions(self):
+        self.ws.workspace.download.return_value = BytesIO(
+            b',0\n0,"A compatibility invariant. Failed!"\n'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            output = os.path.join(tmp, "phase2.csv")
+
+            with self.assertRaisesRegex(
+                AssertionError, "compatibility invariant"
+            ):
+                self.runner.download_phase_output("/Workspace/phase2.csv", output)
+
+    def test_download_phase_output_accepts_passing_report(self):
+        self.ws.workspace.download.return_value = BytesIO(
+            b',0\n0,"A compatibility invariant. Passed!"\n'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            output = os.path.join(tmp, "phase2.csv")
+
+            self.assertEqual(
+                self.runner.download_phase_output("/Workspace/phase2.csv", output),
+                output,
+            )
+
+    @patch("integration_tests.run_backward_compat_tests.time.sleep")
+    def test_download_phase_output_retries_transient_download_failure(
+        self, sleep
+    ):
+        self.ws.workspace.download.side_effect = [
+            OSError("temporary workspace error"),
+            BytesIO(b',0\n0,"A compatibility invariant. Passed!"\n'),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = os.path.join(tmp, "phase2.csv")
+
+            self.assertEqual(
+                self.runner.download_phase_output("/Workspace/phase2.csv", output),
+                output,
+            )
+
+        self.assertEqual(self.ws.workspace.download.call_count, 2)
+        sleep.assert_called_once_with(2)
+
+    @patch("integration_tests.run_backward_compat_tests.time.sleep")
+    def test_download_phase_output_reports_exhausted_retries(self, sleep):
+        self.ws.workspace.download.side_effect = OSError(
+            "temporary workspace error"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            output = os.path.join(tmp, "phase2.csv")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "after 3 attempts; validation status is unavailable",
+            ):
+                self.runner.download_phase_output("/Workspace/phase2.csv", output)
+
+        self.assertEqual(self.ws.workspace.download.call_count, 3)
+        self.assertEqual(sleep.call_args_list, [mock_call(2), mock_call(4)])
+
     def test_compat_wheelhouse_requires_local_cross_namespace_upgrade(self):
         self.ws.current_user.me.return_value = SimpleNamespace(
             user_name="test@example.com"
@@ -300,6 +405,43 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
         self.assertEqual(
             ok_runner._build_runner_conf().compat_python_version, "3.11"
         )
+
+    def test_pypi_mode_derives_source_and_target_package_versions(self):
+        self.ws.current_user.me.return_value = SimpleNamespace(
+            user_name="test@example.com"
+        )
+        runner = BackwardCompatRunner(
+            {
+                "uc_catalog_name": "catalog",
+                "install_mode": "pypi",
+                "source_version": "v0.0.10",
+                "target_version": "v0.1.0",
+            },
+            self.ws,
+        )
+
+        conf = runner._build_runner_conf()
+
+        self.assertEqual(conf.source_package_version, "0.0.10")
+        self.assertEqual(conf.target_package_version, "0.1.0")
+        self.assertEqual(runner.install_spec_source_main(conf), "dlt-meta==0.0.10")
+        self.assertEqual(runner.install_spec_target_main(conf), "dlt-meta==0.1.0")
+
+    def test_pypi_mode_rejects_invalid_source_package_version(self):
+        self.ws.current_user.me.return_value = SimpleNamespace(
+            user_name="test@example.com"
+        )
+        runner = BackwardCompatRunner(
+            {
+                "uc_catalog_name": "catalog",
+                "install_mode": "pypi",
+                "source_package_version": "0.0.10 --pre",
+            },
+            self.ws,
+        )
+
+        with self.assertRaisesRegex(ValueError, "source_package_version"):
+            runner._build_runner_conf()
 
 
 class CompatWheelhouseVersionTests(TestCase):

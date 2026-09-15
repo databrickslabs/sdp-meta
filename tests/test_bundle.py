@@ -1323,6 +1323,17 @@ class EndToEndRenderTests(unittest.TestCase):
         self.assertIsInstance(parsed, list)
         self.assertGreaterEqual(len(parsed), 1)
         self.assertEqual(parsed[0]["data_flow_group"], "demo_group")
+        if expect_layer in ("bronze", "bronze_silver"):
+            flow = parsed[0]
+            self.assertIn("bronze_quarantine_table", flow)
+            self.assertEqual(flow["bronze_quarantine_table"], "")
+            self.assertEqual(
+                flow["bronze_database_quarantine_dev"],
+                "main.sdp_meta_bronze",
+            )
+            self.assertEqual(flow["bronze_quarantine_table_path_dev"], "")
+            self.assertEqual(flow["bronze_quarantine_table_properties"], {})
+            self.assertEqual(flow["bronze_quarantine_table_cluster_by"], [])
 
         # Strip seeded `<your-...>` placeholders before the sanity-check
         # comparison: the helper's job is "rendered bundle is structurally
@@ -1499,6 +1510,11 @@ class EndToEndRenderTests(unittest.TestCase):
             self.assertIn("spark.conf.get", cell1_code[0])
             self.assertTrue(cell1_code[1].lstrip().startswith("%pip install"),
                             f"cell 1 line 2 must be `%pip install ...`; got: {cell1_code[1]!r}")
+            self.assertIn(
+                "--force-reinstall",
+                cell1_code[1],
+                "serverless pipeline installs must not reuse stale environment metadata",
+            )
             self.assertIn("$", cell1_code[1],
                           "the `%pip install` line must reference the python "
                           "variable from the line above (e.g. `$sdp_meta_dependency`)")

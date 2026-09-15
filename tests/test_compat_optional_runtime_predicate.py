@@ -12,7 +12,15 @@ of bubbling the exception out -- otherwise the customer's
 
 The runtime-shape catalogue is:
 
-1. ``ModuleNotFoundError(name='pyspark.pipelines')`` -- no pyspark.
+1. ``ModuleNotFoundError(name='pyspark')`` -- no pyspark at all.
+   CPython reports the *top-level* package it failed to find, so
+   ``from pyspark import pipelines`` on a machine without pyspark
+   surfaces as ``name='pyspark'`` (NOT ``'pyspark.pipelines'`` -- the
+   original predicate missed this, which made the ``dlt_meta.pth``
+   startup hook print a traceback on every ``python3`` launch on
+   laptops/CI that pip-installed the shim). ``name='pyspark.pipelines'``
+   / ``'pipelines'`` are also recognized for runtimes where the parent
+   package resolves but the submodule lookup fails.
 2. ``ImportError("cannot import name 'pipelines' from 'pyspark'")``
    -- pyspark exists, ``pipelines`` submodule is absent.
 3. **The case this file specifically guards against:** a runtime
@@ -108,6 +116,60 @@ def _make_traceback_through(filename: str) -> types.TracebackType:
     except RuntimeError as exc:
         return exc.__traceback__  # type: ignore[return-value]
     raise AssertionError("synthetic exception was not raised")
+
+
+class TestMissingPysparkEntirely(unittest.TestCase):
+    """No pyspark at all — the laptop / CI ``pip install dlt-meta`` case.
+
+    Regression guard for the v0.1.0 bug where ``name='pyspark'`` was not
+    recognized, so the ``.pth`` startup hook printed a
+    ``ModuleNotFoundError`` traceback on every interpreter launch and an
+    explicit ``import dlt_meta`` failed outright.
+    """
+
+    def test_module_not_found_top_level_pyspark(self):
+        exc = ModuleNotFoundError("No module named 'pyspark'")
+        exc.name = "pyspark"
+        self.assertTrue(_optional_runtime_import_error(exc))
+
+    def test_real_cpython_shape_without_pyspark(self):
+        """Derive the exception from CPython itself, not by hand.
+
+        The original tests fabricated ``exc.name = 'pyspark.pipelines'``
+        for the "no pyspark" case — mirroring the same wrong assumption
+        the predicate encoded — so they passed while real machines
+        failed. Here we actually execute ``from pyspark import
+        pipelines`` in a subprocess started with ``-I -S`` (no
+        site-packages, so pyspark cannot resolve even on dev machines
+        that have it installed) and feed the predicate an exception
+        carrying exactly the ``name`` CPython produced.
+        """
+        import json
+        import subprocess
+
+        code = (
+            "import json, sys\n"
+            "try:\n"
+            "    from pyspark import pipelines  # noqa: F401\n"
+            "except BaseException as e:\n"
+            "    print(json.dumps({'type': type(e).__name__,"
+            " 'name': getattr(e, 'name', None), 'msg': str(e)}))\n"
+            "else:\n"
+            "    print(json.dumps({'type': None}))\n"
+        )
+        out = subprocess.run(
+            [sys.executable, "-I", "-S", "-c", code],
+            capture_output=True, text=True, check=True,
+        )
+        shape = json.loads(out.stdout.strip())
+        if shape["type"] is None:  # pragma: no cover - exotic layout
+            self.skipTest("pyspark importable even with -I -S")
+        self.assertEqual(shape["type"], "ModuleNotFoundError")
+        self.assertEqual(shape["name"], "pyspark")  # the shape that escaped
+
+        exc = ModuleNotFoundError(shape["msg"])
+        exc.name = shape["name"]
+        self.assertTrue(_optional_runtime_import_error(exc))
 
 
 class TestKnownImportErrorShapes(unittest.TestCase):

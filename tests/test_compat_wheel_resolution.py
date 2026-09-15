@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 import venv
+import zipfile
 from pathlib import Path
 
 
@@ -140,6 +141,23 @@ class CompatibilityWheelResolutionTests(unittest.TestCase):
             target_version = _wheel_version(compat_wheel)
             self.assertEqual(
                 target_version, _wheel_version(primary_wheel), built_wheels
+            )
+            primary_wheel_path = wheelhouse / primary_wheel
+            with zipfile.ZipFile(primary_wheel_path) as archive:
+                packaged_files = set(archive.namelist())
+            self.assertIn(
+                "databricks/labs/sdp_meta/templates/dab/"
+                "databricks_template_schema.json",
+                packaged_files,
+            )
+            self.assertTrue(
+                any(
+                    name.endswith(
+                        "notebooks/init_sdp_meta_pipeline.py.tmpl"
+                    )
+                    for name in packaged_files
+                ),
+                "The primary wheel must include the runnable DAB template.",
             )
             self.assertTrue(
                 any(name.startswith("databricks_sdk-") for name in built_wheels),

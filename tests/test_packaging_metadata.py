@@ -105,9 +105,60 @@ class CompatibilityDependencyMetadataTests(unittest.TestCase):
         compat = _setup_kwargs(COMPAT_SETUP)
         self.assertEqual(
             compat.get("install_requires"),
-            ["databricks-labs-sdp-meta>=0.1.0,<0.2.0"],
+            ["databricks-labs-sdp-meta>=0.1.1,<0.2.0"],
             "dlt-meta 0.1.x must not resolve to a primary 0.2+ release after "
-            "the legacy dlt_meta and src.* compatibility surfaces are removed",
+            "the legacy dlt_meta and src.* compatibility surfaces are removed, "
+            "and must not resolve below 0.1.1 (the primary wheel carries the "
+            "dlt_meta/src compat files, and pre-0.1.1 copies print a startup "
+            "traceback on machines without pyspark)",
+        )
+
+
+class VersionSynchronizationTests(unittest.TestCase):
+    """The two distributions and ``__about__`` must move in lockstep.
+
+    The primary wheel physically carries the ``dlt_meta`` / ``src``
+    compat packages, so a compat fix cannot ship unless BOTH
+    distributions re-release at the same version and the compat
+    wrapper's dependency floor is raised to match — v0.1.1 was nearly
+    mis-released with only ``compat/setup.py`` bumped.
+    """
+
+    _FLOOR_RE = re.compile(
+        r"^databricks-labs-sdp-meta>=(?P<floor>[0-9.]+),<(?P<ceiling>[0-9.]+)$"
+    )
+
+    def setUp(self):
+        self.primary = _setup_kwargs(PRIMARY_SETUP)
+        self.compat = _setup_kwargs(COMPAT_SETUP)
+
+    def test_primary_and_compat_versions_are_synchronized(self):
+        self.assertEqual(
+            self.primary.get("version"), self.compat.get("version"),
+            "setup.py and compat/setup.py must release at the same version",
+        )
+
+    def test_about_version_matches_primary_setup(self):
+        about = (
+            REPO_ROOT / "src" / "databricks" / "labs" / "sdp_meta" / "__about__.py"
+        ).read_text(encoding="utf-8")
+        match = re.search(r"__version__\s*=\s*'([^']+)'", about)
+        self.assertIsNotNone(match, "__about__.py has no __version__")
+        self.assertEqual(
+            match.group(1), self.primary.get("version"),
+            "__about__.__version__ must match setup.py's version",
+        )
+
+    def test_compat_dependency_floor_is_current_primary_version(self):
+        (requirement,) = self.compat.get("install_requires")
+        match = self._FLOOR_RE.match(requirement)
+        self.assertIsNotNone(
+            match, f"unexpected requirement shape: {requirement!r}"
+        )
+        self.assertEqual(
+            match.group("floor"), self.primary.get("version"),
+            "the compat wrapper must require the primary release it ships "
+            "with — an older primary wheel carries older compat files",
         )
 
 

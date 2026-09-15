@@ -173,6 +173,23 @@ Profiles are resolved from each git ref by prefix match; pass `--source_profile=
 
 - **`local` (default)** — build wheels via [`integration_tests/wheel_builder.py`](wheel_builder.py) (which uses `git worktree` + `python setup.py bdist_wheel` against the source/target refs), upload them to the per-run UC volume, and reference UC volume paths in both `JobEnvironment.dependencies` and the runner notebook's `%pip install`. This matches what real customers do (install a pre-built artifact); does NOT require workspace egress to GitHub.
 - **`git`** — skip the local build entirely. `JobEnvironment.dependencies` and `%pip install` resolve `git+https://github.com/databrickslabs/sdp-meta.git@<ref>` directly. Faster local iteration. The cluster MUST have egress to `--git_repo_url`.
+- **`pypi`** — post-release verification. No build, no upload: Phase 1 installs `dlt-meta==<source_package_version>` and Phase 2 installs `dlt-meta==<target_package_version>` from the **live PyPI index** (through the workspace's PyPI proxy), proving the *published* redirect + primary packages upgrade a running deployment in place. Versions derive from the `--source_version`/`--target_version` tags with the `v` stripped (pip versions never carry a `v` prefix), or pin them with `--source_package_version`/`--target_package_version`. The uploaded runner/validate notebooks get `%pip install --force-reinstall`: serverless environment reuse can expose base-runtime (or prior-update) distribution metadata to pip without making the module importable from the isolated pipeline environment, so a plain install may be skipped as "already satisfied" and `databricks.labs.sdp_meta` then fails to import. Requires cluster egress to the PyPI proxy, and the proxy must have synced the freshly published packages (verify with `pip download dlt-meta==<ver> -d /tmp/x --index-url <proxy>/simple` before blaming the harness).
+
+### Phase 2 install surface — `--target_install_surface`
+
+- **`primary_wheel` (default)** — Phase 2 installs the target install spec directly (wheel path, git URL, or PyPI coordinate per `--install_mode`).
+- **`compat_wheelhouse`** (requires `--install_mode=local`, legacy→current upgrades only) — builds the target primary wheel *and* the `compat/` dlt-meta redirect wheel, downloads all runtime dependencies, uploads everything to a UC-volume wheelhouse, and Phase 2 installs `dlt-meta==<target_package_version>` through offline pip resolution (`--no-index --find-links`). This simulates the customer's `pip install dlt-meta==<ver>` **before** the release is published.
+
+### Choosing a scenario
+
+| Scenario | Flags | Phase 1 installs | Phase 2 installs |
+|---|---|---|---|
+| Pre-release, iterate on uncommitted code | `--install_mode=local --build_target_from_worktree` | wheel built from `--source_version` tag | wheel built from working tree |
+| Pre-release, simulate `pip install dlt-meta==<ver>` | add `--target_install_surface=compat_wheelhouse` | wheel built from tag | `dlt-meta==<ver>` via offline UC-volume wheelhouse |
+| Post-release smoke test | `--install_mode=pypi` | `dlt-meta==<src ver>` from live PyPI | `dlt-meta==<tgt ver>` from live PyPI |
+| Branch iteration, no builds | `--install_mode=git` | `git+repo@<source ref>` | `git+repo@<target ref>` |
+
+Recommended release workflow: run `compat_wheelhouse` before tagging (hermetic, no live-index dependency), then `pypi` immediately after publishing (verifies exactly what customers download).
 
 ### Iterating on uncommitted target-side changes — `--build_target_from_worktree`
 
@@ -210,6 +227,15 @@ python integration_tests/run_backward_compat_tests.py \
 python integration_tests/run_backward_compat_tests.py \
     --uc_catalog_name=<<uc catalog name>> \
     --install_mode=git \
+    --profile=<<DEFAULT>>
+
+# Post-release smoke test: both phases from the LIVE PyPI index
+# (Phase 1: dlt-meta==0.0.10, Phase 2: dlt-meta==0.1.0 via the redirect).
+python integration_tests/run_backward_compat_tests.py \
+    --uc_catalog_name=<<uc catalog name>> \
+    --install_mode=pypi \
+    --source_version=v0.0.10 \
+    --target_version=v0.1.0 \
     --profile=<<DEFAULT>>
 
 # Future release pair (current → current, e.g. v0.1.0 → v0.1.1).
