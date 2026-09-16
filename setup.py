@@ -32,7 +32,7 @@ INSTALL_REQUIRES = [
     "setuptools>=65,<85",
     "databricks-sdk>=0.138.0,<1",
     "packaging>=24.0,<27",
-    "PyYAML>=6.0,<7",
+    "PyYAML>=6.0.3,<7",
 ]
 
 DEV_REQUIREMENTS = [

@@ -36,6 +36,8 @@ commands:
   - name: deploy
     description: Deploys sdp-meta pipelines for bronze and silver layers after onboarding dataflowspecs is complete
     flags:
+      - name: quality-migration-timeout-seconds
+        description: Total time budget for a managed quality migration and its subsequent full pipeline update. Defaults to 10800 seconds.
       - name: build-and-upload-whl
         description: "Build the local sdp-meta wheel, upload it to a UC volume, and bake the wheel path into the SDP runner notebook's `%pip install` (avoids needing PyPI access on the pipeline cluster). Requires UC. Invoke with the '=' syntax (e.g. --build-and-upload-whl=true) so the labs CLI string-flag parser does not consume the next CLI token as its value."
       - name: whl-file-path

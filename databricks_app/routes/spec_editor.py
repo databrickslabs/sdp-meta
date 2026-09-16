@@ -15,9 +15,13 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
 
 from databricks.labs.sdp_meta.quality.onboarding_preflight import (
     collect_quality_configuration_errors,
+)
+from databricks.labs.sdp_meta.quality.registry import (
+    deployable_quality_engines,
 )
 from flask import Blueprint, jsonify, request
 
@@ -148,7 +152,9 @@ def parse_spec():
                 parsed,
                 env=env,
                 uc_enabled=True,
-                supported_engines=("lakeflow", "dqx"),
+                supported_engines=deployable_quality_engines(
+                    os.getenv("SDP_META_QUALITY_ENGINE_DEPENDENCY")
+                ),
             )
         )
         for i, row in enumerate(parsed):

@@ -101,6 +101,45 @@ class ManagedQualityUpdateTests(TestCase):
         )
         complete.assert_called_once_with(ANY, pending)
 
+    def test_timeout_deadline_is_shared_across_both_updates(self):
+        ws = self._workspace()
+        ws.pipelines.get_update.side_effect = [
+            SimpleNamespace(
+                update=SimpleNamespace(state="COMPLETED")
+            ),
+            SimpleNamespace(update=SimpleNamespace(state="RUNNING")),
+        ]
+        with (
+            patch(
+                "databricks.labs.sdp_meta.quality.migration."
+                "find_pending_migrations",
+                return_value=[_pending()],
+            ),
+            patch(
+                "databricks.labs.sdp_meta.quality.migration."
+                "complete_migrations"
+            ),
+            patch(
+                "databricks.labs.sdp_meta.quality.migration.time.monotonic",
+                side_effect=[100, 100, 110],
+            ),
+        ):
+            with self.assertRaisesRegex(
+                TimeoutError, "normal full-graph update failed"
+            ):
+                run_managed_quality_update(
+                    ws,
+                    MagicMock(),
+                    "pipeline-1",
+                    {},
+                    poll_interval_seconds=0,
+                    timeout_seconds=10,
+                )
+        ws.pipelines.start_update.assert_called_once_with(
+            pipeline_id="pipeline-1",
+            full_refresh_selection=["main.quality.invalid_rows"],
+        )
+
     def test_legacy_publishing_uses_unqualified_dataset(self):
         ws = self._workspace(direct=False)
         with (
@@ -225,6 +264,7 @@ class ManagedQualityUpdateTests(TestCase):
             "qualityConfig",
             "quarantineTargetDetails",
         ]
+        frame.filter.return_value = frame
         frame.select.return_value.where.return_value.collect.return_value = [
             {
                 "dataFlowId": "100",
@@ -244,7 +284,9 @@ class ManagedQualityUpdateTests(TestCase):
                 RuntimeError, "differs from its immutable"
             ):
                 find_pending_migrations(
-                    spark, {"bronze": "main.meta.bronze_specs"}
+                    spark,
+                    {"bronze": "main.meta.bronze_specs"},
+                    {"bronze": "A1"},
                 )
 
     def test_legacy_spec_table_without_quality_config_has_no_migrations(self):
@@ -264,6 +306,30 @@ class ManagedQualityUpdateTests(TestCase):
         self.assertEqual(pending, [])
         frame.select.assert_not_called()
 
+    def test_missing_group_scope_fails_instead_of_scanning_all(self):
+        # Without a group scope, force-refreshing every group sharing the spec
+        # table would be destructive, and silently continuing would bypass a
+        # required migration.
+        frame = MagicMock()
+        frame.columns = [
+            "dataFlowId",
+            "dataFlowGroup",
+            "qualityConfig",
+            "quarantineTargetDetails",
+        ]
+        spark = MagicMock()
+        spark.table.return_value = frame
+
+        with self.assertRaisesRegex(ValueError, "No dataflow group scope"):
+            find_pending_migrations(
+                spark,
+                {"bronze": "main.meta.bronze_specs"},
+                {"bronze": ""},
+            )
+
+        frame.filter.assert_not_called()
+        frame.select.assert_not_called()
+
     def test_path_spec_reference_is_loaded_as_delta(self):
         config = json.loads(_pending().original_config_json)
         frame = MagicMock()
@@ -272,6 +338,7 @@ class ManagedQualityUpdateTests(TestCase):
             "qualityConfig",
             "quarantineTargetDetails",
         ]
+        frame.filter.return_value = frame
         frame.select.return_value.where.return_value.collect.return_value = [
             {
                 "dataFlowId": "100",
@@ -289,7 +356,7 @@ class ManagedQualityUpdateTests(TestCase):
             "databricks.labs.sdp_meta.quality.migration.f"
         ):
             pending = find_pending_migrations(
-                spark, {"bronze": reference}
+                spark, {"bronze": reference}, {"bronze": "A1"}
             )
 
         spark.read.format.assert_called_once_with("delta")

@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from databricks.labs.sdp_meta.quality.registry import (
     QualityEngineNotAvailable,
+    deployable_quality_engines,
     resolve_quality_engine,
     validate_plugin_snapshot,
 )
@@ -115,6 +116,15 @@ class OverlapRoutingPlugin(QualityEnginePlugin):
 
 
 class QualityRegistryTests(TestCase):
+    def test_remote_plugins_require_an_explicit_dependency(self):
+        self.assertEqual(
+            deployable_quality_engines(), ("lakeflow", "dqx")
+        )
+        self.assertIn(
+            "synthetic",
+            deployable_quality_engines("synthetic-plugin==1.0"),
+        )
+
     def test_discovers_installed_entry_point(self):
         plugin = resolve_quality_engine("synthetic", object())
         self.assertEqual(

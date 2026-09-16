@@ -54,6 +54,7 @@ time.
 | `layer` | string | `bronze_silver` | Pipeline layer(s): `bronze`, `silver`, or `bronze_silver` |
 | `pipeline_mode` | string | `split` | Pipeline topology when `layer=bronze_silver`: `split` or `combined` |
 | `dataflow_group` | string | `my_group` | Group key that ties the onboarding file to the pipeline configuration |
+| `quality_migration_timeout_seconds` | integer | `10800` | Total timeout shared by the selective migration refresh and normal pipeline update |
 | `sdp_meta_dependency` | string | `__SET_ME__` | Install spec for sdp-meta in jobs and pipeline notebooks |
 | `author` | string | `sdp-meta-user` | Import author label on dataflowspec rows |
 | `env` | string | `dev` | Environment suffix used in `{env}`-parameterized onboarding fields |
@@ -78,7 +79,9 @@ quality engine or diagnostic schema while reusing its quarantine table, set
 `<layer>_quality_engine_migration: full_refresh` and scaffold with
 `managed_quality_migrations=true`. The generated wheel task selectively
 full-refreshes the affected quarantine table, records completion, and then
-runs the normal pipeline graph.
+runs the normal pipeline graph. Both updates share the
+`quality_migration_timeout_seconds` budget (three hours by default). The same
+value also limits the generated job task.
 
 Do not enable the wrapper for ordinary quality-enabled pipelines; selecting a
 quality engine does not itself require a migration.

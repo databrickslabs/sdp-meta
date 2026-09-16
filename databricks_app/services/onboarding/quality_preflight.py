@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import os
+
 from databricks.labs.sdp_meta.quality.onboarding_preflight import (
     collect_quality_configuration_errors,
+)
+from databricks.labs.sdp_meta.quality.registry import (
+    deployable_quality_engines,
 )
 
 from .path_resolver import _OnboardingFileError
@@ -17,7 +22,9 @@ def _verify_quality_configuration(parsed, env, uc_enabled=True):
         parsed,
         env=env,
         uc_enabled=uc_enabled,
-        supported_engines=("lakeflow", "dqx"),
+        supported_engines=deployable_quality_engines(
+            os.getenv("SDP_META_QUALITY_ENGINE_DEPENDENCY")
+        ),
     )
     if errors:
         raise _OnboardingFileError(
