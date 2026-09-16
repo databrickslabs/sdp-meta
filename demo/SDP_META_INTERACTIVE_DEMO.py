@@ -92,6 +92,12 @@ dbutils.widgets.dropdown(
     choices=["legacy", "lakeflow", "dqx"],
     label="Bronze Quality Engine"
 )
+dbutils.widgets.dropdown(
+    name="gold_enabled",
+    defaultValue="true",
+    choices=["false", "true"],
+    label="Run Native SQL Gold Stage"
+)
 # Lets the demo install SDP-META either from the GitHub branch
 # (default — anyone can run the demo without building) or from a
 # pre-built wheel on a Volume / Workspace path (preferred when
@@ -150,6 +156,7 @@ uc_schema_name = dbutils.widgets.get("uc_schema_name")
 data_source = dbutils.widgets.get("data_source")
 onboarding_format = dbutils.widgets.get("onboarding_format")
 quality_engine = dbutils.widgets.get("quality_engine")
+gold_enabled = dbutils.widgets.get("gold_enabled").lower() == "true"
 install_source = dbutils.widgets.get("install_source")
 whl_file_path = dbutils.widgets.get("whl_file_path").strip()
 pypi_version = dbutils.widgets.get("pypi_version").strip()
@@ -321,6 +328,7 @@ dbutils.library.restartPython()
 # MAGIC - **Apply Changes From Snapshot** — snapshot-based SCD Type 1 & 2
 # MAGIC - **Pipeline Sink** — `dp.create_sink` to write to external delta
 # MAGIC - **Multi-Source AUTO CDC** — N `dp.create_auto_cdc_flow` calls fan in to one silver target ([#294](https://github.com/databrickslabs/sdp-meta/issues/294))
+# MAGIC - **Native SQL Gold** — separate SDP SQL pipeline over the published Silver retail tables
 
 # COMMAND ----------
 
@@ -345,11 +353,12 @@ from pyspark.sql import Row
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.pipelines import (
+    FileLibrary,
     NotebookLibrary,
     PipelineLibrary,
 )
 from databricks.sdk.service.workspace import (
-    ExportFormat, Language,
+    ExportFormat, ImportFormat, Language,
 )
 
 git_branch = dbutils.widgets.get("git_branch")
@@ -358,6 +367,7 @@ uc_schema_name = dbutils.widgets.get("uc_schema_name")
 data_source = dbutils.widgets.get("data_source")
 onboarding_format = dbutils.widgets.get("onboarding_format")
 quality_engine = dbutils.widgets.get("quality_engine")
+gold_enabled = dbutils.widgets.get("gold_enabled").lower() == "true"
 install_source = dbutils.widgets.get("install_source")
 whl_file_path = dbutils.widgets.get("whl_file_path").strip()
 pypi_version = dbutils.widgets.get("pypi_version").strip()
@@ -530,6 +540,7 @@ def _write_conf(data, path):
 
 bronze_schema = f"{uc_schema_name}_bronze"
 silver_schema = f"{uc_schema_name}_silver"
+gold_schema = f"{uc_schema_name}_gold"
 # DLT direct publishing mode requires a pipeline-level target schema.
 # This schema is a placeholder only — every table sets its own schema
 # via DataflowSpec so nothing is ever written here.
@@ -539,6 +550,8 @@ spark.sql(f"USE CATALOG {uc_catalog_name}")
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS {uc_schema_name}")
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS {bronze_schema}")
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS {silver_schema}")
+if gold_enabled:
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {gold_schema}")
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS {pipeline_target_schema}")
 spark.sql(f"USE SCHEMA {uc_schema_name}")
 spark.sql("CREATE VOLUME IF NOT EXISTS config")
@@ -567,11 +580,15 @@ uc_volume_path = (
 )
 pipeline_id_file = f"{uc_volume_path}/pipeline_id.txt"
 pipeline_name = f"sdp_meta_demo_{uc_schema_name}"
+gold_pipeline_id_file = f"{uc_volume_path}/gold_pipeline_id.txt"
+gold_pipeline_name = f"sdp_meta_demo_gold_{uc_schema_name}"
 
 print(f"Catalog          : {uc_catalog_name}")
 print(f"Config Schema    : {uc_catalog_name}.{uc_schema_name}")
 print(f"Bronze Schema    : {uc_catalog_name}.{bronze_schema}")
 print(f"Silver Schema    : {uc_catalog_name}.{silver_schema}")
+if gold_enabled:
+    print(f"Gold Schema      : {uc_catalog_name}.{gold_schema}")
 print(f"Pipeline Default : {uc_catalog_name}.{pipeline_target_schema}")
 print(f"Volume           : {uc_volume_path}")
 
@@ -4135,6 +4152,133 @@ else:
 
 # MAGIC %md
 # MAGIC ---
+# MAGIC ## Stage 13: Native SDP SQL Gold
+# MAGIC
+# MAGIC Gold is intentionally **not** onboarded into DataflowSpec. This stage
+# MAGIC demonstrates interoperability: a separate serverless SDP SQL pipeline
+# MAGIC reads the published Silver retail tables, builds materialized views,
+# MAGIC and lets SDP derive Gold-to-Gold ordering from SQL dependencies.
+
+# COMMAND ----------
+
+GOLD_MODEL_NAMES = (
+    "customer_360.sql",
+    "high_value_customers.sql",
+    "product_performance.sql",
+    "store_performance.sql",
+)
+gold_fallback_workspace_dir = (
+    f"/Users/{w.current_user.me().user_name}/.sdp_meta_demo/"
+    f"{uc_schema_name}/gold/models"
+)
+
+
+def _resolve_gold_model_paths():
+    """Resolve co-uploaded Gold SQL, downloading a branch fallback if needed."""
+    ctx = (
+        dbutils.notebook.entry_point.getDbutils()
+        .notebook()
+        .getContext()
+    )
+    nb_path = ctx.notebookPath().get()
+    if "/demo/" in nb_path:
+        repo_root_ws = nb_path.rsplit("/demo/", 1)[0]
+        if not repo_root_ws.startswith("/Workspace"):
+            repo_root_ws = "/Workspace" + repo_root_ws
+        model_root = f"{repo_root_ws}/demo/gold/models"
+        model_paths = [
+            f"{model_root}/{model_name}"
+            for model_name in GOLD_MODEL_NAMES
+        ]
+        if all(os.path.isfile(model_path) for model_path in model_paths):
+            print(f"Using co-located Gold SQL from {model_root}")
+            return model_paths
+
+    # Standalone notebook imports do not have sibling repository files.
+    # Download the same committed models selected by the git_branch widget,
+    # upload them as RAW workspace files, and use those files as pipeline
+    # libraries.
+    w.workspace.mkdirs(gold_fallback_workspace_dir)
+    model_paths = []
+    for model_name in GOLD_MODEL_NAMES:
+        raw_url = (
+            "https://raw.githubusercontent.com/databrickslabs/sdp-meta/"
+            f"{git_branch}/demo/gold/models/{model_name}"
+        )
+        response = requests.get(raw_url, timeout=30)
+        response.raise_for_status()
+        workspace_path = f"{gold_fallback_workspace_dir}/{model_name}"
+        w.workspace.upload(
+            path=workspace_path,
+            content=response.content,
+            format=ImportFormat.RAW,
+            overwrite=True,
+        )
+        model_paths.append(f"/Workspace{workspace_path}")
+    print(
+        f"Downloaded {len(model_paths)} Gold SQL model(s) from "
+        f"branch {git_branch!r}"
+    )
+    return model_paths
+
+
+if not gold_enabled:
+    print(
+        "Skipping Stage 13: gold_enabled=false. Set the widget to true "
+        "to create and run the native SQL Gold pipeline."
+    )
+else:
+    gold_model_paths = _resolve_gold_model_paths()
+    gold_pipeline_config = {
+        "silver_catalog": uc_catalog_name,
+        "silver_schema": silver_schema,
+    }
+    existing_gold = [
+        pipeline
+        for pipeline in w.pipelines.list_pipelines()
+        if pipeline.name == gold_pipeline_name
+    ]
+    if existing_gold:
+        gold_pipeline_id = existing_gold[0].pipeline_id
+        print(f"Reusing existing Gold pipeline: {gold_pipeline_id}")
+    else:
+        created_gold = create_pipeline(
+            w,
+            name=gold_pipeline_name,
+            catalog=uc_catalog_name,
+            schema=gold_schema,
+            libraries=[
+                PipelineLibrary(file=FileLibrary(path=model_path))
+                for model_path in gold_model_paths
+            ],
+            configuration=gold_pipeline_config,
+            development=True,
+            serverless=True,
+        )
+        gold_pipeline_id = created_gold.pipeline_id
+        print(f"Gold pipeline created: {gold_pipeline_id}")
+
+    with open(gold_pipeline_id_file, "w") as fh:
+        fh.write(gold_pipeline_id)
+    print(f"Gold pipeline ID saved to: {gold_pipeline_id_file}")
+    run_pipeline_and_wait(w, gold_pipeline_id, label="native SQL Gold")
+
+    for gold_model in (
+        "customer_360",
+        "product_performance",
+        "store_performance",
+        "high_value_customers",
+    ):
+        print(f"\nGold materialized view: {gold_model}")
+        display(spark.sql(
+            f"SELECT * FROM {uc_catalog_name}.{gold_schema}.{gold_model} "
+            "LIMIT 10"
+        ))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ---
 # MAGIC ## Summary
 # MAGIC
 # MAGIC | Feature | How It Was Used |
@@ -4154,6 +4298,7 @@ else:
 # MAGIC | **Pipeline Sink** | Write to external delta table via `dp.create_sink` |
 # MAGIC | **Multi-Source AUTO CDC** | N `dp.create_auto_cdc_flow` calls → one unified silver streaming table ([#294](https://github.com/databrickslabs/sdp-meta/issues/294)) |
 # MAGIC | **Row-level filtering** | `bronze_row_filter` / `silver_row_filter` → UC `ROW FILTER` ([#303](https://github.com/databrickslabs/sdp-meta/issues/303)) |
+# MAGIC | **Native SQL Gold** | Separate serverless SDP SQL pipeline over published Silver tables, including Gold-to-Gold dependencies |
 # MAGIC
 # MAGIC ### Learn More
 # MAGIC - [Full Documentation](https://databrickslabs.github.io/sdp-meta/)
@@ -4390,6 +4535,19 @@ else:
         6,
     )
 
+    # 8. Native SQL Gold (Stage 13) — all four materialized views must exist
+    # and contain data when the optional Gold stage is enabled.
+    if gold_enabled:
+        for gold_model in (
+            "customer_360",
+            "product_performance",
+            "store_performance",
+            "high_value_customers",
+        ):
+            _expect_nonempty(
+                f"{uc_catalog_name}.{gold_schema}.{gold_model}"
+            )
+
     if failures:
         raise AssertionError(
             "Demo final validation failed "
@@ -4405,7 +4563,7 @@ else:
 # MAGIC ## Cleanup (Optional)
 # MAGIC
 # MAGIC Drops every per-run resource the demo created -- pipelines,
-# MAGIC runner notebooks, and per-run schemas (bronze, silver, pipeline
+# MAGIC runner notebooks, and per-run schemas (bronze, silver, Gold, pipeline
 # MAGIC target, config). Controlled by the `cleanup` widget; safe to
 # MAGIC re-run interactively (each step is wrapped in try/except).
 # MAGIC
@@ -4431,7 +4589,8 @@ def _cleanup_demo_resources():
        ``snapshot_runner_path``. The sink pipeline reuses
        ``runner_notebook_path``, so it's covered by the same delete.
     3. Per-run schemas -- ``bronze_schema``, ``silver_schema``,
-       ``pipeline_target_schema``, ``uc_schema_name``. Each ``DROP
+       ``gold_schema``, ``pipeline_target_schema``,
+       ``uc_schema_name``. Each ``DROP
        SCHEMA ... CASCADE`` removes every table, view, and (for
        ``uc_schema_name``) the per-run config volume.
 
@@ -4459,6 +4618,7 @@ def _cleanup_demo_resources():
             msc_pipeline_id_file,
             msc_pipeline_name,
         ),
+        ("Gold", gold_pipeline_id_file, gold_pipeline_name),
     ]
     for label, pid_file, name in pipeline_specs:
         pid = None
@@ -4486,9 +4646,19 @@ def _cleanup_demo_resources():
         except Exception as exc:
             print(f"  Could not delete notebook {nb_path}: {exc}")
 
+    try:
+        # Delete only the gold/ subtree we created; the parent
+        # .sdp_meta_demo/<schema>/ folder may hold other demo state.
+        fallback_root = gold_fallback_workspace_dir.rsplit("/models", 1)[0]
+        w.workspace.delete(fallback_root, recursive=True)
+        print(f"  Deleted fallback Gold model files: {fallback_root}")
+    except Exception as exc:
+        print(f"  Could not delete fallback Gold model files: {exc}")
+
     for schema in [
         bronze_schema,
         silver_schema,
+        gold_schema,
         pipeline_target_schema,
         uc_schema_name,
     ]:

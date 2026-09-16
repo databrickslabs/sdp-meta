@@ -1,16 +1,16 @@
 """CLI helpers that expose sdp-meta as a Declarative Automation Bundle.
 
-The three entry points consumed by the `databricks labs sdp-meta bundle ...`
-commands are module-level functions:
+The bundle command entry points are module-level functions:
 
 - :func:`bundle_init` — scaffold a new bundle from the packaged template.
 - :func:`bundle_prepare_wheel` — build and upload the local sdp-meta wheel
   to a UC volume for use as the bundle's ``sdp_meta_dependency``.
 - :func:`bundle_validate` — run ``databricks bundle validate`` plus
   sdp-meta-specific sanity checks on a rendered bundle.
+- :func:`bundle_add_gold` — idempotently enable native SDP SQL Gold in an
+  existing rendered bundle.
 
-All three shell out to the Databricks CLI for bundle-level work. Everything
-else is deliberately thin so behavior is easy to audit and mock in tests.
+Commands that need bundle-level work shell out to the Databricks CLI.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TextIO, Tuple
@@ -508,13 +509,43 @@ def _find_yaml_placeholders(doc: Any) -> List[Tuple[str, str]]:
     return hits
 
 
-def _sdp_meta_sanity_checks(bundle_dir: Path) -> List[str]:
+_GOLD_DATASET_DECLARATION_RE = re.compile(
+    r"\bCREATE\s+(?:OR\s+REFRESH\s+)?(?:PRIVATE\s+)?"
+    r"(?P<kind>MATERIALIZED\s+VIEW|STREAMING\s+TABLE)\s+"
+    r"(?P<name>`[^`]+`|[A-Za-z_][A-Za-z0-9_.]*)",
+    flags=re.IGNORECASE,
+)
+_GOLD_LIVE_TABLE_RE = re.compile(
+    r"\bCREATE\s+(?:OR\s+REFRESH\s+)?(?:STREAMING\s+)?LIVE\s+TABLE\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _sql_without_comments(sql: str) -> str:
+    """Remove SQL comments for shallow checks; this is not a SQL lexer."""
+    without_blocks = re.sub(r"/\*.*?\*/", "", sql, flags=re.DOTALL)
+    return re.sub(r"--[^\n]*", "", without_blocks)
+
+
+def _path_is_within(path: Path, parent: Path) -> bool:
+    """Return whether path is under parent, including on Python 3.8."""
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _sdp_meta_sanity_checks(
+    bundle_dir: Path, *, warnings: Optional[List[str]] = None
+) -> List[str]:
     """sdp-meta-specific checks layered on top of `databricks bundle validate`.
 
     Returns a list of human-readable error strings (empty list = all good).
     These checks are all static: no workspace calls.
     """
     errors: List[str] = []
+    warning_messages = warnings if warnings is not None else []
     conf_dir = bundle_dir / "conf"
     resources_dir = bundle_dir / "resources"
 
@@ -524,6 +555,7 @@ def _sdp_meta_sanity_checks(bundle_dir: Path) -> List[str]:
     # comments at parse time, so this only fires once a user actually
     # uncomments and forgets to substitute their real value.
     databricks_yml = bundle_dir / "databricks.yml"
+    db_yml_doc = None
     if databricks_yml.is_file():
         try:
             db_yml_doc = yaml.safe_load(databricks_yml.read_text())
@@ -556,6 +588,24 @@ def _sdp_meta_sanity_checks(bundle_dir: Path) -> List[str]:
     def _default(name: str):
         node = variables.get(name) or {}
         return node.get("default") if isinstance(node, dict) else None
+
+    gold_enabled = _default("gold_enabled")
+    if gold_enabled is not None and not isinstance(gold_enabled, bool):
+        errors.append(
+            "variables.yml: `gold_enabled` must be the immutable boolean "
+            "recorded when the bundle was scaffolded"
+        )
+    if isinstance(db_yml_doc, dict):
+        for target_name, target in (db_yml_doc.get("targets") or {}).items():
+            target_variables = (
+                target.get("variables") if isinstance(target, dict) else None
+            )
+            if isinstance(target_variables, dict) and "gold_enabled" in target_variables:
+                errors.append(
+                    f"databricks.yml: target `{target_name}` overrides immutable "
+                    "`gold_enabled`; re-scaffold the bundle or run bundle-add-gold "
+                    "instead"
+                )
 
     onboarding_file_name = _default("onboarding_file_name")
     if not onboarding_file_name:
@@ -617,6 +667,43 @@ def _sdp_meta_sanity_checks(bundle_dir: Path) -> List[str]:
                         f"{rel}: {message}" for message in quality_errors
                     )
 
+                    if _default("gold_enabled") is True:
+                        expected_silver_database = (
+                            f"{_default('uc_catalog_name')}."
+                            f"{_default('silver_target_schema')}"
+                        )
+                        for flow in onboarding_doc:
+                            if not isinstance(flow, dict):
+                                continue
+                            flow_id = flow.get("data_flow_id")
+                            for key, value in flow.items():
+                                match = re.match(
+                                    r"^silver_database_(?!quarantine_)(.+)$", key
+                                )
+                                if not match or not value:
+                                    continue
+                                environment = match.group(1)
+                                sibling_catalog = flow.get(
+                                    f"silver_catalog_{environment}"
+                                )
+                                actual_silver_database = str(value)
+                                if (
+                                    sibling_catalog
+                                    and "." not in actual_silver_database
+                                ):
+                                    actual_silver_database = (
+                                        f"{sibling_catalog}.{actual_silver_database}"
+                                    )
+                                if actual_silver_database != expected_silver_database:
+                                    warning_messages.append(
+                                        f"{rel}: flow data_flow_id={flow_id!r} field "
+                                        f"`{key}` resolves to "
+                                        f"{actual_silver_database!r}, but the Gold pipeline "
+                                        f"reads Silver from {expected_silver_database!r}. "
+                                        "Gold may not see the table written by onboarding "
+                                        "(compared against variables.yml defaults)."
+                                    )
+
     sdp_meta_dep = _default("sdp_meta_dependency")
     wheel_source = _default("wheel_source")
     if sdp_meta_dep == "__SET_ME__" or not sdp_meta_dep:
@@ -657,6 +744,26 @@ def _sdp_meta_sanity_checks(bundle_dir: Path) -> List[str]:
         has_bronze = "bronze" in pipes
         has_silver = "silver" in pipes
         has_combined = "bronze_silver" in pipes
+        jobs = (pipelines_doc.get("resources", {}) or {}).get("jobs", {}) or {}
+        pipeline_job = jobs.get("pipelines") or {}
+        tasks = pipeline_job.get("tasks") or []
+        gold_tasks = [
+            task
+            for task in tasks
+            if isinstance(task, dict) and task.get("task_key") == "gold"
+        ]
+        has_gold_resources = "gold" in pipes or bool(gold_tasks)
+        if gold_enabled is None and has_gold_resources:
+            errors.append(
+                "variables.yml: Gold resources require the immutable "
+                "`gold_enabled=true` scaffold marker"
+            )
+        if gold_enabled is False and has_gold_resources:
+            errors.append(
+                "variables.yml: immutable `gold_enabled=false` conflicts with "
+                "Gold pipeline/task resources; re-scaffold the bundle or remove "
+                "the inconsistent Gold resources"
+            )
 
         if layer == "bronze":
             if not has_bronze or has_silver or has_combined:
@@ -690,6 +797,132 @@ def _sdp_meta_sanity_checks(bundle_dir: Path) -> List[str]:
                         f"bronze={has_bronze}, silver={has_silver}, bronze_silver={has_combined}"
                     )
 
+        if gold_enabled is True:
+            if layer == "bronze":
+                errors.append(
+                    "variables.yml: `gold_enabled` cannot be true when layer=bronze; "
+                    "Gold must run after a Silver-producing pipeline"
+                )
+
+            gold_target_schema = _default("gold_target_schema")
+            try:
+                validate_uc_identifier(
+                    gold_target_schema, kind="gold_target_schema"
+                )
+            except (TypeError, ValueError) as exc:
+                errors.append(f"variables.yml: {exc}")
+
+            gold_models_path = _default("gold_models_path")
+            gold_dir: Optional[Path] = None
+            if not isinstance(gold_models_path, str) or not gold_models_path.strip():
+                errors.append(
+                    "variables.yml: `gold_models_path` must be a non-empty relative path"
+                )
+            else:
+                configured_path = Path(gold_models_path)
+                bundle_root = bundle_dir.resolve()
+                gold_dir = (bundle_dir / configured_path).resolve()
+                if (
+                    configured_path.is_absolute()
+                    or ".." in configured_path.parts
+                    or not _path_is_within(gold_dir, bundle_root)
+                ):
+                    errors.append(
+                        "variables.yml: `gold_models_path` must be a relative path "
+                        "that cannot escape the bundle root"
+                    )
+                    gold_dir = None
+
+            dataset_sources: Dict[str, Path] = {}
+            if gold_dir is not None:
+                if not gold_dir.is_dir():
+                    errors.append(
+                        f"Gold model directory {gold_models_path!r} does not exist"
+                    )
+                else:
+                    model_files = sorted(
+                        path for path in gold_dir.rglob("*") if path.is_file()
+                    )
+                    unsupported_files = [
+                        path
+                        for path in model_files
+                        if path.suffix.lower() != ".sql"
+                    ]
+                    sql_files = [
+                        path for path in model_files if path.suffix.lower() == ".sql"
+                    ]
+                    for unsupported_file in unsupported_files:
+                        errors.append(
+                            f"{unsupported_file.relative_to(bundle_root)}: unsupported "
+                            "file in the native SQL Gold model directory; only `.sql` "
+                            "source files are allowed"
+                        )
+                    if not sql_files:
+                        errors.append(
+                            f"Gold model directory {gold_models_path!r} contains no .sql "
+                            "files; add at least one Silver-compatible native SDP SQL "
+                            "model (see the Gold models section in README.md)"
+                        )
+                    for sql_file in sql_files:
+                        rel_sql = sql_file.relative_to(bundle_root)
+                        sql = _sql_without_comments(sql_file.read_text())
+                        if "{{" in sql or "{%" in sql:
+                            errors.append(
+                                f"{rel_sql}: unsupported external template marker; "
+                                "Gold models use SDP SQL `${...}` substitution"
+                            )
+                        if _GOLD_LIVE_TABLE_RE.search(sql):
+                            errors.append(
+                                f"{rel_sql}: deprecated `LIVE TABLE` syntax is not "
+                                "supported; use a materialized view or streaming table"
+                            )
+                        declarations = list(
+                            _GOLD_DATASET_DECLARATION_RE.finditer(sql)
+                        )
+                        if len(declarations) != 1:
+                            errors.append(
+                                f"{rel_sql}: expected exactly one materialized-view "
+                                "or streaming-table declaration, "
+                                f"found {len(declarations)}"
+                            )
+                            continue
+                        dataset_name = (
+                            declarations[0].group("name").strip("`").lower()
+                        )
+                        previous = dataset_sources.get(dataset_name)
+                        if previous is not None:
+                            errors.append(
+                                f"{rel_sql}: Gold dataset "
+                                f"{dataset_name!r} is also declared in "
+                                f"{previous.relative_to(bundle_root)}"
+                            )
+                        else:
+                            dataset_sources[dataset_name] = sql_file
+
+            gold_pipeline = pipes.get("gold")
+            for contract_error in _gold_pipeline_contract_errors(gold_pipeline):
+                errors.append(
+                    f"sdp_meta_pipelines.yml: {contract_error}"
+                )
+
+            if len(gold_tasks) != 1:
+                errors.append(
+                    "sdp_meta_pipelines.yml: Gold is enabled but the `pipelines` "
+                    f"job must contain exactly one `gold` task; found {len(gold_tasks)}"
+                )
+            else:
+                expected_upstream = (
+                    "bronze_silver"
+                    if layer == "bronze_silver" and pipeline_mode == "combined"
+                    else "silver"
+                )
+                for contract_error in _gold_task_contract_errors(
+                    gold_tasks[0], expected_upstream
+                ):
+                    errors.append(
+                        f"sdp_meta_pipelines.yml: {contract_error}"
+                    )
+
     return errors
 
 
@@ -710,7 +943,12 @@ def bundle_validate(
         )
         return 2
 
-    errors = _sdp_meta_sanity_checks(bundle_dir)
+    warnings: List[str] = []
+    errors = _sdp_meta_sanity_checks(bundle_dir, warnings=warnings)
+    if warnings:
+        print("sdp-meta sanity check warnings:", file=output)
+        for warning in warnings:
+            print(f"  - {warning}", file=output)
     if errors:
         print("sdp-meta sanity checks FAILED:", file=output)
         for err in errors:
@@ -739,6 +977,425 @@ def bundle_validate(
     if result.returncode != 0:
         return result.returncode
     return 1
+
+
+# ---------------------------------------------------------------------------
+# bundle add-gold
+# ---------------------------------------------------------------------------
+
+_GOLD_VARIABLE_BLOCKS = {
+    "gold_enabled": (
+        "\n  gold_enabled:\n"
+        "    description: Immutable scaffold marker; do not override after bundle-init.\n"
+        "    default: true\n"
+    ),
+    "gold_target_schema": (
+        "\n  gold_target_schema:\n"
+        "    description: Schema where the Gold SDP SQL pipeline writes materialized views.\n"
+        "    default: sdp_meta_gold\n"
+    ),
+    "gold_models_path": (
+        "\n  gold_models_path:\n"
+        "    description: Relative path inside the bundle containing Gold SDP SQL models.\n"
+        "    default: gold/models\n"
+    ),
+}
+
+_GOLD_LIBRARY_GLOB = "../${var.gold_models_path}/**"
+_GOLD_PIPELINE_RESOURCE_ID = "${resources.pipelines.gold.id}"
+
+
+def _gold_pipeline_contract_errors(pipeline: Any) -> List[str]:
+    """Return errors when a resource named ``gold`` is not our Gold pipeline."""
+    if not isinstance(pipeline, dict):
+        return ["pipeline `gold` is missing or is not a mapping"]
+    libraries = pipeline.get("libraries")
+    has_gold_glob = isinstance(libraries, list) and any(
+        isinstance(library, dict)
+        and isinstance(library.get("glob"), dict)
+        and library["glob"].get("include") == _GOLD_LIBRARY_GLOB
+        for library in libraries
+    )
+    configuration = pipeline.get("configuration")
+    errors: List[str] = []
+    if "root_path" not in pipeline:
+        errors.append("pipeline `gold` must set `root_path`")
+    if not has_gold_glob:
+        errors.append(
+            f"pipeline `gold` must include library glob {_GOLD_LIBRARY_GLOB!r}"
+        )
+    if not isinstance(configuration, dict) or configuration.get(
+        "silver_catalog"
+    ) != "${var.uc_catalog_name}" or configuration.get(
+        "silver_schema"
+    ) != "${var.silver_target_schema}":
+        errors.append(
+            "pipeline `gold` must configure `silver_catalog` and "
+            "`silver_schema` from the corresponding bundle variables"
+        )
+    if pipeline.get("catalog") != "${var.uc_catalog_name}":
+        errors.append("pipeline `gold` must publish to `${var.uc_catalog_name}`")
+    if pipeline.get("schema") != "${var.gold_target_schema}":
+        errors.append("pipeline `gold` must publish to `${var.gold_target_schema}`")
+    return errors
+
+
+def _gold_task_contract_errors(task: Any, expected_upstream: str) -> List[str]:
+    """Return errors when a task named ``gold`` does not run our Gold pipeline."""
+    if not isinstance(task, dict):
+        return ["Gold task is not a mapping"]
+    errors: List[str] = []
+    pipeline_task = task.get("pipeline_task")
+    if not isinstance(pipeline_task, dict) or pipeline_task.get(
+        "pipeline_id"
+    ) != _GOLD_PIPELINE_RESOURCE_ID:
+        errors.append(
+            "Gold task must be a pipeline task targeting "
+            f"`{_GOLD_PIPELINE_RESOURCE_ID}`"
+        )
+    dependencies = task.get("depends_on") or []
+    dependency_keys = {
+        dependency.get("task_key")
+        for dependency in dependencies
+        if isinstance(dependency, dict)
+    }
+    if dependency_keys != {expected_upstream}:
+        errors.append(
+            f"Gold task must depend only on `{expected_upstream}`, got "
+            f"{sorted(key for key in dependency_keys if key)}"
+        )
+    return errors
+
+
+_GOLD_PIPELINE_BLOCK = """
+    gold:
+      name: "${bundle.name} - gold"
+      catalog: ${var.uc_catalog_name}
+      schema: ${var.gold_target_schema}
+      development: ${var.development_enabled}
+      photon: ${var.photon_enabled}
+      serverless: ${var.serverless}
+      root_path: ..
+      libraries:
+        - glob:
+            include: ../${var.gold_models_path}/**
+      configuration:
+        silver_catalog: ${var.uc_catalog_name}
+        silver_schema: ${var.silver_target_schema}
+      tags:
+        sdp_meta: ${var.sdp_meta_version}
+        sdp_meta_layer: gold
+
+"""
+
+
+@dataclass
+class BundleAddGoldCommand:
+    """Parameters for idempotently enabling Gold in an existing bundle."""
+
+    bundle_dir: str = "."
+
+
+def _insert_gold_task_block(pipelines_text: str, task_block: str) -> str:
+    """Insert a task at the end of resources.jobs.pipelines.tasks."""
+    lines = pipelines_text.splitlines(keepends=True)
+
+    def _line_index(expected: str, start: int, stop_indent: Optional[int]) -> int:
+        for index in range(start, len(lines)):
+            stripped = lines[index].rstrip()
+            content = stripped.lstrip()
+            if not content or content.startswith("#"):
+                continue
+            indent = len(stripped) - len(content)
+            if stop_indent is not None and indent <= stop_indent:
+                break
+            if stripped == expected:
+                return index
+        raise ValueError(f"cannot find YAML block {expected.strip()!r}")
+
+    jobs_index = _line_index("  jobs:", 0, None)
+    pipeline_job_index = _line_index("    pipelines:", jobs_index + 1, 2)
+    tasks_index = _line_index("      tasks:", pipeline_job_index + 1, 4)
+
+    insert_index = len(lines)
+    for index in range(tasks_index + 1, len(lines)):
+        stripped = lines[index].rstrip("\r\n")
+        content = stripped.lstrip()
+        if not content or content.startswith("#"):
+            continue
+        indent = len(stripped) - len(content)
+        if indent <= 6:
+            insert_index = index
+            break
+    lines.insert(insert_index, task_block)
+    return "".join(lines)
+
+
+def _write_text_files_transactionally(updates: List[Tuple[Path, str]]) -> None:
+    """Stage text updates and roll back replacements if a later write fails."""
+    staged: List[Tuple[Path, Path]] = []
+    originals: Dict[Path, Optional[Tuple[bytes, int]]] = {}
+    replaced: List[Path] = []
+
+    def _stage(target: Path, content: bytes, mode: int) -> Path:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(
+            prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent)
+        )
+        staged_path = Path(name)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(staged_path, mode)
+            return staged_path
+        except Exception:
+            staged_path.unlink(missing_ok=True)
+            raise
+
+    try:
+        for target, content in updates:
+            if target.exists():
+                originals[target] = (
+                    target.read_bytes(),
+                    target.stat().st_mode & 0o777,
+                )
+                mode = originals[target][1]
+            else:
+                originals[target] = None
+                mode = 0o644
+            staged.append((target, _stage(target, content.encode(), mode)))
+
+        for target, staged_path in staged:
+            os.replace(staged_path, target)
+            replaced.append(target)
+    except Exception:
+        for target in reversed(replaced):
+            original = originals[target]
+            try:
+                if original is None:
+                    if target.exists():
+                        target.unlink()
+                else:
+                    content, mode = original
+                    rollback_path = _stage(target, content, mode)
+                    os.replace(rollback_path, target)
+            except Exception:
+                logger.exception("Failed to roll back bundle file %s", target)
+        raise
+    finally:
+        for _, staged_path in staged:
+            if staged_path.exists():
+                staged_path.unlink()
+
+
+def bundle_add_gold(
+    cmd: BundleAddGoldCommand, *, output: Optional[TextIO] = None
+) -> int:
+    """Add the optional Gold pipeline, task, variables, and examples."""
+    bundle_dir = Path(cmd.bundle_dir).resolve()
+    variables_path = bundle_dir / "resources" / "variables.yml"
+    pipelines_path = bundle_dir / "resources" / "sdp_meta_pipelines.yml"
+    if not (bundle_dir / "databricks.yml").is_file():
+        print(
+            f"ERROR: {bundle_dir} does not look like a bundle (no databricks.yml)",
+            file=output,
+        )
+        return 2
+    if not variables_path.is_file() or not pipelines_path.is_file():
+        print(
+            "ERROR: expected resources/variables.yml and "
+            "resources/sdp_meta_pipelines.yml from an SDP-META bundle",
+            file=output,
+        )
+        return 2
+
+    try:
+        variables_doc = yaml.safe_load(variables_path.read_text()) or {}
+        pipelines_doc = yaml.safe_load(pipelines_path.read_text()) or {}
+    except yaml.YAMLError as exc:
+        print(f"ERROR: cannot enable Gold because bundle YAML is invalid ({exc})", file=output)
+        return 2
+
+    variables = variables_doc.get("variables") or {}
+    layer = _var_default(variables, "layer")
+    pipeline_mode = _var_default(variables, "pipeline_mode") or "split"
+    if layer == "bronze":
+        print(
+            "ERROR: Gold requires a Silver-producing bundle; layer=bronze is unsupported",
+            file=output,
+        )
+        return 2
+    if layer not in ("silver", "bronze_silver"):
+        print(f"ERROR: unsupported or missing bundle layer {layer!r}", file=output)
+        return 2
+    upstream = (
+        "bronze_silver"
+        if layer == "bronze_silver" and pipeline_mode == "combined"
+        else "silver"
+    )
+
+    changes: List[str] = []
+    variables_text = variables_path.read_text()
+    enabled_re = re.compile(
+        r"(^  gold_enabled:\n(?:(?!^  \S).*\n)*?^    default:\s*)false\s*$",
+        flags=re.MULTILINE,
+    )
+    variables_text, enabled_count = enabled_re.subn(r"\g<1>true", variables_text)
+    if enabled_count:
+        changes.append("enabled `gold_enabled`")
+    for name, block in _GOLD_VARIABLE_BLOCKS.items():
+        if name not in variables:
+            variables_text = variables_text.rstrip() + "\n" + block
+            changes.append(f"added variable `{name}`")
+
+    models_path = _var_default(variables, "gold_models_path") or "gold/models"
+    configured_path = Path(models_path)
+    models_dir = (bundle_dir / configured_path).resolve()
+    if (
+        configured_path.is_absolute()
+        or ".." in configured_path.parts
+        or not _path_is_within(models_dir, bundle_dir)
+    ):
+        print(
+            f"ERROR: gold_models_path {models_path!r} must stay inside the bundle",
+            file=output,
+        )
+        return 2
+    has_gold_models = models_dir.is_dir() and any(models_dir.rglob("*.sql"))
+
+    resources = pipelines_doc.get("resources") or {}
+    pipelines = resources.get("pipelines") or {}
+    jobs = resources.get("jobs") or {}
+    pipeline_job = jobs.get("pipelines")
+    if not isinstance(pipeline_job, dict) or not isinstance(
+        pipeline_job.get("tasks"), list
+    ):
+        print(
+            "ERROR: resources.jobs.pipelines.tasks must be a YAML task list",
+            file=output,
+        )
+        return 2
+    tasks = pipeline_job["tasks"]
+    pipelines_text = pipelines_path.read_text()
+    if "gold" not in pipelines:
+        marker = re.search(r"^  jobs:\s*$", pipelines_text, flags=re.MULTILINE)
+        if marker is None:
+            print("ERROR: cannot find `resources.jobs` insertion point", file=output)
+            return 2
+        pipelines_text = (
+            pipelines_text[:marker.start()]
+            + _GOLD_PIPELINE_BLOCK
+            + pipelines_text[marker.start():]
+        )
+        changes.append("added Gold pipeline")
+
+    if not any(
+        isinstance(task, dict) and task.get("task_key") == "gold"
+        for task in tasks
+    ):
+        task_block = (
+            "        # Incremental refresh requires serverless compute and compatible\n"
+            "        # Silver Delta change tracking (for example, row tracking or CDF).\n"
+            "        - task_key: gold\n"
+            "          depends_on:\n"
+            f"            - task_key: {upstream}\n"
+            "          pipeline_task:\n"
+            "            pipeline_id: ${resources.pipelines.gold.id}\n"
+            "            full_refresh: false\n"
+        )
+        try:
+            pipelines_text = _insert_gold_task_block(
+                pipelines_text, task_block
+            )
+        except ValueError as exc:
+            print(f"ERROR: cannot add Gold task: {exc}", file=output)
+            return 2
+        changes.append(f"added Gold task after `{upstream}`")
+
+    variables_text = variables_text.rstrip() + "\n"
+    pipelines_text = pipelines_text.rstrip() + "\n"
+    try:
+        candidate_variables = yaml.safe_load(variables_text) or {}
+        candidate_pipelines = yaml.safe_load(pipelines_text) or {}
+    except yaml.YAMLError as exc:
+        print(
+            f"ERROR: generated Gold bundle edits are invalid YAML ({exc})",
+            file=output,
+        )
+        return 2
+    candidate_defaults = candidate_variables.get("variables") or {}
+    candidate_resources = candidate_pipelines.get("resources") or {}
+    candidate_gold_pipeline = (candidate_resources.get("pipelines") or {}).get(
+        "gold"
+    )
+    candidate_tasks = (
+        ((candidate_resources.get("jobs") or {}).get("pipelines") or {}).get(
+            "tasks"
+        )
+        or []
+    )
+    candidate_gold_tasks = [
+        task
+        for task in candidate_tasks
+        if isinstance(task, dict) and task.get("task_key") == "gold"
+    ]
+    contract_errors = _gold_pipeline_contract_errors(candidate_gold_pipeline)
+    if len(candidate_gold_tasks) == 1:
+        contract_errors.extend(
+            _gold_task_contract_errors(candidate_gold_tasks[0], upstream)
+        )
+    else:
+        contract_errors.append(
+            "the `pipelines` job must contain exactly one `gold` task"
+        )
+    if (
+        _var_default(candidate_defaults, "gold_enabled") is not True
+        or contract_errors
+    ):
+        if changes:
+            message = (
+                "generated edits did not produce a valid Gold pipeline and "
+                "workflow task with gold_enabled=true"
+            )
+        else:
+            message = (
+                "existing Gold resources do not match the bundle-add-gold "
+                "pipeline and workflow contract"
+            )
+        print(f"ERROR: {message}; no files were changed", file=output)
+        for contract_error in contract_errors:
+            print(f"  - {contract_error}", file=output)
+        return 2
+
+    file_updates = [
+        (variables_path, variables_text),
+        (pipelines_path, pipelines_text),
+    ]
+    try:
+        _write_text_files_transactionally(file_updates)
+    except OSError as exc:
+        print(
+            f"ERROR: failed to write Gold bundle changes; prior file contents "
+            f"were restored where possible ({exc})",
+            file=output,
+        )
+        return 2
+
+    if changes:
+        print("Gold enabled:", file=output)
+        for change in changes:
+            print(f"  - {change}", file=output)
+    else:
+        print("Gold is already enabled; no changes needed.", file=output)
+    if not has_gold_models:
+        print(
+            "NEXT: add at least one Silver-compatible native SDP SQL model under "
+            f"{models_path!r}, then run bundle-validate.",
+            file=output,
+        )
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -1292,6 +1949,9 @@ QUICKSTART_BUNDLE_INIT_DEFAULTS: Dict[str, Any] = {
     "onboarding_file_format": "yaml",
     "quality_engine": "none",
     "managed_quality_migrations": False,
+    "gold_enabled": False,
+    "gold_target_schema": "sdp_meta_gold",
+    "gold_models_path": "gold/models",
     "dataflow_group": "my_group",
     "wheel_source": "pypi",
     "sdp_meta_dependency": "__SET_ME__",
@@ -1353,6 +2013,20 @@ def _bundle_name_override(value):
     return value
 
 
+def _relative_bundle_path_override(field: str):
+    def _validate(value):
+        value = _nonempty_str_override(field)(value)
+        path = Path(value)
+        if path.is_absolute() or any(part in ("", ".", "..") for part in path.parts):
+            raise ValueError(
+                f"quickstart override {field}={value!r} must be a relative "
+                "path inside the bundle"
+            )
+        return value
+
+    return _validate
+
+
 _QUICKSTART_OVERRIDE_VALIDATORS: Dict[str, Any] = {
     "bundle_name": _bundle_name_override,
     "uc_catalog_name": lambda v: validate_uc_identifier(v, kind="uc_catalog_name"),
@@ -1368,6 +2042,13 @@ _QUICKSTART_OVERRIDE_VALIDATORS: Dict[str, Any] = {
     ),
     "managed_quality_migrations": _bool_override(
         "managed_quality_migrations"
+    ),
+    "gold_enabled": _bool_override("gold_enabled"),
+    "gold_target_schema": lambda v: validate_uc_identifier(
+        v, kind="gold_target_schema"
+    ),
+    "gold_models_path": _relative_bundle_path_override(
+        "gold_models_path"
     ),
     "dataflow_group": _nonempty_str_override("dataflow_group"),
     "author": _nonempty_str_override("author"),

@@ -12,7 +12,7 @@ This page covers all parameters exposed when scaffolding a bundle with `databric
 
 ## Bundle Init Prompts
 
-When you run `databricks labs sdp-meta bundle-init`, the template walks you through 15 prompts. Pass `--quickstart` to skip all prompts and accept developer defaults.
+When you run `databricks labs sdp-meta bundle-init`, the template walks you through 18 prompts. Pass `--quickstart` to skip all prompts and accept developer defaults.
 
 | # | Prompt Key | Default | Description |
 |---|---|---|---|
@@ -27,10 +27,13 @@ When you run `databricks labs sdp-meta bundle-init`, the template walks you thro
 | 9 | `onboarding_file_format` | `yaml` | File format for generated onboarding and transformation files: `yaml` or `json` |
 | 10 | `quality_engine` | `none` | Quality rules scaffolded for each seeded layer: `none` keeps the legacy example, `lakeflow` uses built-in valid-row rules, and `dqx` uses the optional DQX engine |
 | 11 | `managed_quality_migrations` | `false` | Replace native pipeline tasks with SDP-META's migration-aware wheel task. Enable only for an acknowledged `full_refresh` migration |
-| 12 | `dataflow_group` | `my_group` | The `data_flow_group` value used in the seeded onboarding file — must match the pipeline's `*.group` configuration |
-| 13 | `wheel_source` | `pypi` | Where sdp-meta is installed from: `pypi` or `volume_path` |
-| 14 | `sdp_meta_dependency` | `__SET_ME__` | Concrete install specification: a PyPI coordinate (e.g. `databricks-labs-sdp-meta==0.1.0`) or a `/Volumes/...` wheel path |
-| 15 | `author` | `sdp-meta-user` | Written to the `import_author` column on dataflowspec rows |
+| 12 | `gold_enabled` | `false` | Scaffold a separate native SDP SQL Gold pipeline after Silver; immutable after generation |
+| 13 | `gold_target_schema` | `sdp_meta_gold` | Schema where Gold materialized views are published |
+| 14 | `gold_models_path` | `gold/models` | Relative path inside the bundle containing native SDP SQL model files |
+| 15 | `dataflow_group` | `my_group` | The `data_flow_group` value used in the seeded onboarding file — must match the pipeline's `*.group` configuration |
+| 16 | `wheel_source` | `pypi` | Where sdp-meta is installed from: `pypi` or `volume_path` |
+| 17 | `sdp_meta_dependency` | `__SET_ME__` | Concrete install specification: a PyPI coordinate (e.g. `databricks-labs-sdp-meta==0.1.0`) or a `/Volumes/...` wheel path |
+| 18 | `author` | `sdp-meta-user` | Written to the `import_author` column on dataflowspec rows |
 
 :::warning
 The `__SET_ME__` sentinel in `sdp_meta_dependency` is intentional. `bundle-validate` and the runner notebook both reject it, so deployment is blocked until you set a real value.
@@ -51,6 +54,9 @@ time.
 | `sdp_meta_schema` | string | `sdp_meta_dataflowspecs` | Schema holding the dataflowspec control tables |
 | `bronze_target_schema` | string | `sdp_meta_bronze` | Target schema for bronze tables |
 | `silver_target_schema` | string | `sdp_meta_silver` | Target schema for silver tables |
+| `gold_enabled` | boolean | `false` | Immutable scaffold marker controlling whether Gold resources are generated; do not target-override it |
+| `gold_target_schema` | string | `sdp_meta_gold` | Target schema for Gold materialized views |
+| `gold_models_path` | string | `gold/models` | Bundle-relative Gold SQL model directory |
 | `layer` | string | `bronze_silver` | Pipeline layer(s): `bronze`, `silver`, or `bronze_silver` |
 | `pipeline_mode` | string | `split` | Pipeline topology when `layer=bronze_silver`: `split` or `combined` |
 | `dataflow_group` | string | `my_group` | Group key that ties the onboarding file to the pipeline configuration |

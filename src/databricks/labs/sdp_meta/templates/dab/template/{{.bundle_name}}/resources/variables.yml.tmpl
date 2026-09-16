@@ -1,5 +1,6 @@
-# All knobs for the {{.bundle_name}} sdp-meta bundle.
-# Override any of these per target in databricks.yml under `targets.<name>.variables`.
+# Bundle configuration for {{.bundle_name}}.
+# Variables may be overridden per target except gold_enabled, which records
+# immutable scaffold structure rather than acting as a deployment-time toggle.
 
 variables:
   uc_catalog_name:
@@ -17,6 +18,18 @@ variables:
   silver_target_schema:
     description: Schema where the silver SDP Pipeline writes its tables.
     default: {{.silver_target_schema}}
+
+  gold_enabled:
+    description: Immutable scaffold marker; do not override after bundle-init.
+    default: {{.gold_enabled}}
+
+  gold_target_schema:
+    description: Schema where the Gold SDP SQL pipeline writes materialized views.
+    default: {{.gold_target_schema}}
+
+  gold_models_path:
+    description: Relative path inside the bundle containing Gold SDP SQL models.
+    default: {{.gold_models_path}}
 
   layer:
     description: Layer to onboard. One of `bronze`, `silver`, `bronze_silver`.

@@ -12,7 +12,7 @@ databricks labs install sdp-meta
 # catalog/schema/sdp_meta_dependency.
 databricks labs sdp-meta bundle-init --quickstart   # one shot, no prompts
 # OR walk through the prompts:
-databricks labs sdp-meta bundle-init                # 13 prompts
+databricks labs sdp-meta bundle-init                # guided template prompts
 cd <bundle_name>
 
 # (optional, until sdp-meta is on PyPI)
@@ -49,10 +49,11 @@ databricks bundle run pipelines  --target dev
 
 | Command | What it does |
 | --- | --- |
-| `databricks labs sdp-meta bundle-init` | Scaffolds a new bundle from the packaged template via `databricks bundle init`. Prompts for 13 knobs (see below). Pass `--quickstart` to skip every prompt and use developer defaults; pass `--output-dir <path>` to scaffold somewhere other than the current directory. |
+| `databricks labs sdp-meta bundle-init` | Scaffolds a new bundle from the packaged template via `databricks bundle init`. Pass `--quickstart` to skip every prompt and use developer defaults; pass `--output-dir <path>` to scaffold somewhere other than the current directory. |
 | `databricks labs sdp-meta bundle-prepare-wheel` | Builds the local sdp-meta wheel and uploads it to a UC volume. Prints the resulting `/Volumes/...` path so you can paste it into `resources/variables.yml` as the `sdp_meta_dependency` default. |
 | `databricks labs sdp-meta bundle-validate` | Runs `databricks bundle validate` plus sdp-meta-specific static checks. |
 | `databricks labs sdp-meta bundle-add-flow` | Appends one or more flow entries to the bundle's onboarding file. Two modes: single (interactive prompts per source format) and CSV (batch). Auto-increments `data_flow_id`, refuses to write on collisions, preserves YAML/JSON. |
+| `databricks labs sdp-meta bundle-add-gold` | Idempotently enables native SDP SQL Gold in an existing Silver-producing bundle by adding variables, a Gold pipeline, and the topology-aware workflow task. You then add SQL models under the configured `gold_models_path` (default: `gold/models`). |
 
 `bundle-validate` catches common authoring mistakes that the upstream `databricks bundle validate` doesn't:
 
@@ -200,6 +201,35 @@ databricks labs sdp-meta bundle-validate
 ```
 
 The sanity checks confirm that the new `data_flow_group` values still line up with the bundle's `dataflow_group` variable, the file is parseable, and the layer/pipeline_mode topology is consistent.
+
+## Enabling the optional Gold layer
+
+New bundles can set `gold_enabled=true` during `bundle-init`, including through
+a quickstart config override. This scaffolds a separate native SDP SQL pipeline
+and a `gold` workflow task after the Silver-producing task. The rendered
+`gold_enabled` variable records that immutable scaffold choice; do not change
+or target-override it later. Add customer-specific SQL files under the
+configured `gold_models_path` (default: `gold/models`) before validation or
+deployment.
+
+For a bundle created by an older SDP-META release, run from the bundle root:
+
+```bash
+databricks labs sdp-meta bundle-add-gold
+databricks labs sdp-meta bundle-validate
+```
+
+The command preserves existing Bronze/Silver resources and user-authored files,
+adds only missing Gold content, and is safe to run repeatedly. Each Gold SQL
+file must contain exactly one materialized-view or streaming-table declaration;
+`OR REFRESH`, `PRIVATE`, and temporary views are supported where SDP SQL permits
+them. Incremental materialized-view refresh requires serverless compute and
+compatible Silver Delta change tracking such as row tracking or Change Data
+Feed.
+
+Lakeflow creates `gold_target_schema` on first publication when the pipeline
+identity has `USE CATALOG` and `CREATE SCHEMA` on the target catalog. Existing
+schemas require the corresponding schema and dataset creation privileges.
 
 ## Generating flows programmatically (100s of tables)
 

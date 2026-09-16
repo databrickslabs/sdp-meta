@@ -104,6 +104,16 @@ class AnswersFileTests(unittest.TestCase):
         self.assertEqual(doc["source_format"], "cloudFiles")
         self.assertEqual(doc["onboarding_file_format"], "yaml")
 
+    def test_cloudfiles_gold(self):
+        doc = self._load_answers("cloudfiles_gold.json")
+        self._assert_covers_all_prompts(doc, "cloudfiles_gold")
+        self._assert_enum_values_valid(doc, "cloudfiles_gold")
+        self.assertIs(doc["gold_enabled"], True)
+        self.assertEqual(doc["gold_models_path"], "gold/models")
+        self.assertEqual(doc["layer"], "bronze_silver")
+        self.assertEqual(doc["pipeline_mode"], "split")
+        self.assertEqual(doc["source_format"], "cloudFiles")
+
     def test_kafka_bronze(self):
         doc = self._load_answers("kafka_bronze.json")
         self._assert_covers_all_prompts(doc, "kafka_bronze")
@@ -133,6 +143,7 @@ class AnswersFileTests(unittest.TestCase):
         """Demos use volume_path so the __SET_ME__ guard rails get exercised."""
         for name in (
             "cloudfiles_split.json",
+            "cloudfiles_gold.json",
             "kafka_bronze.json",
             "eventhub_combined.json",
             "delta_split.json",
@@ -322,7 +333,7 @@ class LauncherRegistryTests(unittest.TestCase):
     def test_scenarios_registered(self):
         self.assertEqual(
             set(self.module.SCENARIOS.keys()),
-            {"cloudfiles", "cloudfiles_combined", "kafka", "eventhub", "delta"},
+            {"cloudfiles", "cloudfiles_combined", "gold", "kafka", "eventhub", "delta"},
         )
 
     def test_cloudfiles_scenario_set_matches_registry(self):
@@ -332,7 +343,7 @@ class LauncherRegistryTests(unittest.TestCase):
         them, and the recipe will crash with `FileNotFoundError`."""
         self.assertEqual(
             self.module._CLOUDFILES_SCENARIO_NAMES,
-            {"cloudfiles", "cloudfiles_combined"},
+            {"cloudfiles", "cloudfiles_combined", "gold"},
         )
 
     def test_cloudfiles_combined_uses_combined_pipeline_mode(self):
@@ -350,6 +361,47 @@ class LauncherRegistryTests(unittest.TestCase):
         self.assertEqual(scenario.recipe_name, split.recipe_name)
         self.assertEqual(scenario.recipe_args_template, split.recipe_args_template)
 
+    def test_gold_scenario_reuses_cloudfiles_data_and_has_runnable_models(self):
+        scenario = self.module.SCENARIOS["gold"]
+        cloudfiles = self.module.SCENARIOS["cloudfiles"]
+        self.assertEqual(scenario.extra_flows_csv, cloudfiles.extra_flows_csv)
+        self.assertEqual(scenario.recipe_name, cloudfiles.recipe_name)
+        self.assertTrue(scenario.gold_models_dir.is_dir())
+        models = sorted(scenario.gold_models_dir.glob("*.sql"))
+        self.assertEqual(
+            [model.name for model in models],
+            [
+                "customer_360.sql",
+                "high_value_customers.sql",
+                "product_performance.sql",
+                "store_performance.sql",
+            ],
+        )
+        sql = "\n".join(model.read_text() for model in models)
+        self.assertIn("${silver_catalog}.${silver_schema}.customers", sql)
+        self.assertIn("${silver_catalog}.${silver_schema}.transactions", sql)
+        self.assertIn("${silver_catalog}.${silver_schema}.products", sql)
+        self.assertIn("${silver_catalog}.${silver_schema}.stores", sql)
+        self.assertIn("FROM customer_360", sql)
+
+    def test_gold_demo_models_are_installed_into_generated_scaffold(self):
+        import tempfile
+
+        scenario = self.module.SCENARIOS["gold"]
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp)
+            gold_dir = bundle / "gold"
+            gold_dir.mkdir(parents=True)
+            (gold_dir / "README.md").write_text("customer model guidance")
+            self.module._install_gold_demo_models(scenario, bundle)
+            target = gold_dir / "models"
+            self.assertEqual(
+                (gold_dir / "README.md").read_text(),
+                "customer model guidance",
+            )
+            for source in scenario.gold_models_dir.glob("*.sql"):
+                self.assertEqual((target / source.name).read_text(), source.read_text())
+
     def test_delta_scenario_marked_as_workspace_required(self):
         delta = self.module.SCENARIOS["delta"]
         self.assertTrue(
@@ -358,7 +410,7 @@ class LauncherRegistryTests(unittest.TestCase):
         )
         # Other scenarios should NOT be marked as workspace-required so that
         # `--scenario all` works without credentials.
-        for name in ("cloudfiles", "cloudfiles_combined", "kafka", "eventhub"):
+        for name in ("cloudfiles", "cloudfiles_combined", "gold", "kafka", "eventhub"):
             self.assertFalse(
                 self.module.SCENARIOS[name].recipe_requires_workspace,
                 f"{name} should run offline in dry-run mode",
@@ -546,6 +598,36 @@ class RewriteAndPrunePathsTests(unittest.TestCase):
         # Unrelated keys remain.
         self.assertEqual(flow["data_flow_id"], "101")
         self.assertEqual(flow["source_details"]["source_table"], "customers")
+
+    def test_prunes_rendered_onboarding_before_bundle_sync(self):
+        import yaml as _yaml
+
+        conf = self._new_conf_with(["silver_transformations.yml"])
+        bundle = conf.parent
+        resources = bundle / "resources"
+        resources.mkdir()
+        (resources / "variables.yml").write_text(_yaml.safe_dump({
+            "variables": {
+                "onboarding_file_name": {"default": "onboarding.yml"},
+            },
+        }))
+        onboarding = conf / "onboarding.yml"
+        onboarding.write_text(_yaml.safe_dump([{
+            "data_flow_id": "101",
+            "bronze_data_quality_expectations_json_dev":
+                "${workspace.file_path}/conf/dqe/customers/bronze_expectations.yml",
+            "silver_transformation_json_dev":
+                "${workspace.file_path}/conf/silver_transformations.yml",
+        }], sort_keys=False))
+
+        self.module._prune_dangling_conf_paths(bundle)
+
+        flow = _yaml.safe_load(onboarding.read_text())[0]
+        self.assertNotIn("bronze_data_quality_expectations_json_dev", flow)
+        self.assertEqual(
+            flow["silver_transformation_json_dev"],
+            "${workspace.file_path}/conf/silver_transformations.yml",
+        )
 
     def test_seeds_quarantine_defaults_when_dqe_kept(self):
         """The engine accesses bronze_quarantine_table unconditionally when
@@ -750,7 +832,9 @@ class EnsureTargetSchemasTests(unittest.TestCase):
 
     def _bundle_with_variables(self, *, sdp_meta="sdp_meta_dab_demo_cf",
                                bronze="sdp_meta_bronze_dab_demo_cf",
-                               silver="sdp_meta_silver_dab_demo_cf") -> Path:
+                               silver="sdp_meta_silver_dab_demo_cf",
+                               gold="sdp_meta_gold_dab_demo",
+                               gold_enabled=False) -> Path:
         import tempfile
         import yaml as _yaml
         tmp = Path(tempfile.mkdtemp(prefix="ensure_schemas_"))
@@ -760,6 +844,8 @@ class EnsureTargetSchemasTests(unittest.TestCase):
                 "sdp_meta_schema": {"default": sdp_meta},
                 "bronze_target_schema": {"default": bronze},
                 "silver_target_schema": {"default": silver},
+                "gold_enabled": {"default": gold_enabled},
+                "gold_target_schema": {"default": gold},
             }
         }, sort_keys=False))
         self.addCleanup(lambda: __import__("shutil").rmtree(tmp))
@@ -772,6 +858,19 @@ class EnsureTargetSchemasTests(unittest.TestCase):
         self.assertEqual(
             self.module._resolve_target_schemas(bundle_dir),
             ["meta_x", "bronze_x", "silver_x"],
+        )
+
+    def test_resolve_includes_gold_schema_only_when_enabled(self):
+        bundle_dir = self._bundle_with_variables(
+            sdp_meta="meta_x",
+            bronze="bronze_x",
+            silver="silver_x",
+            gold="gold_x",
+            gold_enabled=True,
+        )
+        self.assertEqual(
+            self.module._resolve_target_schemas(bundle_dir),
+            ["meta_x", "bronze_x", "silver_x", "gold_x"],
         )
 
     def test_resolve_dedupes_when_combined_pipeline_uses_one_schema(self):

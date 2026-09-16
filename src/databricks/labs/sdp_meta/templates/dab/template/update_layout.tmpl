@@ -1,0 +1,5 @@
+{{- /* This preamble prunes optional files, then self-skips so it is not rendered. */ -}}
+{{- if eq .gold_enabled false}}
+{{ skip (printf `%s/%s` .bundle_name `gold`) }}
+{{- end}}
+{{ skip `update_layout` }}

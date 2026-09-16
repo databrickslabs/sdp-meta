@@ -75,5 +75,10 @@ commands:
     description: Run `databricks bundle validate` plus sdp-meta sanity checks (layer/topology consistency, wheel_source vs sdp_meta_dependency, onboarding placeholders, dataflow_group references) against a scaffolded bundle
   - name: bundle-add-flow
     description: Append flow entries to a bundle's conf/onboarding.{yml,json} (interactive single-flow prompts or batch from CSV); auto-increments data_flow_id and seeds silver_transformations.* for new silver flows
+  - name: bundle-add-gold
+    description: Idempotently enable the optional native SDP SQL Gold pipeline, models, variables, and workflow task in an existing SDP-META bundle
+    flags:
+      - name: bundle-dir
+        description: Existing SDP-META bundle directory to update (default ".")
   - name: mcp
     description: Run the sdp-meta Model Context Protocol (MCP) server over stdio so an MCP-capable client can drive sdp-meta scaffolding and inspection. Requires the `mcp` extra (`pip install databricks-labs-sdp-meta[mcp]`).

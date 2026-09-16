@@ -52,6 +52,7 @@ const sidebars = {
         'guides/dlt-sink',
         'guides/multi-source-cdc',
         'guides/row-filters',
+        'guides/gold',
       ],
     },
     {

@@ -9,7 +9,7 @@
 8. [Lakeflow Spark Declarative Pipelines Sink Demo](#lakeflow-declarative-pipelines-sink-demo): This demo showcases the implementation of write to external sinks like delta and kafka
 9. [Multi-Source AUTO CDC Demo](#multi-source-auto-cdc-demo): Merge N regional CDC sources into ONE silver target table using [`dp.create_auto_cdc_flow`](https://docs.databricks.com/aws/en/dlt-ref/dlt-python-ref-apply-changes) called N times against the same streaming table, with per-flow `select_exp` normalization.
 10. [Row Filter Demo](#row-filter-demo): UC Row-Level Security via `bronze_row_filter` / `silver_row_filter` — single-flow standalone demo that creates the row-filter UDF, runs one combined Bronze+Silver pipeline (`layer=bronze_silver`), and asserts the filter is enforced.
-11. [DAB Demo](#dab-demo): End-to-end walkthrough of the `databricks labs sdp-meta bundle-*` CLI — scaffold a Declarative Automation Bundle, append flows, validate, deploy, and run onboarding + Lakeflow Spark Declarative Pipelines from one driver script. See [`DAB_README.md`](../DAB_README.md) for the full CLI / template / recipe reference.
+11. [DAB Demo](#dab-demo): End-to-end walkthrough of the `databricks labs sdp-meta bundle-*` CLI — scaffold a Declarative Automation Bundle, append flows, validate, deploy, and run Bronze → Silver → optional native SQL Gold from one driver script. See [`DAB_README.md`](../DAB_README.md) for the full CLI / template / recipe reference.
 
 
 # Interactive Demo (Notebook)
@@ -36,6 +36,7 @@ end-to-end with no CLI setup required.
 | 10 | DLT Sink — write Bronze output to an external Delta table |
 | 11 | **Multi-Source AUTO CDC** — three regional CDC sources (US / EU / APAC with distinct column shapes) merged into one unified `customers_regional` silver target via `silver_cdc_apply_changes_flows` |
 | 12 | Row-Level Filtering — verify UC `ROW FILTER` is enforced on Bronze + Silver `customers` |
+| 13 | **Native SDP SQL Gold** — separate serverless SQL pipeline builds customer, product, and store materialized views over published Silver tables |
 
 ## Features Demonstrated
 
@@ -54,6 +55,7 @@ end-to-end with no CLI setup required.
 - `dp.create_sink` — write to external Delta destinations
 - **Multi-source AUTO CDC** — N `dp.create_auto_cdc_flow` calls against one streaming silver target, with per-flow `source_format` / `source_details` / `select_exp` normalizing each region's raw column shape before the merge (Stage 11)
 - `bronze_row_filter` / `silver_row_filter` — UC Row-Level Security via `ROW FILTER` (Stage 12)
+- Native SDP SQL Gold — no Gold DataflowSpec; a separate SQL pipeline reads published Silver and derives Gold-to-Gold ordering (Stage 13)
 - All Lakeflow Spark Declarative Pipelines created with `serverless=True`
 
 ## Prerequisites
@@ -69,14 +71,15 @@ The notebook is fully driven by widgets at the top — same ones the headless la
 |---|---|---|
 | `git_branch` | text, default `main` | Branch to install SDP-META from when `install_source=git_branch`. Also used as the GitHub branch for the conf-file fallback if the notebook is imported standalone. |
 | `uc_catalog_name` | text, default `sdp_meta_demo` | UC catalog the demo writes into. Must be a Databricks SQL **regular identifier** (`[A-Za-z_][A-Za-z0-9_]*`, max 255 chars). Hyphens / dots are rejected up-front (issue #261). |
-| `uc_schema_name` | text, default `retail_data` | Schema within the catalog. Same identifier rules as above. The demo creates `<schema>_bronze`, `<schema>_silver`, `<schema>_pipeline_default` underneath. |
+| `uc_schema_name` | text, default `retail_data` | Schema within the catalog. Same identifier rules as above. The demo creates `<schema>_bronze`, `<schema>_silver`, `<schema>_gold`, and `<schema>_pipeline_default`. |
 | `data_source` | dropdown `dbdatagen` (default) / `github` | `dbdatagen` generates synthetic retail data with `dbldatagen` (no internet needed); `github` downloads fixed CSVs from the sdp-meta repo (requires outbound internet from the workspace). |
 | `onboarding_format` | dropdown `json` (default) / `yml` | Whether the rendered onboarding spec + silver-transformations files are written as JSON or YAML. The demo reads back the matching `demo/conf/<format>/sample_onboarding.<ext>` template. |
 | `quality_engine` | dropdown `legacy` (default) / `lakeflow` / `dqx` | Quality implementation for the standard customers, transactions, products, and stores Bronze feeds. `lakeflow` and `dqx` populate the new `bronze_quality_*` onboarding fields. Silver uses CDC and retains its existing legacy expectations. DQX is installed only when selected. |
+| `gold_enabled` | dropdown `true` (default) / `false` | Runs a separate native SDP SQL Gold pipeline over the published Silver retail tables. This demonstrates interoperability; Gold is not onboarded into DataflowSpec. |
 | `install_source` | dropdown `git_branch` (default) / `whl_file` | Where to install SDP-META from. `git_branch` runs `pip install git+https://github.com/databrickslabs/sdp-meta.git@<git_branch>`; `whl_file` runs `pip install <whl_file_path>` against a Volume / Workspace path. Use `whl_file` when validating local changes that aren't pushed yet. |
 | `whl_file_path` | text, default empty | Path to the wheel when `install_source=whl_file`, e.g. `/Volumes/<catalog>/<schema>/<volume>/databricks_labs_sdp_meta-<version>-py3-none-any.whl`. Required when `install_source=whl_file`; ignored otherwise. |
 | `validate_counts` | dropdown `false` (default) / `true` | When `true`, the final cell turns the demo into a smoke test: it asserts deterministic row counts (`bronze.orders == 7`, `bronze.iot_events == 5`, snapshot tables `>= LOAD_2 size`, multi-source CDC bronze `customers_{us,eu,apac}_cdc == 5` each, silver `customers_regional == 6`) and non-empty for every demo-produced bronze / silver / quarantine table, raising a single `AssertionError` listing every failure. Use in CI / pre-release smoke runs. |
-| `cleanup` | dropdown `false` (default) / `true` | When `true`, the cleanup cell at the bottom drops every per-run resource the demo created: pipelines (main / snapshot / sink / multi-source CDC), runner notebooks (`runner_notebook_path`, `snapshot_runner_path`), and per-run schemas (`<schema>_bronze`, `<schema>_silver`, `<schema>_pipeline_default`, `<schema>` itself — including its config volume). The user-supplied UC catalog is **intentionally preserved** because it's shared across runs. |
+| `cleanup` | dropdown `false` (default) / `true` | When `true`, the cleanup cell drops every per-run resource, including the optional Gold pipeline/schema. The user-supplied UC catalog is **intentionally preserved** because it is shared across runs. |
 
 ## Option A — Run interactively in the workspace
 
@@ -96,7 +99,10 @@ The notebook is fully driven by widgets at the top — same ones the headless la
 
 ## Option B — Run headless via the launcher (CI-friendly)
 
-`demo/launch_interactive_demo.py` uploads the demo notebook (and the sibling `demo/conf/<fmt>/sample_onboarding.<ext>` files, so the workspace-co-located lookup always works), submits a one-time serverless job that runs it, prints + opens the run-page URL in your browser immediately so you can watch it live, and waits for completion. On failure it still surfaces the run URL in the summary — no traceback hunting required.
+`demo/launch_interactive_demo.py` uploads the demo notebook, sibling
+`demo/conf/` files, and shared `demo/gold/models/*.sql`, submits a one-time
+serverless job, opens its run page, and waits for completion. The same Gold SQL
+files are used by the DAB Gold scenario, preventing the two demos from drifting.
 
 ```commandline
 # CI smoke run — assert row counts and tear down every per-run resource
@@ -137,6 +143,7 @@ Run `python demo/launch_interactive_demo.py --help` for the full flag surface. S
 | `--data-source` | `data_source` | `dbdatagen` (default) or `github`. |
 | `--onboarding-format` | `onboarding_format` | `json` (default) or `yml`. |
 | `--quality-engine` | `quality_engine` | `legacy` (default), `lakeflow`, or `dqx`. |
+| `--gold-enabled` | `gold_enabled` | `true` (default) or `false`. Runs native SQL Gold after Silver when enabled. |
 | `--validate-counts` | `validate_counts` | `true` (default for the launcher) or `false`. When `true`, the job FAILS on row-count regression. |
 | `--cleanup` | `cleanup` | `false` (default) or `true`. Set `true` for CI runs that need to leave the workspace clean. |
 | `--timeout-minutes` | n/a (driver) | Max wall-clock for the launcher to wait on the job. Default 90; for cold workspaces with all 4 pipelines, 20-25 is comfortable. |
@@ -655,14 +662,15 @@ End-to-end demo for the new `databricks labs sdp-meta bundle-*` CLI commands. On
 
 > For the full CLI reference (every prompt, every variable, every recipe, the full flag surface, and how to extend the runner notebook for snapshot / CDC / custom transforms), see [`DAB_README.md`](../DAB_README.md) at the repo root. This demo section is the *runnable* walkthrough; `DAB_README.md` is the *reference*.
 
-The demo supports six scenarios via `--scenario`:
+The demo supports six concrete scenarios plus `all` via `--scenario`:
 
 | Scenario | Source | Pipeline mode |
 | --- | --- | --- |
 | `cloudfiles` | UC volume CSVs (Customers / Transactions / Products / Stores) | `split` (separate bronze + silver SDP Pipelines) |
 | `cloudfiles_combined` | Same data, same recipe | `combined` (bronze + silver in **one** SDP Pipeline) |
-| `kafka` | Kafka topic list at `demo/dab_template_demo/topics/kafka_topics.txt` | `split` |
-| `eventhub` | Event Hub namespace + topic list | `split` |
+| `gold` | UC volume Customers + Transactions | split Bronze/Silver followed by native SDP SQL Gold |
+| `kafka` | Kafka topic list at `demo/dab_template_demo/topics/kafka_topics.txt` | bronze-only |
+| `eventhub` | Event Hub namespace + topic list | `combined` |
 | `delta` | Existing UC delta tables | `split` |
 | `all` | Runs all of the above sequentially into separate `demo_runs/<scenario>/` dirs | varies |
 

@@ -6,7 +6,9 @@ sidebar_position: 1
 
 # Getting Started
 
-SDP-META supports several deployment paths. All lead to the same outcome: a running Bronze/Silver pipeline driven by onboarding metadata.
+SDP-META supports several deployment paths for metadata-driven Bronze and
+Silver pipelines. The DAB path can additionally chain a separate native SDP
+SQL Gold pipeline over the published Silver tables.
 
 ## Prefer video?
 

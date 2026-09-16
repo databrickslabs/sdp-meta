@@ -1,11 +1,11 @@
 {
-  "_comment": "Answers for `databricks bundle init` -> sdp-meta DAB template, scenario A: split bronze+silver pipelines reading cloudFiles. {uc_catalog_name}, {sdp_meta_schema}, {bronze_target_schema}, and {silver_target_schema} are substituted by demo/launch_dab_template_demo.py at runtime (driven by --uc-catalog-name and --uc-schema; see launcher for default fallbacks).",
-  "bundle_name": "dab_demo_cloudfiles_split",
+  "_comment": "Gold feature demo: split bronze+silver pipelines feed a native SDP SQL Gold pipeline. The launcher substitutes all schema placeholders and replaces the generated Gold examples with runnable models matching the shipped customer and transaction CSVs.",
+  "bundle_name": "dab_demo_cloudfiles_gold",
   "uc_catalog_name": "{uc_catalog_name}",
   "sdp_meta_schema": "{sdp_meta_schema}",
   "bronze_target_schema": "{bronze_target_schema}",
   "silver_target_schema": "{silver_target_schema}",
-  "gold_enabled": false,
+  "gold_enabled": true,
   "gold_target_schema": "{gold_target_schema}",
   "gold_models_path": "gold/models",
   "layer": "bronze_silver",
@@ -14,7 +14,7 @@
   "onboarding_file_format": "yaml",
   "quality_engine": "none",
   "managed_quality_migrations": false,
-  "dataflow_group": "dab_demo_cf_group",
+  "dataflow_group": "dab_demo_gold_group",
   "wheel_source": "volume_path",
   "sdp_meta_dependency": "__SET_ME__",
   "author": "dab-template-demo"

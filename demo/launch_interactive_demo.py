@@ -15,7 +15,7 @@ Use this for:
 
 The demo notebook handles everything else internally: UC schema/volume
 creation, data generation/download, dataflowspec onboarding, and pipeline
-creation (all 3 pipelines run on serverless). This launcher just wires up
+creation (all pipelines run on serverless). This launcher just wires up
 the widgets and watches the run.
 
 Three ways to install sdp-meta in the demo job
@@ -102,6 +102,7 @@ from databricks.labs.sdp_meta.identifiers import (  # noqa: E402
 
 DEMO_NOTEBOOK_SRC: Path = REPO_ROOT / "demo" / "SDP_META_INTERACTIVE_DEMO.py"
 DEMO_CONF_DIR: Path = REPO_ROOT / "demo" / "conf"
+DEMO_GOLD_MODELS_DIR: Path = REPO_ROOT / "demo" / "gold" / "models"
 
 # Files under ``demo/conf/`` excluded from the recursive co-upload.
 # Hidden files (``.DS_Store``, ``.gitkeep``) and editor backups don't
@@ -196,6 +197,34 @@ def _upload_demo_conf(ws: WorkspaceClient, repo_root_ws: str) -> None:
         )
         uploaded += 1
     print(f"Co-uploaded {uploaded} conf file(s) under {repo_root_ws}/demo/conf/")
+
+
+def _upload_demo_gold_models(ws: WorkspaceClient, repo_root_ws: str) -> None:
+    """Upload shared native SQL Gold models as workspace files."""
+    if not DEMO_GOLD_MODELS_DIR.is_dir():
+        raise SystemExit(
+            f"Gold model directory not found: {DEMO_GOLD_MODELS_DIR}"
+        )
+    model_files = sorted(DEMO_GOLD_MODELS_DIR.glob("*.sql"))
+    if not model_files:
+        raise SystemExit(
+            f"No Gold SQL models found under {DEMO_GOLD_MODELS_DIR}"
+        )
+    target_dir = f"{repo_root_ws}/demo/gold/models"
+    ws.workspace.mkdirs(target_dir)
+    for source in model_files:
+        target = f"{target_dir}/{source.name}"
+        print(f"Uploading {source.relative_to(REPO_ROOT)} to {target} ...")
+        ws.workspace.upload(
+            path=target,
+            content=source.read_bytes(),
+            format=ImportFormat.RAW,
+            overwrite=True,
+        )
+    print(
+        f"Co-uploaded {len(model_files)} Gold SQL model(s) under "
+        f"{target_dir}/"
+    )
 
 
 def _submit_demo_job(
@@ -455,6 +484,14 @@ def main() -> int:
              "Databricks Labs DQX dependency declared by the SDP-META wheel.",
     )
     parser.add_argument(
+        "--gold-enabled",
+        default="true",
+        choices=["true", "false"],
+        help="Run the separate native SDP SQL Gold stage (default: true). "
+             "This demonstrates interoperability over published Silver tables; "
+             "Gold is not onboarded into DataflowSpec.",
+    )
+    parser.add_argument(
         "--validate-counts",
         default="true",
         choices=["true", "false"],
@@ -480,7 +517,7 @@ def main() -> int:
         "--timeout-minutes",
         type=int,
         default=90,
-        help="Job-completion timeout. The demo runs 3+ pipelines "
+        help="Job-completion timeout. The demo runs multiple pipelines "
              "end-to-end on serverless; 90 minutes covers a cold "
              "workspace with margin. Bump for slower clouds/regions.",
     )
@@ -602,6 +639,7 @@ def main() -> int:
 
     _upload_demo_notebook(ws, target_notebook_path)
     _upload_demo_conf(ws, repo_root_ws)
+    _upload_demo_gold_models(ws, repo_root_ws)
 
     # ``base_parameters`` map 1:1 to the widgets defined at the top of
     # SDP_META_INTERACTIVE_DEMO.py. When a notebook task launches with
@@ -616,6 +654,7 @@ def main() -> int:
         "data_source": args.data_source,
         "onboarding_format": args.onboarding_format,
         "quality_engine": args.quality_engine,
+        "gold_enabled": args.gold_enabled,
         "install_source": install_source,
         "whl_file_path": whl_file_path,
         "pypi_version": args.pypi_version,

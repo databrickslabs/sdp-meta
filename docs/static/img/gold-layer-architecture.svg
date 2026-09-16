@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="330" viewBox="0 0 1400 330" role="img" aria-labelledby="title desc">
+  <title id="title">SDP-META Gold layer architecture</title>
+  <desc id="desc">Onboarding metadata creates Bronze and Silver DataflowSpecs. Metadata-driven pipelines publish Unity Catalog Silver tables, which a separate native SDP SQL pipeline transforms into Gold materialized views.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#64748b"/>
+    </marker>
+    <style>
+      .title { font: 700 24px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #111827; }
+      .label { font: 700 17px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #111827; }
+      .detail { font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #475569; }
+      .arrow-label { font: 600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #475569; }
+      .arrow { stroke: #64748b; stroke-width: 2.5; fill: none; marker-end: url(#arrow); }
+      .box { stroke-width: 2; rx: 12; }
+    </style>
+  </defs>
+
+  <rect width="1400" height="330" fill="#ffffff"/>
+  <text x="700" y="38" text-anchor="middle" class="title">Metadata-driven Bronze/Silver, native SQL Gold</text>
+
+  <rect x="30" y="105" width="210" height="115" class="box" fill="#eef2ff" stroke="#6366f1"/>
+  <text x="135" y="143" text-anchor="middle" class="label">Onboarding YAML/JSON</text>
+  <text x="135" y="173" text-anchor="middle" class="detail">Source definitions, quality,</text>
+  <text x="135" y="194" text-anchor="middle" class="detail">CDC and target metadata</text>
+
+  <rect x="285" y="105" width="210" height="115" class="box" fill="#f5f3ff" stroke="#8b5cf6"/>
+  <text x="390" y="143" text-anchor="middle" class="label">DataflowSpec</text>
+  <text x="390" y="173" text-anchor="middle" class="detail">Bronze and Silver</text>
+  <text x="390" y="194" text-anchor="middle" class="detail">processing contract</text>
+
+  <rect x="540" y="105" width="225" height="115" class="box" fill="#ecfeff" stroke="#0891b2"/>
+  <text x="652" y="143" text-anchor="middle" class="label">Bronze/Silver pipelines</text>
+  <text x="652" y="173" text-anchor="middle" class="detail">Generic metadata-driven</text>
+  <text x="652" y="194" text-anchor="middle" class="detail">SDP runtime</text>
+
+  <rect x="810" y="105" width="225" height="115" class="box" fill="#ecfdf5" stroke="#059669"/>
+  <text x="922" y="143" text-anchor="middle" class="label">UC Silver tables</text>
+  <text x="922" y="173" text-anchor="middle" class="detail">Stable governed</text>
+  <text x="922" y="194" text-anchor="middle" class="detail">interface for Gold</text>
+
+  <rect x="1080" y="105" width="290" height="115" class="box" fill="#fff7ed" stroke="#ea580c"/>
+  <text x="1225" y="140" text-anchor="middle" class="label">Native SDP SQL Gold pipeline</text>
+  <text x="1225" y="170" text-anchor="middle" class="detail">SQL dependency graph publishes</text>
+  <text x="1225" y="191" text-anchor="middle" class="detail">Gold materialized views</text>
+
+  <path d="M240 162 H280" class="arrow"/>
+  <path d="M495 162 H535" class="arrow"/>
+  <path d="M765 162 H805" class="arrow"/>
+  <path d="M1035 162 H1075" class="arrow"/>
+
+  <text x="1055" y="253" text-anchor="middle" class="arrow-label">Bundle workflow dependency: Gold starts only after Silver succeeds</text>
+  <path d="M922 226 V275 H1225 V226" class="arrow"/>
+
+  <text x="700" y="313" text-anchor="middle" class="detail">No Gold DataflowSpec or Python Gold runtime&#8212;the published Silver table is the integration contract.</text>
+</svg>

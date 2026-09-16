@@ -2,7 +2,8 @@
 
 End-to-end showcase of the **new** sdp-meta DAB-template features
 (`bundle-init`, `bundle-prepare-wheel`, `bundle-add-flow`, the four
-`recipes/*.py`, `bundle-validate`, and `pipeline_mode` split vs combined)
+`recipes/*.py`, `bundle-validate`, `pipeline_mode` split vs combined, and the
+optional native SDP SQL Gold pipeline)
 against the source shapes the existing `demo/` directory already covers in
 template form: **cloudFiles**, **Kafka**, **Event Hubs**, and **Delta**.
 
@@ -15,9 +16,11 @@ talk to Databricks.
 
 | Feature added in the DAB work | Where it shows up in the demo |
 |---|---|
-| `bundle-init` (12-prompt template) | STAGE 1, one bundle per scenario, pre-answered via `answers/<scenario>.json` |
+| `bundle-init` | STAGE 1, one bundle per scenario, with every template prompt pre-answered via `answers/<scenario>.json` |
 | `pipeline_mode = split` | `cloudfiles` and `delta` scenarios -> TWO SDP Pipelines (`bronze` + `silver`, silver depends_on bronze) |
 | `pipeline_mode = combined` | `cloudfiles_combined` and `eventhub` scenarios -> ONE SDP Pipeline (`bronze_silver`) materializing both layers in a single DAG |
+| `gold_enabled = true` | `gold` scenario -> Bronze and Silver pipelines followed by a native SDP SQL Gold pipeline |
+| Gold-to-Gold dependency | `demo/gold/models/high_value_customers.sql` reads the unqualified `customer_360` materialized view; SDP derives execution order |
 | `layer = bronze` only | `kafka` scenario |
 | `source_format = cloudFiles` | `cloudfiles` (split) and `cloudfiles_combined` (combined) — same demo data, different topology |
 | `source_format = kafka` | `kafka` scenario |
@@ -45,6 +48,7 @@ demo/
     ├── answers/
     │   ├── cloudfiles_split.json    # bronze_silver, SPLIT,    cloudFiles, yaml
     │   ├── cloudfiles_combined.json # bronze_silver, COMBINED, cloudFiles, yaml (same data as split)
+    │   ├── cloudfiles_gold.json     # bronze_silver split + native SQL Gold pipeline
     │   ├── kafka_bronze.json        # bronze,        n/a,      kafka,      json
     │   ├── eventhub_combined.json   # bronze_silver, COMBINED, eventhub,   yaml
     │   └── delta_split.json         # bronze_silver, SPLIT,    delta,      yaml
@@ -56,6 +60,12 @@ demo/
     └── topics/
         ├── kafka_topics.txt        # 10 topics for from_topics.py
         └── eventhub_topics.txt     # 5 names for from_topics.py
+
+demo/gold/models/                  # shared runnable SQL used by DAB + interactive demos
+├── customer_360.sql
+├── high_value_customers.sql
+├── product_performance.sql
+└── store_performance.sql
 ```
 
 ### Pipeline mode: `split` vs `combined`
@@ -79,6 +89,7 @@ hand-editing answers:
 |---|---|---|---|---|
 | `cloudfiles` | `bronze_silver` | **`split`** | cloudFiles | Real CSVs uploaded to UC volume |
 | `cloudfiles_combined` | `bronze_silver` | **`combined`** | cloudFiles | Same as above |
+| `gold` | `bronze_silver` | **`split` + Gold** | cloudFiles | Customers, transactions, products, and stores |
 | `kafka` | `bronze` | n/a | Kafka | Placeholder topics |
 | `eventhub` | `bronze_silver` | **`combined`** | Event Hubs | Placeholder topics |
 | `delta` | `bronze_silver` | **`split`** | Delta tables | Mirrors `<catalog>.staging.*` |
@@ -170,9 +181,10 @@ python demo/launch_dab_template_demo.py \
 
 This:
 
-1. Scaffolds five bundles under `demo_runs/`:
+1. Scaffolds six bundles under `demo_runs/`:
    - `dab_demo_cloudfiles_split/`        — `pipeline_mode=split`, cloudFiles
    - `dab_demo_cloudfiles_combined/`     — `pipeline_mode=combined`, cloudFiles (same data)
+   - `dab_demo_cloudfiles_gold/`         — split Bronze/Silver plus native SDP SQL Gold
    - `dab_demo_kafka_bronze/`            — `layer=bronze`, kafka
    - `dab_demo_eventhub_combined/`       — `pipeline_mode=combined`, eventhub
    - `dab_demo_delta_split/`             — `pipeline_mode=split`, delta
@@ -191,10 +203,56 @@ Pick one scenario with:
 ```bash
 python demo/launch_dab_template_demo.py --scenario cloudfiles          --uc-catalog-name main
 python demo/launch_dab_template_demo.py --scenario cloudfiles_combined --uc-catalog-name main
+python demo/launch_dab_template_demo.py --scenario gold                --uc-catalog-name main
 python demo/launch_dab_template_demo.py --scenario kafka               --uc-catalog-name main
 python demo/launch_dab_template_demo.py --scenario eventhub            --uc-catalog-name main
 python demo/launch_dab_template_demo.py --scenario delta               --uc-catalog-name main
 ```
+
+## Gold feature walkthrough
+
+Run the Gold scenario offline first:
+
+```bash
+python demo/launch_dab_template_demo.py \
+  --scenario gold \
+  --uc-catalog-name main
+```
+
+STAGE 5 validates and prints:
+
+```text
+Silver task -> gold task
+gold/models/customer_360.sql
+gold/models/high_value_customers.sql
+gold/models/product_performance.sql
+gold/models/store_performance.sql
+pipeline glob: ../${var.gold_models_path}/**
+```
+
+The models derive customer, product, and store metrics from all four shipped
+Silver retail tables. `high_value_customers` reads `customer_360` by its
+unqualified Gold name, demonstrating that SDP derives Gold-to-Gold ordering
+from SQL rather than file order. The launcher copies the canonical runnable
+models from `demo/gold/models/` into the rendered bundle.
+
+To deploy the complete graph:
+
+```bash
+python demo/launch_dab_template_demo.py \
+  --scenario gold \
+  --uc-catalog-name <catalog> \
+  --uc-schema sdp_meta_dab_demo \
+  --uc-volume sdp_meta_wheels \
+  --apply-prepare-wheel \
+  --apply-deploy \
+  --profile <profile>
+```
+
+The launcher uploads the real CSV inputs, creates the required schemas,
+deploys three pipelines (`bronze`, `silver`, and `gold`), runs onboarding,
+then runs the workflow in dependency order. Gold outputs are published under
+`<catalog>.sdp_meta_dab_demo_gold`.
 
 ## Apply mode — actually upload the wheel and deploy
 
@@ -257,7 +315,7 @@ the same UC location.
 
 ## How this re-uses the existing demo assets
 
-The four scenarios mirror the source shapes already covered by
+The scenarios cover four source shapes already represented by
 `demo/conf/{json,yml}/`, plus a Delta upstream variant:
 
 | Existing template (`demo/conf/...`) | New CSV in this demo (`flows/...`) |
@@ -293,6 +351,7 @@ contains:
 │   ├── sdp_meta_onboarding_job.yml
 │   └── sdp_meta_pipelines.yml     # split or combined per scenario
 ├── notebooks/init_sdp_meta_pipeline.py
+├── gold/models/                    # Gold scenario only: four native SDP SQL models
 ├── recipes/                       # the four runnable recipes
 │   ├── README.md
 │   ├── from_uc.py
@@ -339,7 +398,7 @@ cd demo_runs/dab_demo_cloudfiles_combined
 databricks bundle run bronze_silver --target dev --profile <profile>
 ```
 
-For the split scenarios (`cloudfiles`, `kafka`, `eventhub`, `delta`) the
+For split scenarios (`cloudfiles`, `gold`, and `delta`) the
 resources are named `bronze` and `silver`:
 
 ```bash
@@ -355,6 +414,7 @@ The mapping `scenario -> pipeline resources` matches the table in
 |---|---|
 | `cloudfiles` | `bronze`, `silver`, `pipelines` (wrapper job) |
 | `cloudfiles_combined` | `bronze_silver`, `pipelines` (wrapper job) |
+| `gold` | `bronze`, `silver`, `gold`, `pipelines` (wrapper job) |
 | `kafka` | `bronze`, `pipelines` (wrapper job) |
 | `eventhub` | `bronze_silver`, `pipelines` (wrapper job) |
 | `delta` | `bronze`, `silver`, `pipelines` (wrapper job) |

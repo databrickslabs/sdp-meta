@@ -128,6 +128,26 @@ resources:
         silver.group: ${var.dataflow_group}
         sdp_meta_dependency: ${var.sdp_meta_dependency}
 {{- end}}
+{{- if .gold_enabled}}
+    gold:
+      name: "${bundle.name} - gold"
+      catalog: ${var.uc_catalog_name}
+      schema: ${var.gold_target_schema}
+      development: ${var.development_enabled}
+      photon: ${var.photon_enabled}
+      serverless: ${var.serverless}
+      # This resource file is under resources/, so .. is the bundle root.
+      root_path: ..
+      libraries:
+        - glob:
+            include: ../${var.gold_models_path}/**
+      configuration:
+        silver_catalog: ${var.uc_catalog_name}
+        silver_schema: ${var.silver_target_schema}
+      tags:
+        sdp_meta: ${var.sdp_meta_version}
+        sdp_meta_layer: gold
+{{- end}}
 
   jobs:
     pipelines:
@@ -225,6 +245,20 @@ resources:
           depends_on:
             - task_key: bronze
 {{- end}}
+{{- end}}
+{{- if .gold_enabled}}
+        # Incremental materialized-view refresh requires serverless compute and
+        # compatible Silver Delta change tracking (for example, row tracking or CDF).
+        - task_key: gold
+          depends_on:
+{{- if and (eq .layer "bronze_silver") (eq .pipeline_mode "combined")}}
+            - task_key: bronze_silver
+{{- else}}
+            - task_key: silver
+{{- end}}
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.gold.id}
+            full_refresh: false
 {{- end}}
 {{- if .managed_quality_migrations}}
       environments:

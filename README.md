@@ -20,13 +20,13 @@
 
 ## Project Overview
 
-`SDP-META` is a metadata-driven framework for [Lakeflow Spark Declarative Pipelines](https://www.databricks.com/product/data-engineering/spark-declarative-pipelines). Define your Bronze and Silver pipelines in a JSON or YAML onboarding file — a single generic Declarative Pipeline reads the resulting DataflowSpec at runtime and builds the full processing graph automatically. No pipeline code to write.
+`SDP-META` is a metadata-driven framework for [Lakeflow Spark Declarative Pipelines](https://www.databricks.com/product/data-engineering/spark-declarative-pipelines). Define your Bronze and Silver pipelines in a JSON or YAML onboarding file — a single generic Declarative Pipeline reads the resulting DataflowSpec at runtime and builds the full processing graph automatically. Generated DABs can optionally chain a separate native SDP SQL Gold pipeline for business models.
 
 > 📺 **New to SDP-META?** Watch the [SDP-Meta Deep-Dive: Building Data Pipelines at Scale on Databricks](https://youtu.be/Z0CYboIzp9M) — a video walkthrough of the framework with a Demo.
 
-**Who it's for:** platform and data engineering teams standardizing repeatable Bronze/Silver pipelines across many datasets — onboarding new feeds through metadata instead of new pipeline code, with consistent data quality, quarantine, CDC, clustering, and sink patterns available through Bundles, CLI, UI, MCP, and agent workflows.
+**Who it's for:** platform and data engineering teams standardizing repeatable Bronze/Silver pipelines across many datasets — onboarding new feeds through metadata instead of new pipeline code, with consistent data quality, quarantine, CDC, clustering, and sink patterns available through Bundles, CLI, UI, MCP, and agent workflows. DAB users can extend those published Silver tables with native SDP SQL Gold models.
 
-**When it's not the best fit:** one or two simple pipelines, Gold-layer business modeling, tables that each need unique application logic, a managed connector and downstream logic that already satisfy the complete Bronze/Silver requirement, or a need for a formal support SLA (SDP-META is a Databricks Labs project). See the [Introduction](https://databrickslabs.github.io/sdp-meta/docs/intro) for the full positioning.
+**When it's not the best fit:** one or two simple pipelines, teams seeking metadata-driven Gold onboarding (Gold uses native SDP SQL rather than DataflowSpec), tables that each need unique application logic, a managed connector and downstream logic that already satisfy the complete Bronze/Silver requirement, or a need for a formal support SLA (SDP-META is a Databricks Labs project). See the [Introduction](https://databrickslabs.github.io/sdp-meta/docs/intro) for the full positioning.
 
 ### Components
 
@@ -71,12 +71,13 @@
 | [`append_flow`](https://docs.databricks.com/aws/en/ldp/developer/ldp-python-ref-append-flow) — via `bronze_append_flows` | Bronze |
 | [`create_sink`](https://docs.databricks.com/aws/en/ldp/developer/ldp-python-ref-sink) — Delta and Kafka sinks | Bronze, Silver |
 | Row filters | Bronze, Silver |
+| Optional native SDP SQL business models in generated DABs | Gold |
 
 ### Deployment & Tooling
 
 | Tool | Description |
 |---|---|
-| [Declarative Automation Bundles](https://docs.databricks.com/aws/en/dev-tools/bundles/) | Git-tracked pipelines, `dev`/`prod` targets, CI/CD-ready. Commands: `bundle-init`, `bundle-prepare-wheel`, `bundle-add-flow`, `bundle-validate`. See [`DAB_README.md`](DAB_README.md). |
+| [Declarative Automation Bundles](https://docs.databricks.com/aws/en/dev-tools/bundles/) | Git-tracked pipelines, `dev`/`prod` targets, CI/CD-ready. Commands: `bundle-init`, `bundle-prepare-wheel`, `bundle-add-flow`, `bundle-add-gold`, `bundle-validate`. See [`DAB_README.md`](DAB_README.md). |
 | [SDP-META CLI](https://databrickslabs.github.io/sdp-meta/docs/getting-started/cli) | `databricks labs sdp-meta onboard` · `deploy` · `bundle-*` |
 | [SDP-META App](https://databrickslabs.github.io/sdp-meta/docs/getting-started/app) | Browser-based UI for onboarding, deployment, and pipeline monitoring |
 | [MCP Server](https://databrickslabs.github.io/sdp-meta/docs/getting-started/mcp) | AI-assisted pipeline scaffolding via MCP-capable AI tools (Claude Code, Cursor, Claude Desktop, and others) |

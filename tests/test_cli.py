@@ -2495,7 +2495,7 @@ class CliCommandWiringTests(unittest.TestCase):
         )
 
     def test_bundle_commands_are_wired_end_to_end(self):
-        """Belt-and-suspenders: each of the four bundle-* commands is
+        """Belt-and-suspenders: each bundle-* command is
         explicitly named here so the failure message is unambiguous if
         somebody deletes one side of the wiring during cleanup."""
         mapping = self._mapping_keys()
@@ -2505,6 +2505,7 @@ class CliCommandWiringTests(unittest.TestCase):
             "bundle-prepare-wheel",
             "bundle-validate",
             "bundle-add-flow",
+            "bundle-add-gold",
         ):
             self.assertIn(cmd, mapping, f"{cmd!r} missing from cli.MAPPING")
             self.assertIn(cmd, labs_yml_cmds, f"{cmd!r} missing from labs.yml")

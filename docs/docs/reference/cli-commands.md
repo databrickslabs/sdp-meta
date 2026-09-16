@@ -22,6 +22,7 @@ All SDP-META operations are available through the Databricks Labs CLI extension.
 | `bundle-init` | Scaffold a new DAB bundle (`--quickstart` for zero-prompt fast path) |
 | `bundle-prepare-wheel` | Build and upload the sdp-meta wheel to a UC Volume |
 | `bundle-add-flow` | Add a new flow to an existing bundle from UC, Volumes, Kafka topics, or CSV inventory |
+| `bundle-add-gold` | Idempotently add a native SDP SQL Gold pipeline to an existing Silver-bearing bundle |
 | `bundle-validate` | Validate bundle configuration (enforces `sdp_meta_dependency` is set) |
 | `mcp` | Start the MCP server (stdio transport) |
 
@@ -87,6 +88,21 @@ Adds a new data flow entry to an existing bundle's onboarding configuration from
 ```bash
 databricks labs sdp-meta bundle-add-flow
 ```
+
+## `bundle-add-gold`
+
+Adds Gold variables, a native SQL pipeline, and a workflow task that depends on
+Silver:
+
+```bash
+databricks labs sdp-meta bundle-add-gold --bundle-dir <bundle-path>
+```
+
+Gold consumes the Unity Catalog tables published by Silver; it does not create
+a `gold_dataflowspec` table. The command rejects Bronze-only bundles and
+prevalidates its edits before writing. It is safe to run again. Add at least one
+Silver-compatible `.sql` model before running `bundle-validate`; the command
+does not generate domain-specific business SQL.
 
 ## `bundle-validate`
 
