@@ -486,6 +486,26 @@ class DetectEnvSuffixesTests(unittest.TestCase):
 
 
 class QualityConfigurationPreflightTests(unittest.TestCase):
+    def test_plugin_requires_configured_remote_dependency(self):
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"SDP_META_QUALITY_ENGINE_DEPENDENCY": ""},
+            ),
+            mock.patch(
+                "services.onboarding.quality_preflight."
+                "deployable_quality_engines",
+                return_value=("lakeflow", "dqx"),
+            ) as deployable,
+        ):
+            with self.assertRaisesRegex(Exception, "must be one of"):
+                app_mod._verify_quality_configuration([{
+                    "data_flow_id": "100",
+                    "bronze_quality_engine": "synthetic",
+                }], "demo")
+
+        deployable.assert_called_once_with("")
+
     def test_accepts_complete_lakeflow_configuration(self):
         app_mod._verify_quality_configuration([{
             "data_flow_id": "100",

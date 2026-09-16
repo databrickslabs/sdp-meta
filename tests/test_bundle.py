@@ -786,6 +786,13 @@ class QuickstartConfigFileTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "layer"):
                 write_quickstart_config_file(tmp, overrides={"layer": "platinum"})
 
+    def test_overrides_reject_plugin_not_supported_by_template(self):
+        with _tempdir() as tmp:
+            with self.assertRaisesRegex(ValueError, "quality_engine"):
+                write_quickstart_config_file(
+                    tmp, overrides={"quality_engine": "synthetic"}
+                )
+
     def test_overrides_reject_invalid_source_format(self):
         with _tempdir() as tmp:
             with self.assertRaises(ValueError):
@@ -1451,6 +1458,23 @@ class EndToEndRenderTests(unittest.TestCase):
             self.assertEqual(
                 task["python_wheel_task"]["entry_point"],
                 "quality_migrate",
+            )
+            self.assertEqual(
+                task["python_wheel_task"]["named_parameters"][
+                    "timeout_seconds"
+                ],
+                "${var.quality_migration_timeout_seconds}",
+            )
+            self.assertEqual(
+                task["timeout_seconds"],
+                "${var.quality_migration_timeout_seconds}",
+            )
+            variables = yaml.safe_load(
+                (rendered / "resources" / "variables.yml").read_text()
+            )["variables"]
+            self.assertEqual(
+                variables["quality_migration_timeout_seconds"]["default"],
+                10800,
             )
             self.assertIn("environments", runner)
 

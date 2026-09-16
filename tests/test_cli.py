@@ -1,5 +1,6 @@
 import unittest
 import os
+from dataclasses import replace
 from unittest.mock import MagicMock, patch, mock_open
 import json
 from databricks.sdk.service.catalog import VolumeType
@@ -105,15 +106,38 @@ class CliTests(unittest.TestCase):
         waiter = mock_ws.jobs.submit.return_value
         waiter.result.return_value = MagicMock(run_id="run_id")
         sdp_meta = SDPMeta(mock_ws)
+        cmd = replace(
+            self.deploy_cmd,
+            quality_migration_timeout_seconds=7200,
+        )
 
         result = sdp_meta._run_managed_quality_update_job(
-            self.deploy_cmd, "pipeline_id"
+            cmd, "pipeline_id"
         )
 
         mock_ws.jobs.submit.assert_called_once()
         mock_ws.jobs.create.assert_not_called()
         waiter.result.assert_called_once()
+        task = mock_ws.jobs.submit.call_args.kwargs["tasks"][0]
+        self.assertEqual(task.timeout_seconds, 7200)
+        self.assertEqual(
+            task.python_wheel_task.named_parameters["timeout_seconds"],
+            "7200",
+        )
+        self.assertEqual(
+            waiter.result.call_args.kwargs["timeout"].total_seconds(),
+            8100,
+        )
         self.assertEqual(result.run_id, "run_id")
+
+    def test_managed_quality_update_rejects_nonpositive_timeout(self):
+        with self.assertRaisesRegex(
+            ValueError, "quality_migration_timeout_seconds"
+        ):
+            replace(
+                self.deploy_cmd,
+                quality_migration_timeout_seconds=0,
+            )
 
     def test_non_uc_managed_quality_update_uses_classic_path_job(self):
         mock_ws = MagicMock()
@@ -2873,6 +2897,37 @@ class DeployBuildWheelFlagTests(unittest.TestCase):
         kwargs.update(overrides)
         return DeployCommand(**kwargs)
 
+    def test_deploy_sets_quality_migration_timeout_from_flag(self):
+        from databricks.labs.sdp_meta.cli import deploy as cli_deploy
+
+        sdp_meta = MagicMock()
+        cmd = self._deploy_cmd()
+        sdp_meta._load_deploy_config.return_value = cmd
+        with patch(
+            "databricks.labs.sdp_meta.cli."
+            "_read_dependency_from_onboarding_json",
+            return_value=None,
+        ):
+            cli_deploy(
+                sdp_meta,
+                flags={"quality-migration-timeout-seconds": "3600"},
+            )
+
+        self.assertEqual(cmd.quality_migration_timeout_seconds, 3600)
+        sdp_meta.deploy.assert_called_once_with(cmd)
+
+    def test_deploy_rejects_invalid_quality_migration_timeout_flag(self):
+        from databricks.labs.sdp_meta.cli import deploy as cli_deploy
+
+        sdp_meta = MagicMock()
+        sdp_meta._load_deploy_config.return_value = self._deploy_cmd()
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            cli_deploy(
+                sdp_meta,
+                flags={"quality-migration-timeout-seconds": "never"},
+            )
+        sdp_meta.deploy.assert_not_called()
+
     def test_deploy_whl_file_path_sets_dependency_without_building(self):
         from databricks.labs.sdp_meta.cli import deploy as cli_deploy
 
@@ -3362,6 +3417,7 @@ class LabsYmlFlagDeclarationTests(unittest.TestCase):
         flags = self._flags_for("deploy")
         self.assertIsNotNone(flags, "deploy missing from labs.yml")
         for flag in (
+            "quality-migration-timeout-seconds",
             "build-and-upload-whl",
             "whl-file-path",
             "git-branch",

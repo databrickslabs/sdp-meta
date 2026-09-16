@@ -49,6 +49,11 @@ databricks labs sdp-meta deploy
 
 Prompts for: layer, pipeline group, dataflowspec table names, catalog/schema, and cluster configuration. After completion, prints and opens the pipeline URL.
 
+Managed quality migrations accept
+`--quality-migration-timeout-seconds` (default: `10800`). The timeout is one
+shared budget for the selective quarantine refresh and the normal pipeline
+update.
+
 ## `bundle-init`
 
 Scaffolds a new Databricks Asset Bundle (DAB) configured for SDP-META.

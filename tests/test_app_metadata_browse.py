@@ -18,6 +18,7 @@ import json
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _APP_DIR = os.path.join(_REPO_ROOT, "databricks_app")
@@ -71,6 +72,27 @@ class QualitySpecEditorValidationTests(unittest.TestCase):
         })
         self.assertTrue(
             any("cannot combine" in error for error in body["errors"])
+        )
+
+    def test_plugin_requires_configured_remote_dependency(self):
+        with (
+            patch.dict(
+                os.environ,
+                {"SDP_META_QUALITY_ENGINE_DEPENDENCY": ""},
+            ),
+            patch(
+                "routes.spec_editor.deployable_quality_engines",
+                return_value=("lakeflow", "dqx"),
+            ) as deployable,
+        ):
+            body = self._parse({
+                "data_flow_id": "100",
+                "bronze_quality_engine": "synthetic",
+            })
+
+        deployable.assert_called_once_with("")
+        self.assertTrue(
+            any("must be one of" in error for error in body["errors"])
         )
 
 

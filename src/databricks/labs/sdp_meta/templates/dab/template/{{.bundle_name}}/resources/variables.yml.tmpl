@@ -35,6 +35,12 @@ variables:
       pipeline `configuration` as `bronze.group` / `silver.group`.
     default: {{.dataflow_group}}
 
+  quality_migration_timeout_seconds:
+    description: |
+      Total time budget shared by the selective quarantine refresh and the
+      subsequent full pipeline update.
+    default: 10800
+
   onboarding_file_name:
     description: Filename (inside conf/) of the onboarding file uploaded with this bundle.
     default: onboarding.{{if eq .onboarding_file_format "yaml"}}yml{{else}}json{{end}}

@@ -123,6 +123,12 @@ def find_pending_migrations(spark, spec_tables, groups=None):
         group = groups.get(layer)
         if group:
             frame = frame.filter(f.col("dataFlowGroup") == group)
+        else:
+            raise ValueError(
+                f"No dataflow group scope was provided for {layer} spec "
+                f"table {table_name!r}; refusing to scan migrations across "
+                "all groups"
+            )
         for row in frame.select(
             "dataFlowId", "qualityConfig", "quarantineTargetDetails"
         ).where(f.col("qualityConfig").isNotNull()).collect():
@@ -211,6 +217,7 @@ def run_managed_quality_update(
     timeout_seconds=7200,
 ):
     """Apply selective quarantine migrations, then run the full graph."""
+    deadline = time.monotonic() + timeout_seconds
     pending = find_pending_migrations(
         spark, spec_tables=spec_tables, groups=groups
     )
@@ -222,11 +229,15 @@ def run_managed_quality_update(
     ) and not getattr(pipeline_spec, "target", None)
 
     def run_update(**selection):
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"Timed out before starting the next update for pipeline "
+                f"{pipeline_id}"
+            )
         response = ws.pipelines.start_update(
             pipeline_id=pipeline_id, **selection
         )
         update_id = response.update_id
-        deadline = time.monotonic() + timeout_seconds
         while True:
             update = ws.pipelines.get_update(
                 pipeline_id=pipeline_id, update_id=update_id

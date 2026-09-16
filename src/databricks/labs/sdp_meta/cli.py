@@ -29,6 +29,8 @@ from databricks.labs.sdp_meta.install import WorkspaceInstaller
 
 logger = logging.getLogger('databricks.labs.sdp_meta')
 
+_MANAGED_QUALITY_MIGRATION_WAITER_GRACE = timedelta(minutes=15)
+
 
 def _maybe_open_url(url: str) -> None:
     """Best-effort browser launch — safe in tests, CI, and headless contexts.
@@ -410,8 +412,13 @@ class DeployCommand:
     sdp_meta_dependency: str = None
     quality_engine_dependency: str = None
     quality_migration_layers: List[str] = None
+    quality_migration_timeout_seconds: int = 10800
 
     def __post_init__(self):
+        if self.quality_migration_timeout_seconds <= 0:
+            raise ValueError(
+                "quality_migration_timeout_seconds must be greater than zero"
+            )
         if self.uc_enabled and not self.uc_catalog_name:
             raise ValueError("uc_catalog_name is required")
         if not self.serverless and not self.num_workers:
@@ -946,6 +953,9 @@ class SDPMeta:
     def _run_managed_quality_update_job(
         self, cmd: DeployCommand, pipeline_id: str
     ):
+        timeout = timedelta(
+            seconds=cmd.quality_migration_timeout_seconds
+        )
         dependency = (
             cmd.sdp_meta_dependency
             or f"databricks-labs-sdp-meta=={self.version}"
@@ -999,6 +1009,7 @@ class SDPMeta:
             tasks=[
                 jobs.Task(
                     task_key="quality_migrate",
+                    timeout_seconds=cmd.quality_migration_timeout_seconds,
                     python_wheel_task=jobs.PythonWheelTask(
                         package_name="databricks_labs_sdp_meta",
                         entry_point="quality_migrate",
@@ -1006,6 +1017,9 @@ class SDPMeta:
                             "pipeline_id": pipeline_id,
                             "spec_tables": json.dumps(spec_tables),
                             "groups": json.dumps(groups),
+                            "timeout_seconds": str(
+                                cmd.quality_migration_timeout_seconds
+                            ),
                         },
                     ),
                     **task_kwargs,
@@ -1013,7 +1027,9 @@ class SDPMeta:
             ],
             environments=environments,
         )
-        return submitted.result(timeout=timedelta(hours=3))
+        return submitted.result(
+            timeout=timeout + _MANAGED_QUALITY_MIGRATION_WAITER_GRACE
+        )
 
     def deploy(self, cmd: DeployCommand):
         pipeline_id = self._create_sdp_meta_pipeline(cmd)
@@ -1572,6 +1588,25 @@ def deploy(sdp_meta: SDPMeta, flags: dict = None):
     logger.info("Please answer a couple of questions to for launching SDP META deployment job")
     flags = flags or {}
     cmd = sdp_meta._load_deploy_config()
+    timeout_raw = _flag_value(
+        flags,
+        "quality-migration-timeout-seconds",
+        "quality_migration_timeout_seconds",
+    )
+    if timeout_raw is not None:
+        try:
+            timeout_seconds = int(timeout_raw)
+        except (TypeError, ValueError) as err:
+            raise ValueError(
+                "--quality-migration-timeout-seconds must be a positive "
+                "integer"
+            ) from err
+        if timeout_seconds <= 0:
+            raise ValueError(
+                "--quality-migration-timeout-seconds must be a positive "
+                "integer"
+            )
+        cmd.quality_migration_timeout_seconds = timeout_seconds
     # Resolution order for the SDP runner notebook's `%pip install` target:
     #   1. --whl-file-path=...                         (explicit override)
     #   2. --build-and-upload-whl=true                  (build+upload now)

@@ -38,6 +38,9 @@ from databricks.labs.sdp_meta.identifiers import (
 from databricks.labs.sdp_meta.quality.onboarding_preflight import (
     collect_quality_configuration_errors,
 )
+from databricks.labs.sdp_meta.quality.registry import (
+    available_quality_engines,
+)
 
 logger = logging.getLogger("databricks.labs.sdp_meta")
 
@@ -608,7 +611,7 @@ def _sdp_meta_sanity_checks(bundle_dir: Path) -> List[str]:
                         onboarding_doc,
                         env=None,
                         uc_enabled=True,
-                        supported_engines=("lakeflow", "dqx"),
+                        supported_engines=available_quality_engines(),
                     )
                     errors.extend(
                         f"{rel}: {message}" for message in quality_errors

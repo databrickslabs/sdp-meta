@@ -44,6 +44,13 @@ def available_quality_engines():
     )
 
 
+def deployable_quality_engines(plugin_dependency=None):
+    """Return engines that an App-launched remote job can install."""
+    if not plugin_dependency:
+        return ("lakeflow", "dqx")
+    return available_quality_engines()
+
+
 def _instantiate(target, spark):
     if inspect.isclass(target):
         return target(spark)
