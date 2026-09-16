@@ -1,6 +1,7 @@
 """DataflowPipeline provide generic code using dataflowspec."""
 import json
 import logging
+from functools import wraps
 from typing import Callable, Optional
 import ast
 from pyspark import pipelines as dp
@@ -253,22 +254,31 @@ class DataflowPipeline:
                     json.loads(flow_schema) if flow_schema else None
                 )
                 if append_flow.source_format == "cloudFiles":
-                    dp.temporary_view(pipeline_reader.read_dlt_cloud_files,
-                                      name=f"{append_flow.name}_view",
-                                      comment=f"append flow input dataset view for {append_flow.name}_view"
-                                      )
+                    reader = pipeline_reader.read_dlt_cloud_files
                 elif append_flow.source_format == "delta":
-                    dp.temporary_view(pipeline_reader.read_dlt_delta,
-                                      name=f"{append_flow.name}_view",
-                                      comment=f"append flow input dataset view for {append_flow.name}_view"
-                                      )
+                    reader = pipeline_reader.read_dlt_delta
                 elif append_flow.source_format == "eventhub" or append_flow.source_format == "kafka":
-                    dp.temporary_view(pipeline_reader.read_kafka,
-                                      name=f"{append_flow.name}_view",
-                                      comment=f"append flow input dataset view for {append_flow.name}_view"
-                                      )
+                    reader = pipeline_reader.read_kafka
+                else:
+                    continue
+                dp.temporary_view(
+                    self._append_flow_view_factory(reader),
+                    name=f"{append_flow.name}_view",
+                    comment=(
+                        f"append flow input dataset view for "
+                        f"{append_flow.name}_view"
+                    ),
+                )
         else:
             raise Exception(f"Append Flows not found for dataflowSpec={self.dataflowSpec}")
+
+    def _append_flow_view_factory(self, reader):
+        """Apply the parent flow's custom transform to an append source."""
+        @wraps(reader)
+        def transformed_reader():
+            return self.apply_custom_transform_fun(reader())
+
+        return transformed_reader
 
     def read_cdc_flows(self):
         """Create a DLT temporary view per CDC flow (issue #294).

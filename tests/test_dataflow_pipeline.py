@@ -1198,6 +1198,46 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
         with self.assertRaises(Exception):
             pipeline = DataflowPipeline(self.spark, bronze_dataflowSpec_df, view_name, None)
 
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_read_append_flows_applies_custom_transform(self, mock_dlt):
+        captured = {}
+        mock_dlt.temporary_view.side_effect = (
+            lambda view_factory, **kwargs: captured.setdefault(
+                kwargs["name"], view_factory
+            )
+        )
+        spec_map = copy.deepcopy(self.bronze_dataflow_spec_map)
+        spec_map["appendFlows"] = json.dumps([{
+            "name": "customers_append",
+            "create_streaming_table": False,
+            "source_format": "cloudFiles",
+            "source_details": {"path": "/tmp/customers_append"},
+        }])
+        spec = BronzeDataflowSpec(**spec_map)
+        transformed_df = MagicMock()
+        custom_transform = MagicMock(return_value=transformed_df)
+        pipeline = DataflowPipeline(
+            self.spark,
+            spec,
+            "customers_inputview",
+            custom_transform_func=custom_transform,
+        )
+        append_df = MagicMock()
+
+        def read_append_source():
+            return append_df
+
+        with patch(
+            "databricks.labs.sdp_meta.dataflow_pipeline.PipelineReaders"
+        ) as readers:
+            readers.return_value.read_dlt_cloud_files = read_append_source
+            pipeline.read_append_flows()
+
+        result = captured["customers_append_view"]()
+
+        custom_transform.assert_called_once_with(append_df, spec)
+        self.assertIs(result, transformed_df)
+
     def test_get_dq_expectations_with_expect_all(self):
         onboarding_params_map = copy.deepcopy(self.onboarding_bronze_silver_params_map)
         onboarding_params_map['onboarding_file_path'] = self.onboarding_type2_json_file

@@ -7,4 +7,15 @@ sdp_meta_whl = spark.conf.get("sdp_meta_whl")
 layer = spark.conf.get("layer", None)
 
 from databricks.labs.sdp_meta.dataflow_pipeline import DataflowPipeline
-DataflowPipeline.invoke_dlt_pipeline(spark, layer)
+from pyspark.sql.functions import current_timestamp
+
+
+def add_processing_timestamp(input_df, _dataflow_spec):
+    return input_df.withColumn("processing_ts", current_timestamp())
+
+
+DataflowPipeline.invoke_dlt_pipeline(
+    spark,
+    layer,
+    bronze_custom_transform_func=add_processing_timestamp,
+)
