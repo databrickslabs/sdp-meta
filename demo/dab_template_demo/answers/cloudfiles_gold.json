@@ -1,0 +1,21 @@
+{
+  "_comment": "Gold feature demo: split bronze+silver pipelines feed a native SDP SQL Gold pipeline. The launcher substitutes all schema placeholders and replaces the generated Gold examples with runnable models matching the shipped customer and transaction CSVs.",
+  "bundle_name": "dab_demo_cloudfiles_gold",
+  "uc_catalog_name": "{uc_catalog_name}",
+  "sdp_meta_schema": "{sdp_meta_schema}",
+  "bronze_target_schema": "{bronze_target_schema}",
+  "silver_target_schema": "{silver_target_schema}",
+  "gold_enabled": true,
+  "gold_target_schema": "{gold_target_schema}",
+  "gold_models_path": "gold/models",
+  "layer": "bronze_silver",
+  "pipeline_mode": "split",
+  "source_format": "cloudFiles",
+  "onboarding_file_format": "yaml",
+  "quality_engine": "none",
+  "managed_quality_migrations": false,
+  "dataflow_group": "dab_demo_gold_group",
+  "wheel_source": "volume_path",
+  "sdp_meta_dependency": "__SET_ME__",
+  "author": "dab-template-demo"
+}

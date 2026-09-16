@@ -49,6 +49,11 @@
   onboarding and pipeline environments.
 - Added managed selective quarantine full-refresh migrations with
   compare-and-swap completion fingerprints.
+- Added an optional native SDP SQL Gold layer to generated bundles, including
+  topology-aware workflow chaining, static model validation, and the
+  idempotent `bundle-add-gold` command for existing bundles.
+- Added a native SDP SQL Gold stage to the interactive retail demo, sharing
+  runnable customer, product, and store models with the DAB Gold scenario.
 
 ### Changed
 - DAB pipeline jobs use native `pipeline_task` entries by default; managed
@@ -56,6 +61,8 @@
   scaffold option.
 - Managed quality migrations support both UC spec tables and path-based
   Delta spec tables.
+- Interactive `bundle-init` now includes three optional Gold prompts:
+  `gold_enabled`, `gold_target_schema`, and `gold_models_path`.
 
 ## [v0.1.1]
 ### Added

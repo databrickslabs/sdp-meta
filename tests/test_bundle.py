@@ -34,6 +34,7 @@ from databricks.labs.sdp_meta.bundle import (
     QUICKSTART_BUNDLE_INIT_DEFAULTS,
     TEMPLATE_DIR,
     BundleAddFlowCommand,
+    BundleAddGoldCommand,
     BundleAddPipelineCommand,
     BundleInitCommand,
     BundlePrepareWheelCommand,
@@ -43,6 +44,7 @@ from databricks.labs.sdp_meta.bundle import (
     _effective_pipeline_resources,
     _effective_pipeline_tasks,
     _discover_bundle_dir,
+    _GOLD_PIPELINE_BLOCK,
     _pipeline_ownership_errors,
     _pipeline_ownership_errors_across_targets,
     _resolved_variable,
@@ -53,6 +55,7 @@ from databricks.labs.sdp_meta.bundle import (
     _stamp_sdp_meta_version,
     _transitive_dependencies,
     bundle_add_flow,
+    bundle_add_gold,
     bundle_add_pipeline,
     bundle_init,
     bundle_prepare_wheel,
@@ -79,6 +82,9 @@ class TemplateLayoutTests(unittest.TestCase):
             "sdp_meta_schema",
             "bronze_target_schema",
             "silver_target_schema",
+            "gold_enabled",
+            "gold_target_schema",
+            "gold_models_path",
             "layer",
             "pipeline_mode",
             "source_format",
@@ -193,6 +199,40 @@ class TemplateLayoutTests(unittest.TestCase):
         self.assertIn("package_name: databricks_labs_sdp_meta", job_tmpl)
         self.assertIn("entry_point: run", job_tmpl)
 
+    def test_add_gold_pipeline_block_matches_bundle_template(self):
+        pipeline_template = (
+            TEMPLATE_DIR
+            / "template"
+            / "{{.bundle_name}}"
+            / "resources"
+            / "sdp_meta_pipelines.yml.tmpl"
+        ).read_text()
+        match = re.search(
+            r"\{\{- if \.gold_enabled\}\}\n"
+            r"(?P<block>    gold:\n.*?\n)"
+            r"\{\{- end\}\}\n\n  jobs:",
+            pipeline_template,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        template_gold = yaml.safe_load(
+            "resources:\n  pipelines:\n" + match.group("block")
+        )["resources"]["pipelines"]["gold"]
+        command_gold = yaml.safe_load(
+            "resources:\n  pipelines:\n" + _GOLD_PIPELINE_BLOCK
+        )["resources"]["pipelines"]["gold"]
+        self.assertEqual(command_gold, template_gold)
+
+    def test_bundle_module_does_not_use_path_is_relative_to(self):
+        bundle_module = (
+            REPO_ROOT / "src" / "databricks" / "labs" / "sdp_meta" / "bundle.py"
+        ).read_text()
+        self.assertNotIn(
+            ".is_relative_to(",
+            bundle_module,
+            "Path.is_relative_to is unavailable at the declared Python 3.8 floor",
+        )
+
 
 class SanityChecksTests(unittest.TestCase):
     """Unit tests for `_sdp_meta_sanity_checks` with synthetic bundle trees."""
@@ -210,6 +250,7 @@ class SanityChecksTests(unittest.TestCase):
         with_bronze: bool = True,
         with_silver: bool = True,
         with_combined: bool = False,
+        gold_enabled: bool = False,
     ):
         """Create a minimal bundle tree on disk matching `layer` + pipeline flags."""
         self._write(tmp / "databricks.yml", "bundle: {name: t}\n")
@@ -219,6 +260,11 @@ class SanityChecksTests(unittest.TestCase):
                 "variables": {
                     "layer": {"default": layer},
                     "pipeline_mode": {"default": pipeline_mode},
+                    "uc_catalog_name": {"default": "main"},
+                    "silver_target_schema": {"default": "sdp_meta_silver"},
+                    "gold_enabled": {"default": gold_enabled},
+                    "gold_target_schema": {"default": "sdp_meta_gold"},
+                    "gold_models_path": {"default": "gold/models"},
                     "dataflow_group": {"default": "g"},
                     "onboarding_file_name": {"default": "onboarding.yml"},
                     "wheel_source": {"default": "pypi"},
@@ -230,13 +276,47 @@ class SanityChecksTests(unittest.TestCase):
             tmp / "conf" / "onboarding.yml",
             yaml.safe_dump([{"data_flow_id": "1", "data_flow_group": "g"}]),
         )
-        pipelines = {"resources": {"pipelines": {}}}
+        pipelines = {
+            "resources": {
+                "pipelines": {},
+                "jobs": {"pipelines": {"tasks": []}},
+            }
+        }
         if with_bronze:
             pipelines["resources"]["pipelines"]["bronze"] = {}
         if with_silver:
             pipelines["resources"]["pipelines"]["silver"] = {}
         if with_combined:
             pipelines["resources"]["pipelines"]["bronze_silver"] = {}
+        if gold_enabled:
+            pipelines["resources"]["pipelines"]["gold"] = {
+                "catalog": "${var.uc_catalog_name}",
+                "schema": "${var.gold_target_schema}",
+                "root_path": ".",
+                "libraries": [
+                    {"glob": {"include": "../${var.gold_models_path}/**"}}
+                ],
+                "configuration": {
+                    "silver_catalog": "${var.uc_catalog_name}",
+                    "silver_schema": "${var.silver_target_schema}",
+                },
+            }
+            upstream = (
+                "bronze_silver"
+                if layer == "bronze_silver" and pipeline_mode == "combined"
+                else "silver"
+            )
+            pipelines["resources"]["jobs"]["pipelines"]["tasks"].append({
+                "task_key": "gold",
+                "depends_on": [{"task_key": upstream}],
+                "pipeline_task": {
+                    "pipeline_id": "${resources.pipelines.gold.id}",
+                },
+            })
+            self._write(
+                tmp / "gold" / "models" / "model.sql",
+                "CREATE OR REFRESH MATERIALIZED VIEW gold_model AS SELECT 1;\n",
+            )
         self._write(tmp / "resources" / "sdp_meta_pipelines.yml", yaml.safe_dump(pipelines))
         onboarding_parameters = {"onboard_layer": "${var.layer}"}
         if layer in ("bronze", "bronze_silver"):
@@ -349,6 +429,40 @@ class SanityChecksTests(unittest.TestCase):
             self._make_bundle(tmp, layer="bronze", with_bronze=True, with_silver=True)
             errors = _sdp_meta_sanity_checks(tmp)
             self.assertTrue(any("layer=bronze" in e for e in errors), errors)
+
+    def test_gold_rejects_bundle_without_silver_producer(self):
+        with _tempdir() as tmp:
+            self._make_bundle(
+                tmp,
+                layer="bronze",
+                with_bronze=True,
+                with_silver=False,
+                gold_enabled=True,
+            )
+            errors = _sdp_meta_sanity_checks(tmp)
+            self.assertTrue(
+                any("requires a Silver-producing pipeline" in error for error in errors),
+                errors,
+            )
+
+    def test_gold_rejects_jinja_marker_inside_sql_comment(self):
+        with _tempdir() as tmp:
+            self._make_bundle(
+                tmp,
+                layer="silver",
+                with_bronze=False,
+                with_silver=True,
+                gold_enabled=True,
+            )
+            (tmp / "gold" / "models" / "model.sql").write_text(
+                "{# external renderer comment #}\n"
+                "CREATE OR REFRESH MATERIALIZED VIEW gold_model AS SELECT 1;\n"
+            )
+            errors = _sdp_meta_sanity_checks(tmp)
+            self.assertTrue(
+                any("unsupported external template marker" in error for error in errors),
+                errors,
+            )
 
     def test_missing_onboarding_file_detected(self):
         with _tempdir() as tmp:
@@ -1712,6 +1826,34 @@ class QuickstartConfigFileTests(unittest.TestCase):
                     tmp, overrides={"source_format": "parquet"}
                 )
 
+    def test_gold_overrides_accept_valid_values(self):
+        with _tempdir() as tmp:
+            path = write_quickstart_config_file(
+                tmp,
+                overrides={
+                    "gold_enabled": True,
+                    "gold_target_schema": "analytics_gold",
+                    "gold_models_path": "sql/gold_models",
+                },
+            )
+            written = json.loads(path.read_text())
+            self.assertIs(written["gold_enabled"], True)
+            self.assertEqual(written["gold_target_schema"], "analytics_gold")
+            self.assertEqual(written["gold_models_path"], "sql/gold_models")
+
+    def test_gold_overrides_reject_invalid_values(self):
+        invalid_overrides = (
+            ({"gold_enabled": "true"}, "gold_enabled"),
+            ({"gold_target_schema": "bad-schema"}, "gold_target_schema"),
+            ({"gold_models_path": "../gold"}, "gold_models_path"),
+            ({"gold_models_path": "/gold/models"}, "gold_models_path"),
+        )
+        with _tempdir() as tmp:
+            for override, field in invalid_overrides:
+                with self.subTest(override=override):
+                    with self.assertRaisesRegex(ValueError, field):
+                        write_quickstart_config_file(tmp, overrides=override)
+
     def test_none_overrides_is_pure_defaults(self):
         with _tempdir() as tmp:
             path = write_quickstart_config_file(tmp, overrides=None)
@@ -2218,6 +2360,9 @@ class EndToEndRenderTests(unittest.TestCase):
             "onboarding_file_format": "yaml",
             "quality_engine": "none",
             "managed_quality_migrations": False,
+            "gold_enabled": False,
+            "gold_target_schema": "sdp_meta_gold",
+            "gold_models_path": "gold/models",
             "dataflow_group": "demo_group",
             "wheel_source": "pypi",
             "sdp_meta_dependency": "databricks-labs-sdp-meta==0.1.0",
@@ -2869,6 +3014,104 @@ class EndToEndRenderTests(unittest.TestCase):
             self.assertEqual(len(jobs["tasks"]), 1)
             self.assertEqual(jobs["tasks"][0]["task_key"], "bronze_silver")
 
+    def test_gold_is_absent_by_default(self):
+        with _tempdir() as tmp:
+            rendered = self._render(self._common_answers(), tmp)
+            self.assertFalse(list((rendered / "gold").rglob("*.sql")))
+            doc = yaml.safe_load(
+                (rendered / "resources" / "sdp_meta_pipelines.yml").read_text()
+            )
+            self.assertNotIn("gold", doc["resources"]["pipelines"])
+            self.assertNotIn(
+                "gold",
+                {
+                    task["task_key"]
+                    for task in doc["resources"]["jobs"]["pipelines"]["tasks"]
+                },
+            )
+
+    def test_gold_renders_model_guidance_pipeline_and_split_dependency(self):
+        with _tempdir() as tmp:
+            rendered = self._render(
+                self._common_answers(gold_enabled=True),
+                tmp,
+            )
+            models = sorted((rendered / "gold" / "models").glob("*.sql"))
+            self.assertEqual(models, [])
+            self.assertIn(
+                "Create `${var.gold_models_path}` and add native SDP SQL files",
+                (rendered / "README.md").read_text(),
+            )
+            doc = yaml.safe_load(
+                (rendered / "resources" / "sdp_meta_pipelines.yml").read_text()
+            )
+            gold_pipeline = doc["resources"]["pipelines"]["gold"]
+            self.assertEqual(gold_pipeline["root_path"], "..")
+            self.assertEqual(
+                gold_pipeline["libraries"][0]["glob"]["include"],
+                "../${var.gold_models_path}/**",
+            )
+            self.assertEqual(
+                gold_pipeline["configuration"],
+                {
+                    "silver_catalog": "${var.uc_catalog_name}",
+                    "silver_schema": "${var.silver_target_schema}",
+                },
+            )
+            gold_task = next(
+                task
+                for task in doc["resources"]["jobs"]["pipelines"]["tasks"]
+                if task["task_key"] == "gold"
+            )
+            self.assertEqual(gold_task["depends_on"], [{"task_key": "silver"}])
+            self._strip_placeholders(rendered / "conf" / "onboarding.yml", "yml")
+            errors = _sdp_meta_sanity_checks(rendered)
+            self.assertEqual(len(errors), 1)
+            self.assertIn(
+                "add at least one Silver-compatible native SDP SQL model",
+                errors[0],
+            )
+            gold_models = rendered / "gold" / "models"
+            gold_models.mkdir(parents=True, exist_ok=True)
+            (gold_models / "business_summary.sql").write_text(
+                "CREATE OR REFRESH MATERIALIZED VIEW business_summary AS SELECT 1;\n"
+            )
+            self.assertEqual(_sdp_meta_sanity_checks(rendered), [])
+
+    def test_gold_dependency_tracks_silver_producer_and_quality_wrapper(self):
+        cases = (
+            ({"layer": "silver"}, "silver"),
+            (
+                {"layer": "bronze_silver", "pipeline_mode": "combined"},
+                "bronze_silver",
+            ),
+            (
+                {
+                    "layer": "bronze_silver",
+                    "pipeline_mode": "split",
+                    "managed_quality_migrations": True,
+                },
+                "silver",
+            ),
+        )
+        for overrides, expected in cases:
+            with self.subTest(overrides=overrides), _tempdir() as tmp:
+                rendered = self._render(
+                    self._common_answers(gold_enabled=True, **overrides),
+                    tmp,
+                )
+                doc = yaml.safe_load(
+                    (rendered / "resources" / "sdp_meta_pipelines.yml").read_text()
+                )
+                gold_task = next(
+                    task
+                    for task in doc["resources"]["jobs"]["pipelines"]["tasks"]
+                    if task["task_key"] == "gold"
+                )
+                self.assertEqual(
+                    gold_task["depends_on"], [{"task_key": expected}]
+                )
+
 
 # ---------------------------------------------------------------------------
 # utilities
@@ -3171,6 +3414,61 @@ class PipelineOwnershipHelperTests(unittest.TestCase):
         )
 
         self.assertEqual(len(tasks), 3)
+
+
+class BundleAddGoldTests(unittest.TestCase):
+    def _make_bundle(self, tmp: Path) -> Path:
+        (tmp / "resources").mkdir()
+        (tmp / "databricks.yml").write_text("bundle: {name: test}\n")
+        (tmp / "resources" / "variables.yml").write_text(
+            yaml.safe_dump({
+                "variables": {
+                    "layer": {"default": "bronze_silver"},
+                    "pipeline_mode": {"default": "split"},
+                    "gold_enabled": {"default": False},
+                },
+            }, sort_keys=False)
+        )
+        (tmp / "resources" / "sdp_meta_pipelines.yml").write_text(
+            yaml.safe_dump({
+                "resources": {
+                    "pipelines": {
+                        "bronze": {},
+                        "silver": {},
+                    },
+                    "jobs": {
+                        "pipelines": {
+                            "tasks": [{
+                                "task_key": "bronze",
+                                "pipeline_task": {
+                                    "pipeline_id": "${resources.pipelines.bronze.id}",
+                                },
+                            }],
+                        },
+                    },
+                },
+            }, sort_keys=False)
+        )
+        return tmp
+
+    def test_add_gold_rejects_missing_upstream_silver_task(self):
+        with _tempdir() as tmp:
+            bundle = self._make_bundle(tmp)
+            variables_path = bundle / "resources" / "variables.yml"
+            pipelines_path = bundle / "resources" / "sdp_meta_pipelines.yml"
+            variables_before = variables_path.read_text()
+            pipelines_before = pipelines_path.read_text()
+            output = StringIO()
+
+            result = bundle_add_gold(
+                BundleAddGoldCommand(str(bundle)),
+                output=output,
+            )
+
+            self.assertEqual(result, 2)
+            self.assertIn("no upstream `silver` task", output.getvalue())
+            self.assertEqual(variables_path.read_text(), variables_before)
+            self.assertEqual(pipelines_path.read_text(), pipelines_before)
 
 
 class BundleAddPipelineTests(unittest.TestCase):

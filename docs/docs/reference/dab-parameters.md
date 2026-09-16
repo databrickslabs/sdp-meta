@@ -12,7 +12,7 @@ This page covers all parameters exposed when scaffolding a bundle with `databric
 
 ## Bundle Init Prompts
 
-When you run `databricks labs sdp-meta bundle-init`, the template walks you through 15 prompts. Pass `--quickstart` to skip all prompts and accept developer defaults.
+When you run `databricks labs sdp-meta bundle-init`, the template walks you through 18 prompts. Pass `--quickstart` to skip all prompts and accept developer defaults.
 
 | # | Prompt Key | Default | Description |
 |---|---|---|---|
@@ -51,6 +51,9 @@ time.
 | `sdp_meta_schema` | string | `sdp_meta_dataflowspecs` | Schema holding the dataflowspec control tables |
 | `bronze_target_schema` | string | `sdp_meta_bronze` | Target schema for bronze tables |
 | `silver_target_schema` | string | `sdp_meta_silver` | Target schema for silver tables |
+| `gold_enabled` | boolean | `false` | Immutable scaffold marker controlling whether Gold resources are generated; do not target-override it |
+| `gold_target_schema` | string | `sdp_meta_gold` | Target schema for Gold materialized views |
+| `gold_models_path` | string | `gold/models` | Bundle-relative Gold SQL model directory |
 | `layer` | string | `bronze_silver` | Pipeline layer(s): `bronze`, `silver`, or `bronze_silver` |
 | `pipeline_mode` | string | `split` | Pipeline topology when `layer=bronze_silver`: `split` or `combined` |
 | `dataflow_group` | string | `my_group` | Group key that ties the onboarding file to the pipeline configuration |

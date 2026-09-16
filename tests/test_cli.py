@@ -2702,7 +2702,7 @@ class CliCommandWiringTests(unittest.TestCase):
         )
 
     def test_bundle_commands_are_wired_end_to_end(self):
-        """Belt-and-suspenders: each of the four bundle-* commands is
+        """Belt-and-suspenders: each bundle-* command is
         explicitly named here so the failure message is unambiguous if
         somebody deletes one side of the wiring during cleanup."""
         mapping = self._mapping_keys()

@@ -100,6 +100,7 @@ end-to-end with no CLI setup required.
 - `dp.create_sink` — write to external Delta destinations
 - **Multi-source AUTO CDC** — N `dp.create_auto_cdc_flow` calls against one streaming silver target, with per-flow `source_format` / `source_details` / `select_exp` normalizing each region's raw column shape before the merge (Stage 11)
 - `bronze_row_filter` / `silver_row_filter` — UC Row-Level Security via `ROW FILTER` (Stage 12)
+- Native SDP SQL Gold — no Gold DataflowSpec; a separate SQL pipeline reads published Silver and derives Gold-to-Gold ordering (Stage 13)
 - All Lakeflow Spark Declarative Pipelines created with `serverless=True`
 
 ## Prerequisites
@@ -142,7 +143,10 @@ The notebook is fully driven by widgets at the top — same ones the headless la
 
 ## Option B — Run headless via the launcher (CI-friendly)
 
-`demo/launch_interactive_demo.py` uploads the demo notebook (and the sibling `demo/conf/<fmt>/sample_onboarding.<ext>` files, so the workspace-co-located lookup always works), submits a one-time serverless job that runs it, prints + opens the run-page URL in your browser immediately so you can watch it live, and waits for completion. On failure it still surfaces the run URL in the summary — no traceback hunting required.
+`demo/launch_interactive_demo.py` uploads the demo notebook, sibling
+`demo/conf/` files, and shared `demo/gold/models/*.sql`, submits a one-time
+serverless job, opens its run page, and waits for completion. The same Gold SQL
+files are used by the DAB Gold scenario, preventing the two demos from drifting.
 
 ```commandline
 # CI smoke run — assert row counts and tear down every per-run resource
@@ -790,14 +794,15 @@ End-to-end demo for the new `databricks labs sdp-meta bundle-*` CLI commands. On
 
 > For the full CLI reference (every prompt, every variable, every recipe, the full flag surface, and how to extend the runner notebook for snapshot / CDC / custom transforms), see [`DAB_README.md`](../DAB_README.md) at the repo root. This demo section is the *runnable* walkthrough; `DAB_README.md` is the *reference*.
 
-The demo supports six scenarios via `--scenario`:
+The demo supports six concrete scenarios plus `all` via `--scenario`:
 
 | Scenario | Source | Pipeline mode |
 | --- | --- | --- |
 | `cloudfiles` | UC volume CSVs (Customers / Transactions / Products / Stores) | `split` (separate bronze + silver SDP Pipelines) |
 | `cloudfiles_combined` | Same data, same recipe | `combined` (bronze + silver in **one** SDP Pipeline) |
-| `kafka` | Kafka topic list at `demo/dab_template_demo/topics/kafka_topics.txt` | `split` |
-| `eventhub` | Event Hub namespace + topic list | `split` |
+| `gold` | UC volume Customers + Transactions | split Bronze/Silver followed by native SDP SQL Gold |
+| `kafka` | Kafka topic list at `demo/dab_template_demo/topics/kafka_topics.txt` | bronze-only |
+| `eventhub` | Event Hub namespace + topic list | `combined` |
 | `delta` | Existing UC delta tables | `split` |
 | `all` | Runs all of the above sequentially into separate `demo_runs/<scenario>/` dirs | varies |
 

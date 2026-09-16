@@ -12,7 +12,7 @@ databricks labs install sdp-meta
 # catalog/schema/sdp_meta_dependency.
 databricks labs sdp-meta bundle-init --quickstart   # one shot, no prompts
 # OR walk through the prompts:
-databricks labs sdp-meta bundle-init                # 13 prompts
+databricks labs sdp-meta bundle-init                # guided template prompts
 cd <bundle_name>
 
 # (optional, until sdp-meta is on PyPI)

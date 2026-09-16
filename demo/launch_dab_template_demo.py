@@ -1,6 +1,6 @@
 """End-to-end demo for the new sdp-meta DAB template features.
 
-For each scenario (`cloudfiles`, `kafka`, `eventhub`, or `all`) this script
+For each scenario (`cloudfiles`, `gold`, `kafka`, `eventhub`, or `all`) this script
 exercises every feature added in the DAB-template work:
 
   STAGE 1 - bundle-init        scaffold a bundle from the packaged template
@@ -15,8 +15,9 @@ exercises every feature added in the DAB-template work:
                                  eventhub   -> recipes/from_topics.py
                                  (the last two consume topic lists from
                                  demo/dab_template_demo/topics/)
-  STAGE 5 - bundle-validate    run sdp-meta sanity checks + (when CLI present)
-                               `databricks bundle validate`
+  STAGE 5 - bundle-validate    run offline sdp-meta sanity checks; optionally run
+                               workspace-aware `databricks bundle validate`
+                               and print the Gold graph for the gold scenario
   STAGE 6 - deploy + run       (--apply-deploy) actually deploy the bundle and
                                run onboarding + pipelines against the workspace
 
@@ -46,6 +47,12 @@ Usage:
     python demo/launch_dab_template_demo.py --scenario kafka \\
         --uc-catalog-name main --apply-prepare-wheel --apply-deploy \\
         --uc-schema sdp_meta_dab_demo_kafka --uc-volume sdp_meta_wheels \\
+        --profile DEFAULT
+
+    # Gold end-to-end: Bronze -> Silver -> native SDP SQL Gold models.
+    python demo/launch_dab_template_demo.py --scenario gold \\
+        --uc-catalog-name main --apply-prepare-wheel --apply-deploy \\
+        --uc-schema sdp_meta_dab_demo --uc-volume sdp_meta_wheels \\
         --profile DEFAULT
 
     # Force a fresh deployment each run (instead of overwriting the existing
@@ -127,7 +134,7 @@ class Scenario:
     #   {uc_source_schema}   -> --uc-source-schema  (defaults to "staging")
     description: str
     # Per-scenario default UC schema names used when --uc-schema is NOT
-    # passed on the CLI. When --uc-schema IS passed, all three are derived
+    # passed on the CLI. When --uc-schema IS passed, all target schemas are derived
     # from it via `_resolve_demo_schemas`. Keeping defaults out of the
     # answer JSONs lets the launcher render the same template either with
     # canned scenario-specific names (no flag) OR with user-provided ones
@@ -135,6 +142,9 @@ class Scenario:
     default_sdp_meta_schema: str = ""
     default_bronze_target_schema: str = ""
     default_silver_target_schema: str = ""
+    default_gold_target_schema: str = ""
+    # Optional runnable Gold SQL that replaces the generic template examples.
+    gold_models_dir: Optional[Path] = None
     # If True, the recipe is only attempted when --apply-recipe is set, because
     # it needs a real WorkspaceClient (no offline dry-run path). Today this
     # only applies to the `delta` scenario (recipes/from_uc.py lists UC tables).
@@ -182,6 +192,26 @@ SCENARIOS = {
         default_sdp_meta_schema="sdp_meta_dab_demo_cf",
         default_bronze_target_schema="sdp_meta_bronze_dab_demo_cf",
         default_silver_target_schema="sdp_meta_silver_dab_demo_cf",
+    ),
+    "gold": Scenario(
+        name="gold",
+        answers_file=DEMO_DIR / "answers" / "cloudfiles_gold.json",
+        extra_flows_csv=DEMO_DIR / "flows" / "cloudfiles_extra.csv",
+        recipe_name="from_volume.py",
+        recipe_args_template=[
+            "--volume-path", "{bundle_dir}/_demo_landing",
+            "--bundle-dir", "{bundle_dir}",
+        ],
+        description=(
+            "Split bronze+silver pipelines followed by a native SDP SQL Gold "
+            "pipeline. Demonstrates Gold model validation, Silver-to-Gold "
+            "configuration, Gold-to-Gold dependencies, and workflow chaining."
+        ),
+        default_sdp_meta_schema="sdp_meta_dab_demo_gold",
+        default_bronze_target_schema="sdp_meta_bronze_dab_demo_gold",
+        default_silver_target_schema="sdp_meta_silver_dab_demo_gold",
+        default_gold_target_schema="sdp_meta_gold_dab_demo",
+        gold_models_dir=REPO_ROOT / "demo" / "gold" / "models",
     ),
     "multi_pipeline_cloudfiles": Scenario(
         name="multi_pipeline_cloudfiles",
@@ -279,6 +309,7 @@ SCENARIOS = {
 _CLOUDFILES_SCENARIO_NAMES = {
     "cloudfiles",
     "cloudfiles_combined",
+    "gold",
     "multi_pipeline_cloudfiles",
 }
 
@@ -298,20 +329,20 @@ def _banner(stage: str, message: str) -> None:
 
 
 def _resolve_demo_schemas(scenario: Scenario, uc_schema: Optional[str]) -> Dict[str, str]:
-    """Resolve the three demo target schemas for a scenario.
+    """Resolve the demo target schemas for a scenario.
 
-    When ``--uc-schema`` is passed on the CLI, ALL three are derived from
+    When ``--uc-schema`` is passed on the CLI, all target schemas are derived from
     it (sdp_meta_schema = <uc-schema>, bronze = <uc-schema>_bronze, silver
     = <uc-schema>_silver). When it is NOT passed, the per-scenario
     defaults registered on the Scenario dataclass are used (preserving the
     previous hardcoded behaviour). This lets a single ``--uc-schema`` flag
     drive both the wheel-volume schema (used by `bundle_prepare_wheel`)
-    AND the dataflowspec / bronze / silver target schemas (used by the
+    AND the dataflowspec / Bronze / Silver / Gold target schemas (used by the
     rendered bundle).
 
     Note: when ``--scenario all`` is used together with ``--uc-schema``,
     every scenario will share the same target schemas and bundle deploys
-    will collide on dataflowspec / bronze / silver tables. Either pick a
+    will collide on dataflowspec / Bronze / Silver / Gold tables. Either pick a
     single scenario, or omit ``--uc-schema`` to fall back to the
     per-scenario defaults.
     """
@@ -320,11 +351,16 @@ def _resolve_demo_schemas(scenario: Scenario, uc_schema: Optional[str]) -> Dict[
             "sdp_meta_schema": uc_schema,
             "bronze_target_schema": f"{uc_schema}_bronze",
             "silver_target_schema": f"{uc_schema}_silver",
+            "gold_target_schema": f"{uc_schema}_gold",
         }
     return {
         "sdp_meta_schema": scenario.default_sdp_meta_schema,
         "bronze_target_schema": scenario.default_bronze_target_schema,
         "silver_target_schema": scenario.default_silver_target_schema,
+        "gold_target_schema": (
+            scenario.default_gold_target_schema
+            or f"{scenario.default_silver_target_schema}_gold"
+        ),
     }
 
 
@@ -349,6 +385,7 @@ def _render_answers_dict(scenario: Scenario, uc_catalog_name: str,
         .replace("{sdp_meta_schema}", schemas["sdp_meta_schema"])
         .replace("{bronze_target_schema}", schemas["bronze_target_schema"])
         .replace("{silver_target_schema}", schemas["silver_target_schema"])
+        .replace("{gold_target_schema}", schemas["gold_target_schema"])
     )
     return json.loads(rendered_text)
 
@@ -740,6 +777,27 @@ def _bundle_dir_from_scaffold(scenario: Scenario, out_dir: Path, uc_catalog_name
     return out_dir / (bundle_name_override or answers["bundle_name"])
 
 
+def _install_gold_demo_models(scenario: Scenario, bundle_dir: Path) -> None:
+    """Install runnable retail demo models into the generated Gold scaffold."""
+    if scenario.gold_models_dir is None:
+        return
+    if not scenario.gold_models_dir.is_dir():
+        raise SystemExit(
+            f"Gold demo model directory not found: {scenario.gold_models_dir}"
+        )
+    target = bundle_dir / "gold" / "models"
+    target.mkdir(parents=True, exist_ok=True)
+    source_models = sorted(scenario.gold_models_dir.glob("*.sql"))
+    if not source_models:
+        raise SystemExit(f"No Gold demo SQL files found in {scenario.gold_models_dir}")
+    for source in source_models:
+        shutil.copyfile(source, target / source.name)
+    print(
+        f"[STAGE 1] Installed {len(source_models)} runnable Gold model(s) "
+        f"from {scenario.gold_models_dir}"
+    )
+
+
 def _run_recipe(scenario: Scenario, bundle_dir: Path, *, apply: bool,
                 uc_catalog_name: str, profile: Optional[str],
                 uc_source_catalog: Optional[str] = None,
@@ -801,6 +859,41 @@ def _print_onboarding_summary(bundle_dir: Path) -> None:
         return
 
 
+def _print_gold_summary(bundle_dir: Path) -> None:
+    """Show the rendered Gold models, pipeline glob, and workflow dependency."""
+    variables = yaml.safe_load(
+        (bundle_dir / "resources" / "variables.yml").read_text()
+    ).get("variables", {})
+    if variables.get("gold_enabled", {}).get("default") is not True:
+        return
+    models_path = variables["gold_models_path"]["default"]
+    models = sorted((bundle_dir / models_path).rglob("*.sql"))
+    resources = yaml.safe_load(
+        (bundle_dir / "resources" / "sdp_meta_pipelines.yml").read_text()
+    )["resources"]
+    gold_pipeline = resources["pipelines"]["gold"]
+    gold_task = next(
+        task
+        for task in resources["jobs"]["pipelines"]["tasks"]
+        if task.get("task_key") == "gold"
+    )
+    dependencies = [
+        dependency["task_key"] for dependency in gold_task.get("depends_on", [])
+    ]
+    print(
+        f"\n[STAGE 5 Gold summary] {len(models)} model(s) -> "
+        f"${{var.gold_target_schema}}"
+    )
+    for model in models:
+        print(f"  - {model.relative_to(bundle_dir)}")
+    print(
+        "  - pipeline glob: "
+        f"{gold_pipeline['libraries'][0]['glob']['include']} "
+        f"(root_path={gold_pipeline.get('root_path')})"
+    )
+    print(f"  - workflow: {' + '.join(dependencies)} -> gold")
+
+
 # ---------------------------------------------------------------------------
 # Stage runners
 # ---------------------------------------------------------------------------
@@ -825,7 +918,8 @@ def stage_bundle_init(scenario: Scenario, out_dir: Path, uc_catalog_name: str,
         f"[STAGE 1] Target schemas (catalog={uc_catalog_name}): "
         f"sdp_meta={schemas['sdp_meta_schema']}, "
         f"bronze={schemas['bronze_target_schema']}, "
-        f"silver={schemas['silver_target_schema']}"
+        f"silver={schemas['silver_target_schema']}, "
+        f"gold={schemas['gold_target_schema']}"
         + ("  [from --uc-schema]" if uc_schema else "  [scenario defaults]")
     )
 
@@ -1260,6 +1354,7 @@ def stage_validate(bundle_dir: Path, profile: Optional[str]) -> None:
     if rc != 0:
         raise SystemExit(f"bundle-validate exited with code {rc}")
     _print_onboarding_summary(bundle_dir)
+    _print_gold_summary(bundle_dir)
 
 
 _BUNDLE_TARGET_ENV_KEYS = (
@@ -1788,7 +1883,10 @@ def _resolve_target_schemas(bundle_dir: Path) -> List[str]:
     var_path = bundle_dir / "resources" / "variables.yml"
     doc = yaml.safe_load(var_path.read_text())
     schemas = []
-    for key in ("sdp_meta_schema", "bronze_target_schema", "silver_target_schema"):
+    keys = ["sdp_meta_schema", "bronze_target_schema", "silver_target_schema"]
+    if doc.get("variables", {}).get("gold_enabled", {}).get("default") is True:
+        keys.append("gold_target_schema")
+    for key in keys:
         val = doc.get("variables", {}).get(key, {}).get("default")
         if val and val not in schemas:
             schemas.append(val)
@@ -1814,10 +1912,10 @@ def _resolve_target_schemas(bundle_dir: Path) -> List[str]:
 
 def _ensure_target_schemas(bundle_dir: Path, uc_catalog: str,
                            profile: Optional[str]) -> None:
-    """Create the bronze/silver/dataflowspec schemas if they don't exist.
+    """Create the dataflowspec, Bronze, Silver, and enabled Gold schemas.
 
     The dataflowspec table that the onboarding job writes to, and the
-    bronze/silver target schemas that SDP writes its tables to, must
+    Bronze/Silver target schemas that SDP writes its tables to, must
     already exist in Unity Catalog before either job runs (SDP refuses to
     auto-create schemas, and the onboarding job fails with SCHEMA_NOT_FOUND
     when it tries to MERGE INTO a missing schema).
@@ -1890,6 +1988,36 @@ def _resolve_onboarding_file_name(bundle_dir: Path) -> str:
     return name
 
 
+def _prune_dangling_conf_paths(bundle_dir: Path) -> None:
+    """Drop optional per-flow conf references whose local files do not exist."""
+    conf_root = bundle_dir / "conf"
+    onboarding_path = conf_root / _resolve_onboarding_file_name(bundle_dir)
+    if onboarding_path.suffix.lower() == ".json":
+        doc = json.loads(onboarding_path.read_text())
+    else:
+        doc = yaml.safe_load(onboarding_path.read_text())
+    if not isinstance(doc, list):
+        return
+    workspace_conf_token = "${workspace.file_path}/conf"
+    before = sum(_count_path_keys(flow) for flow in doc)
+    for flow in doc:
+        _rewrite_and_prune_flow_paths(
+            flow,
+            conf_root,
+            workspace_conf_token,
+            workspace_conf_token,
+        )
+    after = sum(_count_path_keys(flow) for flow in doc)
+    if onboarding_path.suffix.lower() == ".json":
+        onboarding_path.write_text(json.dumps(doc, indent=2))
+    else:
+        onboarding_path.write_text(yaml.safe_dump(doc, sort_keys=False))
+    print(
+        f"[STAGE 6] Pruned {before - after} dangling optional conf path "
+        f"reference(s) from {onboarding_path.name}"
+    )
+
+
 def _set_onboarding_file_path(
     onboarding_job_path: Path,
     onboarding_path: str,
@@ -1957,6 +2085,8 @@ def stage_deploy_and_run(bundle_dir: Path, profile: Optional[str], *,
     # 0) ensure target schemas exist (SDP + onboarding fail if they don't).
     if uc_catalog:
         _ensure_target_schemas(bundle_dir, uc_catalog, profile)
+
+    _prune_dangling_conf_paths(bundle_dir)
 
     # Stage the rewritten/pruned conf tree before deployment and point only
     # the onboarding task at it. Passing --python-named-params to `bundle run`
@@ -2141,13 +2271,14 @@ def _selected_scenarios(name: str) -> List[Scenario]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", maxsplit=1)[0])
     parser.add_argument("--scenario", default="all",
-                        choices=["cloudfiles", "cloudfiles_combined",
+                        choices=["cloudfiles", "cloudfiles_combined", "gold",
                                  "multi_pipeline_cloudfiles", "kafka",
                                  "eventhub", "delta", "all"],
                         help="Which source scenario to run (default: all). "
                              "`cloudfiles` renders pipeline_mode=split; "
                              "`cloudfiles_combined` renders pipeline_mode=combined "
-                             "(bronze+silver in ONE SDP Pipeline, same demo data).")
+                             "(bronze+silver in ONE SDP Pipeline, same demo data); "
+                             "`gold` adds the native SQL Gold pipeline.")
     parser.add_argument("--uc-catalog-name", required=True,
                         help="Unity Catalog catalog the demo writes into. "
                              "Substituted into the answers files and CSVs.")
@@ -2160,12 +2291,13 @@ def main() -> int:
                              "schema used by --apply-prepare-wheel, AND (b) the rendered "
                              "bundle's target schemas: sdp_meta_schema=<uc-schema>, "
                              "bronze_target_schema=<uc-schema>_bronze, "
-                             "silver_target_schema=<uc-schema>_silver. "
+                             "silver_target_schema=<uc-schema>_silver, "
+                             "gold_target_schema=<uc-schema>_gold. "
                              "When omitted, per-scenario defaults are used "
                              "(e.g. sdp_meta_dab_demo_cf for the cloudfiles scenarios). "
                              "WARNING: with --scenario all + --uc-schema, every scenario "
                              "shares the same target schemas and bundle deploys will "
-                             "collide on dataflowspec / bronze / silver tables.")
+                             "collide on dataflowspec / Bronze / Silver / Gold tables.")
     parser.add_argument("--uc-volume", default=None,
                         help="UC volume for prepare-wheel (only with --apply-prepare-wheel)")
     parser.add_argument("--apply-prepare-wheel", action="store_true",
@@ -2186,6 +2318,10 @@ def main() -> int:
     parser.add_argument("--apply-deploy", action="store_true",
                         help="Run STAGE 6 (deploy + run onboarding + pipelines). "
                              "Without this flag, the demo stops after STAGE 5.")
+    parser.add_argument("--apply-databricks-validate", action="store_true",
+                        help="Also run workspace-aware `databricks bundle validate` "
+                             "in STAGE 5. Enabled automatically by --apply-deploy; "
+                             "offline runs use only sdp-meta static checks.")
     parser.add_argument("--no-clean", dest="clean", action="store_false",
                         help="Do NOT remove an existing bundle directory before "
                              "STAGE 1 re-scaffolds. Default: clean (so re-runs are "
@@ -2252,6 +2388,7 @@ def main() -> int:
                 bundle_name_suffix=args.bundle_name_suffix,
                 unique_bundle_name=args.unique_bundle_name,
             )
+            _install_gold_demo_models(scenario, bundle_dir)
             extras = args.pip_extra_index_url
             if not extras and os.environ.get("PIP_EXTRA_INDEX_URL"):
                 extras = [u for u in os.environ["PIP_EXTRA_INDEX_URL"].split() if u]

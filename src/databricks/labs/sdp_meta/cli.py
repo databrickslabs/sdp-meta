@@ -2373,6 +2373,21 @@ def bundle_add_pipeline(sdp_meta: SDPMeta, flags: dict = None):
         sys.exit(rc)
 
 
+def bundle_add_gold(sdp_meta: SDPMeta, flags: dict = None):
+    """Idempotently enable the optional Gold pipeline in an existing bundle."""
+    from databricks.labs.sdp_meta.bundle import (
+        BundleAddGoldCommand,
+        bundle_add_gold as _run,
+    )
+
+    flags = flags or {}
+    bundle_dir = _flag_value(flags, "bundle-dir", "bundle_dir") or "."
+    logger.info("Enabling the native SDP SQL Gold pipeline in the bundle.")
+    rc = _run(BundleAddGoldCommand(bundle_dir=bundle_dir))
+    if rc != 0:
+        sys.exit(rc)
+
+
 def mcp(sdp_meta: SDPMeta, flags: dict = None):
     """Run the sdp-meta MCP server over stdio.
 
