@@ -51,6 +51,12 @@
             "source_format": "cloudFiles",
             "source_details": {
                "source_path_it": "{uc_volume_path}/integration_tests/resources/data/customers_af",
+               "source_metadata": {
+                  "select_metadata_cols": {
+                     "input_file_name": "_metadata.file_name",
+                     "input_file_path": "_metadata.file_path"
+                  }
+               },
                "source_schema_path": "{uc_volume_path}/integration_tests/resources/customers.ddl"
             },
             "reader_options": {
@@ -141,6 +147,12 @@
             "source_format": "cloudFiles",
             "source_details": {
                "source_path_it": "{uc_volume_path}/integration_tests/resources/data/transactions_af",
+               "source_metadata": {
+                  "select_metadata_cols": {
+                     "input_file_name": "_metadata.file_name",
+                     "input_file_path": "_metadata.file_path"
+                  }
+               },
                "source_schema_path": "{uc_volume_path}/integration_tests/resources/transactions.ddl"
             },
             "reader_options": {

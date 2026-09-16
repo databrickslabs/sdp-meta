@@ -44,6 +44,49 @@ for table, counts in tables.items():
     except AssertionError:
         log_list.append(f"Expected: {counts} Actual: {cnt}. Failed!")
 
+# Regression coverage for issue #444: source_metadata nested under a bronze
+# append flow must be serialized like top-level source metadata. Every
+# transaction row comes from either `transactions/` or `transactions_af/`, so
+# both selected metadata columns must be populated for the full table, and at
+# least one path must prove that append-flow rows were included.
+transactions_table = (
+    f"{uc_catalog_name}.{bronze_schema}.transactions"
+    if uc_enabled
+    else f"{bronze_schema}.transactions"
+)
+metadata_stats = spark.sql(
+    f"""
+    SELECT
+      COUNT(*) AS total_rows,
+      COUNT(input_file_name) AS named_rows,
+      COUNT(input_file_path) AS pathed_rows,
+      SUM(
+        CASE WHEN input_file_path LIKE '%/transactions_af/%'
+          THEN 1 ELSE 0 END
+      ) AS append_rows
+    FROM {transactions_table}
+    """
+).collect()[0]
+log_list.append(
+    "Validating source metadata for bronze transaction append-flow rows."
+)
+try:
+    assert metadata_stats.total_rows == metadata_stats.named_rows
+    assert metadata_stats.total_rows == metadata_stats.pathed_rows
+    assert metadata_stats.append_rows > 0
+    log_list.append(
+        f"All {metadata_stats.total_rows} rows have file metadata; "
+        f"{metadata_stats.append_rows} rows came from transactions_af. Passed!"
+    )
+except AssertionError:
+    log_list.append(
+        "Append-flow metadata validation failed: "
+        f"total={metadata_stats.total_rows}, "
+        f"named={metadata_stats.named_rows}, "
+        f"pathed={metadata_stats.pathed_rows}, "
+        f"append={metadata_stats.append_rows}. Failed!"
+    )
+
 # Row filter wiring assertion (UC only). The cloudfiles customers flow declares
 # bronze_row_filter / silver_row_filter on `operation` referencing the UDF
 # `<catalog>.<bronze_schema>.customer_op_filter`. Confirm via

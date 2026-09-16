@@ -9,7 +9,7 @@ from tests.utils import SDPFrameworkTestCase
 from databricks.labs.sdp_meta.onboard_dataflowspec import OnboardDataflowspec
 from databricks.labs.sdp_meta.dataflow_spec import BronzeDataflowSpec, SilverDataflowSpec
 from unittest.mock import MagicMock, patch
-from pyspark.sql import DataFrame
+from pyspark.sql import DataFrame, Row
 
 
 class OnboardDataflowspecTests(SDPFrameworkTestCase):
@@ -86,7 +86,10 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
         onboarder = self._make_onboarder()
         onboarder.bronze_schema_mapper = MagicMock(return_value="mapped-schema")
         source_metadata = self._row({
-            "select_metadata_cols": self._row({"file_name": "_metadata.file_name"}),
+            "select_metadata_cols": self._row({
+                "file_name": "_metadata.file_name",
+                "unused": None,
+            }),
             "include_autoloader_metadata_column": True,
         })
         onboarding_row = {
@@ -113,9 +116,58 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
         self.assertEqual(details["source_database"], "raw")
         self.assertEqual(options, {"cloudFiles.format": "json"})
         self.assertEqual(schema, "mapped-schema")
+        self.assertEqual(
+            json.loads(details["source_metadata"]),
+            {
+                "select_metadata_cols": {
+                    "file_name": "_metadata.file_name"
+                },
+                "include_autoloader_metadata_column": True,
+            },
+        )
         onboarder.bronze_schema_mapper.assert_called_once_with(
             "/tmp/schema.ddl", self.spark
         )
+
+    def test_append_flow_source_metadata_is_json_encoded(self):
+        onboarder = self._make_onboarder()
+        onboarding_row = {
+            "bronze_append_flows": [
+                Row(
+                    name="events_append",
+                    create_streaming_table=False,
+                    source_format="cloudFiles",
+                    source_details=Row(
+                        source_path_dev="/tmp/append",
+                        source_metadata=Row(
+                            select_metadata_cols=Row(
+                                file_path="_metadata.file_path"
+                            )
+                        ),
+                    ),
+                )
+            ]
+        }
+
+        encoded, schemas = onboarder.get_append_flows_json(
+            onboarding_row, "bronze", "dev"
+        )
+
+        append_flow = json.loads(encoded)[0]
+        source_metadata = append_flow["source_details"]["source_metadata"]
+        self.assertIsInstance(source_metadata, str)
+        self.assertEqual(
+            json.loads(source_metadata),
+            {
+                "select_metadata_cols": {
+                    "file_path": "_metadata.file_path"
+                }
+            },
+        )
+        self.assertEqual(
+            append_flow["source_details"]["path"], "/tmp/append"
+        )
+        self.assertEqual(schemas, {})
 
     def test_snapshot_source_requires_format(self):
         onboarder = self._make_onboarder()

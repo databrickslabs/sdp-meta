@@ -1066,6 +1066,30 @@ class OnboardDataflowspec:
         _dict.update(filtered)
         return _dict
 
+    def __serialize_source_metadata(self, source_metadata):
+        """Normalize nested Spark Rows and encode source metadata once."""
+        if hasattr(source_metadata, "asDict"):
+            source_metadata_dict = source_metadata.asDict(recursive=True)
+        elif isinstance(source_metadata, dict):
+            source_metadata_dict = dict(source_metadata)
+        else:
+            raise TypeError(
+                "source_metadata must be a mapping, got "
+                f"{type(source_metadata).__name__}"
+            )
+        select_metadata_cols = source_metadata_dict.get(
+            "select_metadata_cols"
+        )
+        if hasattr(select_metadata_cols, "asDict"):
+            select_metadata_cols = select_metadata_cols.asDict(
+                recursive=True
+            )
+        if isinstance(select_metadata_cols, dict):
+            source_metadata_dict["select_metadata_cols"] = (
+                self.__delete_none(dict(select_metadata_cols))
+            )
+        return json.dumps(self.__delete_none(source_metadata_dict))
+
     def _load_structured_file(self, file_path):
         """Load a JSON or YAML file via Spark and return the parsed Python object.
 
@@ -1747,6 +1771,13 @@ class OnboardDataflowspec:
                                     append_flows_schema[json_append_flow["name"]] = (
                                         schema
                                     )
+                            elif (
+                                "source_metadata" == ff
+                                and json_append_flow[key][ff] is not None
+                            ):
+                                mp[ff] = self.__serialize_source_metadata(
+                                    json_append_flow[key][ff]
+                                )
                             else:
                                 mp[f"{ff}"] = json_append_flow[key][f"{ff}"]
                         append_flow_map[key] = self.__delete_none(mp)
@@ -2132,16 +2163,10 @@ class OnboardDataflowspec:
                 if "source_table" in source_details_file:
                     source_details["source_table"] = source_details_file["source_table"]
                 if "source_metadata" in source_details_file:
-                    source_metadata_dict = self.__delete_none(
-                        source_details_file["source_metadata"].asDict()
-                    )
-                    if "select_metadata_cols" in source_metadata_dict:
-                        select_metadata_cols = self.__delete_none(
-                            source_metadata_dict["select_metadata_cols"].asDict()
+                    source_details["source_metadata"] = (
+                        self.__serialize_source_metadata(
+                            source_details_file["source_metadata"]
                         )
-                        source_metadata_dict["select_metadata_cols"] = select_metadata_cols
-                    source_details["source_metadata"] = json.dumps(
-                        self.__delete_none(source_metadata_dict)
                     )
             if source_format.lower() == "snapshot":
                 snapshot_format = source_details_file.get("snapshot_format", None)
