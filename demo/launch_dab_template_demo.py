@@ -191,7 +191,7 @@ SCENARIOS = {
             "--bundle-dir", "{bundle_dir}",
         ],
         description=(
-            "FEVM integration scenario with an initial split bronze/silver "
+            "Workspace integration scenario with an initial split bronze/silver "
             "CloudFiles topology and an independently configured combined "
             "bronze/silver topology with its own group and target schemas."
         ),

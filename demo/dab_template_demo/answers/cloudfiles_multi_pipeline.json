@@ -1,5 +1,5 @@
 {
-  "_comment": "Answers for the FEVM multi-pipeline integration scenario. The initial split bronze/silver topology uses dab_demo_cf_group; the launcher adds an independent combined topology for dab_demo_cf_secondary_group.",
+  "_comment": "Answers for the multi-pipeline workspace integration scenario. The initial split bronze/silver topology uses dab_demo_cf_group; the launcher adds an independent combined topology for dab_demo_cf_secondary_group.",
   "bundle_name": "dab_demo_cloudfiles_multi_pipeline",
   "uc_catalog_name": "{uc_catalog_name}",
   "sdp_meta_schema": "{sdp_meta_schema}",
