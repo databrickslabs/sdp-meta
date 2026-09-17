@@ -1838,18 +1838,46 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
         self.assertTrue(pipeline.next_snapshot_and_version_from_source_view)
 
     def test_is_create_view_with_next_snapshot_and_version(self):
-        """Test is_create_view when next_snapshot_and_version is provided."""
+        """Test snapshot specs use the callback instead of creating a view."""
         def mock_next_snapshot():
             return {}
 
         bronze_spec_map = copy.deepcopy(DataflowPipelineTests.bronze_dataflow_spec_map)
+        bronze_spec_map["sourceFormat"] = "snapshot"
         bronze_dataflow_spec = BronzeDataflowSpec(**bronze_spec_map)
 
         pipeline = DataflowPipeline(self.spark, bronze_dataflow_spec, "test_view", None, None, mock_next_snapshot)
 
-        # Should return False when next_snapshot_and_version is provided
         result = pipeline.is_create_view()
         self.assertFalse(result)
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_snapshot_callback_does_not_skip_non_snapshot_view(self, mock_dp):
+        """Test a layer-level snapshot callback does not suppress other input views."""
+        next_snapshot_and_version = MagicMock()
+        snapshot_spec_map = copy.deepcopy(DataflowPipelineTests.bronze_dataflow_spec_map)
+        snapshot_spec_map["sourceFormat"] = "snapshot"
+        snapshot_spec = BronzeDataflowSpec(**snapshot_spec_map)
+
+        cloudfiles_spec_map = copy.deepcopy(DataflowPipelineTests.bronze_dataflow_spec_map)
+        cloudfiles_spec_map["sourceFormat"] = "cloudFiles"
+        cloudfiles_spec_map["targetDetails"]["table"] = "cloudfiles_customer"
+        cloudfiles_spec = BronzeDataflowSpec(**cloudfiles_spec_map)
+
+        snapshot_pipeline = DataflowPipeline(
+            self.spark, snapshot_spec, "snapshot_inputview",
+            next_snapshot_and_version=next_snapshot_and_version,
+        )
+        cloudfiles_pipeline = DataflowPipeline(
+            self.spark, cloudfiles_spec, "cloudfiles_inputview",
+            next_snapshot_and_version=next_snapshot_and_version,
+        )
+
+        snapshot_pipeline.read()
+        cloudfiles_pipeline.read()
+
+        mock_dp.temporary_view.assert_called_once()
+        self.assertEqual(mock_dp.temporary_view.call_args.kwargs["name"], "cloudfiles_inputview")
 
     def test_apply_where_clause_empty(self):
         """Test __apply_where_clause with empty where clause."""

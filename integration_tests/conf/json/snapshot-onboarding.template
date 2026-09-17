@@ -65,5 +65,28 @@
       "scd_type": "1"
    },
    "silver_transformation_json_it": "{uc_volume_path}/integration_tests/conf/json/silver_transformations_snapshot.json"
+},
+{
+   "data_flow_id": "203",
+   "data_flow_group": "A1",
+   "source_system": "files",
+   "source_format": "cloudFiles",
+   "source_details": {
+      "source_database": "APP",
+      "source_table": "MIXED_CUSTOMERS",
+      "source_path_it": "{uc_volume_path}/integration_tests/resources/data/snapshots/mixed_cloudfiles",
+      "source_schema_path": "{uc_volume_path}/integration_tests/resources/data/snapshots/mixed_cloudfiles.ddl"
+   },
+   "bronze_catalog_it": "{uc_catalog_name}",
+   "bronze_database_it": "{bronze_schema}",
+   "bronze_table": "mixed_cloudfiles",
+   "bronze_reader_options": {
+      "cloudFiles.format": "json",
+      "cloudFiles.inferColumnTypes": "true",
+      "cloudFiles.rescuedDataColumn": "_rescued_data"
+   },
+   "bronze_table_properties": {
+      "pipelines.autoOptimize.managed": "true"
+   }
 }
   ]
