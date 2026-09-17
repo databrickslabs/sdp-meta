@@ -198,12 +198,17 @@ class DataflowPipeline:
             bool: True if a view should be created, False otherwise.
         """
         # if sourceDetails is provided and snapshot_format is delta, then create a view
-        # if next_snapshot_and_version is provided, then do not create a view
+        # if a snapshot spec uses next_snapshot_and_version, then do not create a view
         # otherwise create a view
         if (self.dataflowSpec.sourceDetails and self.dataflowSpec.sourceDetails.get("snapshot_format") == "delta"):
             self.next_snapshot_and_version_from_source_view = True
             return True
-        elif self.next_snapshot_and_version:
+        source_format = getattr(self.dataflowSpec, "sourceFormat", None)
+        if (
+            self.next_snapshot_and_version
+            and isinstance(source_format, str)
+            and source_format.lower() == "snapshot"
+        ):
             return False
         return True
 
