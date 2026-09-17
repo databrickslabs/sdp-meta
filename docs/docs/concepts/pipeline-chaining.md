@@ -95,4 +95,8 @@ Each transformation file specifies the `select_exp` and optional `where_clause` 
 
 ## Switching between modes
 
-Change `pipeline_mode` in `resources/variables.yml`, redeploy the bundle, and re-run the onboarding job. The onboarding file does not change.
+`pipeline_mode` selects the initial topology when the bundle is scaffolded; changing
+the variable later does not regenerate resource YAML. To change an existing topology,
+edit `resources/sdp_meta_pipelines.yml`, run `bundle-validate`, and redeploy. To keep
+the existing topology and add another split or combined group, use
+`bundle-add-pipeline`.

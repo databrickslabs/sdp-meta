@@ -180,7 +180,7 @@ Scaffolds a bundle with developer-friendly defaults (Autoloader + bronze_silver 
 
 **Q: What is `bundle-validate` checking beyond `databricks bundle validate`?**
 
-It catches SDP-META-specific authoring mistakes: unedited `<your-...>` or `__SET_ME__` placeholders in `databricks.yml` and onboarding files, mismatched `dataflow_group` references, `pipeline_mode` inconsistencies, and `wheel_source` vs `sdp_meta_dependency` drift.
+It catches SDP-META-specific authoring mistakes: unedited `<your-...>` or `__SET_ME__` placeholders in `databricks.yml` and onboarding files, per-pipeline `data_flow_group` and layer configuration errors, missing or duplicate pipeline-job wiring, invalid split dependencies, and `wheel_source` vs `sdp_meta_dependency` drift.
 
 **Q: How do I generate onboarding entries in bulk?**
 
@@ -215,7 +215,7 @@ It reads bundle defaults from `resources/variables.yml`, auto-increments `data_f
 
 **Q: Can a single bundle have multiple `data_flow_group` values?**
 
-Yes, but each group maps to a separate pipeline. The bundle template scaffolds one group by default. To add a second group, add a new pipeline resource in `resources/sdp_meta_pipelines.yml` with its own `bronze.group` / `silver.group` configuration key pointing at the new group name, then redeploy and re-run `onboarding`.
+Yes. The bundle template scaffolds one group by default. Run `databricks labs sdp-meta bundle-add-pipeline` to add a topology with its own `bronze.group` / `silver.group`, layer, mode, and optional target schemas. Add matching flows with `bundle-add-flow`, validate, redeploy, and re-run onboarding.
 
 **Q: How do I switch from PyPI to a local wheel (or vice versa)?**
 

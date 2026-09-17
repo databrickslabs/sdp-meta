@@ -8,6 +8,20 @@ sidebar_position: 99
 
 ---
 
+## v0.1.1
+
+### New Features
+
+- **Multiple pipeline topologies per DAB bundle** — `bundle-add-pipeline` adds independently configured bronze, silver, split, or combined pipelines with their own data-flow groups and target schemas. `bundle-validate` validates each pipeline and its job wiring independently. ([Issue #446](https://github.com/databrickslabs/sdp-meta/issues/446))
+
+### Fixes
+
+- **Mixed snapshot and non-snapshot pipelines** — a layer-level snapshot callback no longer suppresses input views for CloudFiles and other non-snapshot specs. ([Issue #443](https://github.com/databrickslabs/sdp-meta/issues/443))
+- **Append-flow source metadata** — CloudFiles append flows now serialize and select source metadata correctly. ([Issue #444](https://github.com/databrickslabs/sdp-meta/issues/444))
+- **Append-flow custom transformations** — custom transformation functions now run for append-flow inputs as well as primary inputs. ([Issue #445](https://github.com/databrickslabs/sdp-meta/issues/445))
+
+---
+
 ## v0.1.0
 
 ### New Features
@@ -18,7 +32,6 @@ sidebar_position: 99
 - **Automatic liquid clustering** (`cluster_by_auto`) for bronze and silver tables. When set to `true`, Databricks automatically determines the optimal clustering columns. Works alongside explicit `cluster_by` to define initial keys followed by automatic optimization. Supported for `bronze_cluster_by_auto`, `bronze_quarantine_table_cluster_by_auto`, and `silver_cluster_by_auto`. ([Issue #238](https://github.com/databrickslabs/sdp-meta/issues/238))
 - **MCP Server support** — opt-in `mcp` CLI command (`databricks labs sdp-meta mcp`) exposes sdp-meta over stdio so MCP-capable clients (Claude Code, Cursor, Claude Desktop) can drive scaffolding and inspection. Install with `pip install databricks-labs-sdp-meta[mcp]`.
 - **Declarative Automation Bundle (DAB) template** with `bundle-init --quickstart` zero-prompt fast path for instant bundle scaffolding. New CLI commands: `bundle-init`, `bundle-add-flow`, `bundle-prepare-wheel`, `bundle-validate`. Packaged template includes onboarding job, Lakeflow Spark Declarative Pipelines, runner notebook, and four flow-generation recipes.
-- **Multiple pipeline topologies per DAB bundle** — `bundle-add-pipeline` adds independently configured bronze, silver, split, or combined pipelines with their own data-flow groups and target schemas. `bundle-validate` now validates each pipeline and its job wiring instead of enforcing one global topology. ([Issue #446](https://github.com/databrickslabs/sdp-meta/issues/446))
 - **Row filter support** — `where_clause` in silver transformations files for pipeline-time row filtering, with coverage for multi-source CDC flows.
 - **Multi-source AUTO CDC** — multiple CDC sources can now feed into a single target via `create_auto_cdc_flow`.
 - **End-to-end YAML support** — onboarding, DQE rules, silver transformations, and packaged demos all accept YAML in addition to JSON.
