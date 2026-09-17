@@ -85,11 +85,15 @@ if str(SRC) not in sys.path:
 # Importing from src after path patching, so flake8 E402 is expected/intended.
 from databricks.labs.sdp_meta.bundle import (  # noqa: E402
     BundleAddFlowCommand,
+    BundleAddPipelineCommand,
     BundleInitCommand,
     BundlePrepareWheelCommand,
     BundleValidateCommand,
+    FlowSpec,
+    PipelineSpec,
     _flows_from_csv,
     bundle_add_flow,
+    bundle_add_pipeline,
     bundle_init,
     bundle_prepare_wheel,
     bundle_validate,
@@ -177,6 +181,24 @@ SCENARIOS = {
         default_bronze_target_schema="sdp_meta_bronze_dab_demo_cf",
         default_silver_target_schema="sdp_meta_silver_dab_demo_cf",
     ),
+    "multi_pipeline_cloudfiles": Scenario(
+        name="multi_pipeline_cloudfiles",
+        answers_file=DEMO_DIR / "answers" / "cloudfiles_multi_pipeline.json",
+        extra_flows_csv=DEMO_DIR / "flows" / "cloudfiles_extra.csv",
+        recipe_name="from_volume.py",
+        recipe_args_template=[
+            "--volume-path", "{bundle_dir}/_demo_landing",
+            "--bundle-dir", "{bundle_dir}",
+        ],
+        description=(
+            "Workspace integration scenario with an initial split bronze/silver "
+            "CloudFiles topology and an independently configured combined "
+            "bronze/silver topology with its own group and target schemas."
+        ),
+        default_sdp_meta_schema="sdp_meta_dab_demo_multi",
+        default_bronze_target_schema="sdp_meta_bronze_dab_demo_multi",
+        default_silver_target_schema="sdp_meta_silver_dab_demo_multi",
+    ),
     "kafka": Scenario(
         name="kafka",
         answers_file=DEMO_DIR / "answers" / "kafka_bronze.json",
@@ -252,7 +274,11 @@ SCENARIOS = {
 # `_demo_landing` tree for the recipe) and CSV `{demo_data_volume_path}`
 # substitution all gate on this set so adding a new cloudFiles topology
 # (eg. `cloudfiles_combined`) only requires registering the scenario above.
-_CLOUDFILES_SCENARIO_NAMES = {"cloudfiles", "cloudfiles_combined"}
+_CLOUDFILES_SCENARIO_NAMES = {
+    "cloudfiles",
+    "cloudfiles_combined",
+    "multi_pipeline_cloudfiles",
+}
 
 # Scenarios whose recipe (`from_uc.py`) requires upstream Delta tables in a
 # UC schema. The launcher auto-seeds those tables before STAGE 4 when
@@ -869,7 +895,10 @@ def stage_bundle_init(scenario: Scenario, out_dir: Path, uc_catalog_name: str,
     # that fails at pipeline runtime with `TABLE_OR_VIEW_NOT_FOUND`.
     # Strip it so STAGE 4's recipe (from_uc.py for delta, from_topics.py
     # for kafka/eventhub) is the only thing populating onboarding.yml.
-    if scenario.name in _DELTA_SCENARIO_NAMES or scenario.name in {"kafka", "eventhub"}:
+    if (
+        scenario.name in _DELTA_SCENARIO_NAMES
+        or scenario.name in {"kafka", "eventhub", "multi_pipeline_cloudfiles"}
+    ):
         _strip_example_onboarding_entry(bundle_dir)
 
     print(f"\n[STAGE 1] Bundle scaffolded at {bundle_dir}")
@@ -1060,6 +1089,58 @@ def stage_add_flow(scenario: Scenario, bundle_dir: Path, uc_catalog_name: str,
     ))
     if rc != 0:
         raise SystemExit(f"bundle-add-flow failed with exit code {rc}")
+
+
+def stage_add_independent_pipeline(
+    scenario: Scenario,
+    bundle_dir: Path,
+    *,
+    uc_schema: Optional[str],
+    demo_data_volume_path: Optional[str],
+) -> None:
+    if scenario.name != "multi_pipeline_cloudfiles":
+        return
+
+    _banner(
+        "STAGE 3B",
+        "bundle-add-pipeline + inherited bundle-add-flow  (secondary topology)",
+    )
+    schemas = _resolve_demo_schemas(scenario, uc_schema)
+    secondary_bronze = f"{schemas['bronze_target_schema']}_secondary"
+    secondary_silver = f"{schemas['silver_target_schema']}_secondary"
+    rc = bundle_add_pipeline(BundleAddPipelineCommand(
+        bundle_dir=str(bundle_dir),
+        pipeline=PipelineSpec(
+            name="secondary",
+            layer="bronze_silver",
+            pipeline_mode="combined",
+            dataflow_group="dab_demo_cf_secondary_group",
+            bronze_target_schema=secondary_bronze,
+            silver_target_schema=secondary_silver,
+        ),
+    ))
+    if rc != 0:
+        raise SystemExit(f"bundle-add-pipeline failed with exit code {rc}")
+
+    volume_base = demo_data_volume_path or (
+        "/Volumes/__placeholder__/__placeholder__/__placeholder__/demo_data"
+    )
+    rc = bundle_add_flow(BundleAddFlowCommand(
+        bundle_dir=str(bundle_dir),
+        flows=[FlowSpec(
+            source_format="cloudFiles",
+            source_path=f"{volume_base}/customers/",
+            bronze_table="secondary_customers",
+            silver_table="secondary_customers",
+            data_flow_group="dab_demo_cf_secondary_group",
+            source_system="demo_assets_secondary",
+            cloudfiles_format="csv",
+        )],
+    ))
+    if rc != 0:
+        raise SystemExit(
+            f"bundle-add-flow for secondary topology failed with exit code {rc}"
+        )
 
 
 def stage_recipe(scenario: Scenario, bundle_dir: Path, *, apply_recipe: bool,
@@ -1408,6 +1489,23 @@ def _resolve_target_schemas(bundle_dir: Path) -> List[str]:
         val = doc.get("variables", {}).get(key, {}).get("default")
         if val and val not in schemas:
             schemas.append(val)
+    pipelines_path = bundle_dir / "resources" / "sdp_meta_pipelines.yml"
+    if pipelines_path.is_file():
+        pipelines_doc = yaml.safe_load(pipelines_path.read_text()) or {}
+        pipelines = (
+            pipelines_doc.get("resources", {}).get("pipelines", {}) or {}
+        )
+        for pipeline in pipelines.values():
+            if not isinstance(pipeline, dict):
+                continue
+            config = pipeline.get("configuration") or {}
+            for key in (
+                "sdp_meta.bronzeTargetSchema",
+                "sdp_meta.silverTargetSchema",
+            ):
+                val = config.get(key)
+                if val and "${" not in str(val) and val not in schemas:
+                    schemas.append(val)
     return schemas
 
 
@@ -1513,6 +1611,35 @@ def stage_deploy_and_run(bundle_dir: Path, profile: Optional[str], *,
     if uc_catalog:
         _ensure_target_schemas(bundle_dir, uc_catalog, profile)
 
+    # Stage the rewritten/pruned conf tree before deployment and point only
+    # the onboarding task at it. Passing --python-named-params to `bundle run`
+    # forwards the parameter to every Python wheel task, including stage_conf,
+    # whose CLI correctly rejects onboarding_file_path.
+    if uc_catalog and uc_schema and uc_volume:
+        volume_conf_base = _stage_conf_to_uc_volume(
+            bundle_dir, uc_catalog, uc_schema, uc_volume, profile,
+        )
+        onboarding_file_name = _resolve_onboarding_file_name(bundle_dir)
+        onboarding_path = f"{volume_conf_base}/{onboarding_file_name}"
+        onboarding_job_path = (
+            bundle_dir / "resources" / "sdp_meta_onboarding_job.yml"
+        )
+        onboarding_job = yaml.safe_load(onboarding_job_path.read_text())
+        tasks = onboarding_job["resources"]["jobs"]["onboarding"]["tasks"]
+        onboarding_task = next(
+            task for task in tasks
+            if task.get("task_key") == "onboard_dataflowspecs"
+        )
+        onboarding_task["python_wheel_task"]["named_parameters"][
+            "onboarding_file_path"
+        ] = onboarding_path
+        onboarding_job_path.write_text(
+            yaml.safe_dump(onboarding_job, sort_keys=False)
+        )
+        print(
+            f"[STAGE 6] Onboarding task file path -> {onboarding_path}"
+        )
+
     # 1) deploy. Capture stderr so we can detect the silent
     # "no files to sync" failure mode (caused by the bundle dir being
     # ignored by an ancestor .gitignore) before pipelines fail with
@@ -1543,22 +1670,7 @@ def stage_deploy_and_run(bundle_dir: Path, profile: Optional[str], *,
             ".gitignored ancestor."
         )
 
-    # 2) (optional) stage conf/ to UC volume + build the override params.
-    onboarding_extra: List[str] = []
-    if uc_catalog and uc_schema and uc_volume:
-        volume_conf_base = _stage_conf_to_uc_volume(
-            bundle_dir, uc_catalog, uc_schema, uc_volume, profile,
-        )
-        onboarding_file_name = _resolve_onboarding_file_name(bundle_dir)
-        onboarding_extra = [
-            "--python-named-params",
-            f"onboarding_file_path={volume_conf_base}/{onboarding_file_name}",
-        ]
-        print(
-            f"[STAGE 6] Overriding onboarding_file_path -> "
-            f"{volume_conf_base}/{onboarding_file_name}"
-        )
-    else:
+    if not (uc_catalog and uc_schema and uc_volume):
         print(
             "[STAGE 6] WARNING: --apply-prepare-wheel was not set with UC "
             "catalog/schema/volume; the onboarding job will read from "
@@ -1567,7 +1679,7 @@ def stage_deploy_and_run(bundle_dir: Path, profile: Optional[str], *,
         )
 
     for sub in (
-        ["bundle", "run", "onboarding", "--target", "dev"] + onboarding_extra,
+        ["bundle", "run", "onboarding", "--target", "dev"],
         ["bundle", "run", "pipelines", "--target", "dev"],
     ):
         cmd = base + sub
@@ -1685,7 +1797,8 @@ def _selected_scenarios(name: str) -> List[Scenario]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", maxsplit=1)[0])
     parser.add_argument("--scenario", default="all",
-                        choices=["cloudfiles", "cloudfiles_combined", "kafka",
+                        choices=["cloudfiles", "cloudfiles_combined",
+                                 "multi_pipeline_cloudfiles", "kafka",
                                  "eventhub", "delta", "all"],
                         help="Which source scenario to run (default: all). "
                              "`cloudfiles` renders pipeline_mode=split; "
@@ -1813,6 +1926,12 @@ def main() -> int:
                 demo_data_volume_path=demo_data_volume_path,
                 uc_source_catalog=args.uc_source_catalog,
                 uc_source_schema=args.uc_source_schema,
+            )
+            stage_add_independent_pipeline(
+                scenario,
+                bundle_dir,
+                uc_schema=args.uc_schema,
+                demo_data_volume_path=demo_data_volume_path,
             )
             stage_recipe(
                 scenario, bundle_dir,

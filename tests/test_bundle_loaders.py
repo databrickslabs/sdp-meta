@@ -194,6 +194,9 @@ class TestLoadBundleAddFlowConfig(unittest.TestCase):
             "Silver table name (blank = same as bronze)": "",
             "data_flow_id (use `auto` to auto-increment)": "auto",
             "data_flow_group (blank = use bundle default)": "",
+            "Flow layer (blank = use bundle default)": "",
+            "Bronze target schema (blank = use bundle default)": "",
+            "Silver target schema (blank = use bundle default)": "",
         }
         base.update(extras)
         return base, {

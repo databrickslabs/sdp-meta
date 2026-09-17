@@ -416,8 +416,9 @@ class OnboardDataflowspec:
                 # An onboarding row can be bronze-only, silver-only, or
                 # both. The runtime onboarding methods pick which rows
                 # to process by these exact predicates:
-                #   * bronze row: has non-empty ``source_details``
-                #     (see onboard_bronze_dataflow_spec:1243).
+                #   * bronze row: has a bronze target, or has source details
+                #     without a silver target (a malformed bronze row whose
+                #     missing target still needs a useful validation error).
                 #   * silver row: has non-empty
                 #     ``silver_database_{env}`` (see
                 #     onboard_silver_dataflow_spec:2157).
@@ -428,7 +429,13 @@ class OnboardDataflowspec:
                 # required-field check just for not having silver
                 # fields (issue #343 finding #2 corner case).
                 if layer == "bronze":
-                    participates = bool(row_dict.get("source_details"))
+                    participates = bool(
+                        row_dict.get(f"bronze_database_{env}")
+                        or (
+                            row_dict.get("source_details")
+                            and not row_dict.get(f"silver_database_{env}")
+                        )
+                    )
                 elif layer == "silver":
                     participates = bool(row_dict.get(f"silver_database_{env}"))
                 else:

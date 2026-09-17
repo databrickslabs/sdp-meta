@@ -322,7 +322,14 @@ class LauncherRegistryTests(unittest.TestCase):
     def test_scenarios_registered(self):
         self.assertEqual(
             set(self.module.SCENARIOS.keys()),
-            {"cloudfiles", "cloudfiles_combined", "kafka", "eventhub", "delta"},
+            {
+                "cloudfiles",
+                "cloudfiles_combined",
+                "multi_pipeline_cloudfiles",
+                "kafka",
+                "eventhub",
+                "delta",
+            },
         )
 
     def test_cloudfiles_scenario_set_matches_registry(self):
@@ -332,7 +339,11 @@ class LauncherRegistryTests(unittest.TestCase):
         them, and the recipe will crash with `FileNotFoundError`."""
         self.assertEqual(
             self.module._CLOUDFILES_SCENARIO_NAMES,
-            {"cloudfiles", "cloudfiles_combined"},
+            {
+                "cloudfiles",
+                "cloudfiles_combined",
+                "multi_pipeline_cloudfiles",
+            },
         )
 
     def test_cloudfiles_combined_uses_combined_pipeline_mode(self):
@@ -438,8 +449,7 @@ class CloudfilesDatasetReuseTests(unittest.TestCase):
     def test_materialize_csv_substitutes_demo_data_volume_path(self):
         """`_materialize_csv` swaps the placeholder when the path is provided."""
         import tempfile
-        from launch_dab_template_demo_reuse import SCENARIOS as SCN
-        scenario = SCN["cloudfiles"]
+        scenario = self.module.SCENARIOS["cloudfiles"]
         with tempfile.TemporaryDirectory() as tmp:
             out = self.module._materialize_csv(
                 scenario, "cat", Path(tmp),
@@ -453,8 +463,7 @@ class CloudfilesDatasetReuseTests(unittest.TestCase):
     def test_materialize_csv_uses_safe_placeholder_when_path_missing(self):
         """Without --apply-prepare-wheel, the CSV still renders (offline-safe)."""
         import tempfile
-        from launch_dab_template_demo_reuse import SCENARIOS as SCN
-        scenario = SCN["cloudfiles"]
+        scenario = self.module.SCENARIOS["cloudfiles"]
         with tempfile.TemporaryDirectory() as tmp:
             out = self.module._materialize_csv(
                 scenario, "cat", Path(tmp),

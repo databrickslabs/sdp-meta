@@ -1262,6 +1262,35 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    def test_combined_preflight_does_not_treat_silver_source_as_bronze_row(self):
+        """A silver-only source row remains valid when onboarding both layers."""
+        rows = [{
+            "data_flow_id": "446S1",
+            "data_flow_group": "silver_group",
+            "source_format": "delta",
+            "source_details": {
+                "source_database": "raw",
+                "source_table": "orders",
+            },
+            "silver_database_dev": "main.silver",
+            "silver_table": "orders",
+            "silver_transformation_json_dev": "/tmp/xform.json",
+        }]
+        tmp_dir = tempfile.mkdtemp(prefix="sdp_meta_i446_silver_")
+        try:
+            onboarding_file = os.path.join(tmp_dir, "onboarding.json")
+            with open(onboarding_file, "w") as f:
+                json.dump(rows, f)
+            params = copy.deepcopy(self.onboarding_bronze_silver_params_map)
+            params["onboarding_file_path"] = onboarding_file
+            onboarder = OnboardDataflowspec(self.spark, params)
+
+            onboarder._OnboardDataflowspec__pre_validate_onboarding_uc_names(
+                layers=("bronze", "silver")
+            )
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
     def test_issue343_empty_required_field_rejected(self):
         """Empty ``<layer>_database_<env>`` / ``<layer>_table`` \u2192 400.
 

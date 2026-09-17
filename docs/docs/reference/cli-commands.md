@@ -22,6 +22,7 @@ All SDP-META operations are available through the Databricks Labs CLI extension.
 | `bundle-init` | Scaffold a new DAB bundle (`--quickstart` for zero-prompt fast path) |
 | `bundle-prepare-wheel` | Build and upload the sdp-meta wheel to a UC Volume |
 | `bundle-add-flow` | Add a new flow to an existing bundle from UC, Volumes, Kafka topics, or CSV inventory |
+| `bundle-add-pipeline` | Add an independently configured pipeline topology and job wiring |
 | `bundle-validate` | Validate bundle configuration (enforces `sdp_meta_dependency` is set) |
 | `mcp` | Start the MCP server (stdio transport) |
 
@@ -83,9 +84,30 @@ Adds a new data flow entry to an existing bundle's onboarding configuration from
 databricks labs sdp-meta bundle-add-flow
 ```
 
+## `bundle-add-pipeline`
+
+Adds another bronze-only, silver-only, split bronze/silver, or combined
+bronze/silver topology to `resources/sdp_meta_pipelines.yml`. Each topology
+has its own `data_flow_group` and may override its bronze and silver target
+schemas. Existing single-topology bundles remain valid.
+
+```bash
+databricks labs sdp-meta bundle-add-pipeline
+```
+
+The command adds the pipeline resources and corresponding tasks to the
+`pipelines` job. In split mode, it also wires the silver task to depend on
+the matching bronze task. It widens the onboarding job when another layer is
+introduced; later `bundle-add-flow` calls for that group inherit the pipeline's
+layer and target schemas.
+
 ## `bundle-validate`
 
-Validates a bundle's configuration and enforces that `sdp_meta_dependency` is not the `__SET_ME__` sentinel.
+Validates every configured pipeline independently, checks its layer-specific
+dataflowspec table and group settings, and verifies that every pipeline is
+referenced exactly once by the `pipelines` job. Split silver pipelines must
+depend on a bronze pipeline for the same group. Target-specific variable
+overrides are resolved when `--target` is selected.
 
 ```bash
 databricks labs sdp-meta bundle-validate
