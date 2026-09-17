@@ -17,6 +17,162 @@ from integration_tests.run_backward_compat_tests import (
 from integration_tests.version_profiles import CURRENT, LEGACY
 
 
+class BackwardCompatFixtureTests(TestCase):
+    def test_append_flow_metadata_is_removed_without_changing_top_level_metadata(self):
+        top_level_metadata = {"select_metadata_cols": {"name": "_metadata.file_name"}}
+        payload = [
+            {
+                "source_details": {"source_metadata": top_level_metadata},
+                "bronze_append_flows": [
+                    {
+                        "source_details": {
+                            "path": "/source",
+                            "source_metadata": {
+                                "select_metadata_cols": {
+                                    "path": "_metadata.file_path"
+                                }
+                            },
+                        }
+                    }
+                ],
+            }
+        ]
+
+        removed = BackwardCompatRunner._remove_append_flow_source_metadata(payload)
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(
+            payload[0]["source_details"]["source_metadata"], top_level_metadata
+        )
+        self.assertEqual(
+            payload[0]["bronze_append_flows"][0]["source_details"],
+            {"path": "/source"},
+        )
+
+    def test_row_filters_are_removed_from_compatibility_fixture(self):
+        payload = [
+            {
+                "bronze_row_filter": "ROW FILTER catalog.schema.fn ON (operation)",
+                "bronze_quarantine_row_filter": (
+                    "ROW FILTER catalog.schema.fn ON (operation)"
+                ),
+                "silver_row_filter": "ROW FILTER catalog.schema.fn ON (operation)",
+                "silver_quarantine_row_filter": (
+                    "ROW FILTER catalog.schema.fn ON (operation)"
+                ),
+                "bronze_table": "customers",
+            }
+        ]
+
+        removed = BackwardCompatRunner._remove_row_filter_configuration(payload)
+
+        self.assertEqual(removed, 4)
+        self.assertEqual(payload, [{"bronze_table": "customers"}])
+
+
+class CurrentUpgradeRunnerTests(TestCase):
+    def setUp(self):
+        self.ws = MagicMock()
+        self.runner = BackwardCompatRunner({}, self.ws)
+        self.conf = BCRunnerConf(
+            run_id="current-upgrade",
+            uc_catalog_name="catalog",
+            source_ref="v0.1.0",
+            target_ref="v0.1.1",
+            source_profile=CURRENT,
+            target_profile=CURRENT,
+            bronze_a1_pipeline_id="bronze-a1",
+            bronze_a2_pipeline_id="bronze-a2",
+            silver_pipeline_id="silver",
+            source_main_whl_remote="/Volumes/test/source-0.1.0.whl",
+            target_main_whl_remote="/Volumes/test/target-0.1.1.whl",
+        )
+
+    def test_current_upgrade_preserves_canonical_runner_and_wheel_key(self):
+        phase1 = self.runner._build_phase1_pipeline_config(
+            self.conf, "bronze", "A1"
+        )
+        phase2 = self.runner._build_phase2_pipeline_config(
+            self.conf, "bronze", "A1"
+        )
+
+        self.assertEqual(
+            self.runner._runner_notebook_filename(self.conf),
+            "init_sdp_meta_pipeline.py",
+        )
+        self.assertEqual(
+            phase1["sdp_meta_whl"], self.conf.source_main_whl_remote
+        )
+        self.assertEqual(
+            phase2["sdp_meta_whl"], self.conf.target_main_whl_remote
+        )
+        self.assertNotIn("dlt_meta_whl", phase1)
+        self.assertNotIn("dlt_meta_whl", phase2)
+
+    def test_current_upgrade_validator_receives_version_line_context(self):
+        self.runner.build_phase2_job(self.conf)
+
+        validate_task = next(
+            task
+            for task in self.ws.jobs.create.call_args.kwargs["tasks"]
+            if task.task_key == "phase2_validate"
+        )
+        parameters = validate_task.notebook_task.base_parameters
+        self.assertEqual(parameters["source_profile"], "current")
+        self.assertEqual(parameters["source_ref"], "v0.1.0")
+        self.assertEqual(parameters["target_ref"], "v0.1.1")
+
+    def test_v010_source_removes_unsupported_append_flow_metadata(self):
+        payload = [
+            {
+                "bronze_append_flows": [
+                    {"source_details": {"source_metadata": {"enabled": "true"}}}
+                ]
+            }
+        ]
+
+        removed_metadata, removed_row_filters = (
+            self.runner._normalize_source_baseline_fixture(self.conf, payload)
+        )
+
+        self.assertEqual((removed_metadata, removed_row_filters), (1, 0))
+        self.assertEqual(
+            payload[0]["bronze_append_flows"][0]["source_details"], {}
+        )
+
+    def test_capable_source_retains_append_metadata_but_removes_row_filter(self):
+        self.conf.source_ref = "v0.1.1"
+        metadata = {"select_metadata_cols": {"name": "_metadata.file_name"}}
+        payload = [
+            {
+                "bronze_row_filter": "ROW FILTER catalog.schema.fn ON (operation)",
+                "bronze_append_flows": [
+                    {"source_details": {"source_metadata": metadata}}
+                ],
+            }
+        ]
+
+        removed_metadata, removed_row_filters = (
+            self.runner._normalize_source_baseline_fixture(self.conf, payload)
+        )
+
+        self.assertEqual((removed_metadata, removed_row_filters), (0, 1))
+        self.assertEqual(
+            payload[0]["bronze_append_flows"][0]["source_details"][
+                "source_metadata"
+            ],
+            metadata,
+        )
+        self.assertNotIn("bronze_row_filter", payload[0])
+
+    def test_custom_current_source_defaults_to_latest_capabilities(self):
+        self.conf.source_ref = "feature/future-release"
+
+        self.assertTrue(
+            self.conf.source_supports_append_flow_source_metadata
+        )
+
+
 class StandardLegacyUpgradeRunnerTests(TestCase):
     """Ensure standard-compute tests retain legacy pipeline publishing."""
 
@@ -60,6 +216,11 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
         self.assertNotIn("schema", kwargs)
         self.assertEqual(kwargs["clusters"][0].label, "default")
         self.assertEqual(kwargs["clusters"][0].num_workers, 2)
+
+    def test_legacy_source_does_not_support_append_flow_metadata(self):
+        self.assertFalse(
+            self.conf.source_supports_append_flow_source_metadata
+        )
 
     def test_serverless_dpm_execution_kwargs_use_schema(self):
         self.conf.pipeline_mode = "serverless_dpm"
@@ -182,6 +343,19 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
         )
         self.assertEqual(config["dlt_meta_whl"], "dlt-meta==0.1.0")
 
+    def test_phase2_validator_receives_source_profile(self):
+        self.runner.build_phase2_job(self.conf)
+
+        validate_task = next(
+            task
+            for task in self.ws.jobs.create.call_args.kwargs["tasks"]
+            if task.task_key == "phase2_validate"
+        )
+        self.assertEqual(
+            validate_task.notebook_task.base_parameters["source_profile"],
+            "legacy",
+        )
+
     @patch.object(BackwardCompatRunner, "_download_compat_runtime_wheels")
     @patch("integration_tests.run_backward_compat_tests.GitRefWheelBuilder")
     def test_compat_wheelhouse_builds_primary_redirect_and_dependency_wheels(
@@ -254,6 +428,24 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
             b"%pip install --force-reinstall --no-index --find-links",
             phase2_upload.kwargs["content"],
         )
+
+    def test_upload_runner_notebooks_ignores_non_file_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runners = os.path.join(
+                tmp, "notebooks", "backward_compat_runners"
+            )
+            os.makedirs(os.path.join(runners, "__pycache__"))
+            notebook = os.path.join(runners, "validate.py")
+            with open(notebook, "wb") as fh:
+                fh.write(b"print('valid runner')\n")
+            self.conf.int_tests_dir = tmp
+
+            self.runner.upload_runner_notebooks(self.conf)
+
+        self.ws.workspace.upload.assert_called_once()
+        upload = self.ws.workspace.upload.call_args.kwargs
+        self.assertTrue(upload["path"].endswith("/validate.py"))
+        self.assertEqual(upload["content"], b"print('valid runner')\n")
 
     def test_pypi_phase2_rewrites_runner_with_force_reinstall(self):
         self.conf.install_mode = "pypi"

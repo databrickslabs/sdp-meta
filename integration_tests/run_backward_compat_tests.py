@@ -346,6 +346,18 @@ class BCRunnerConf:
     def is_standard_legacy_mode(self) -> bool:
         return self.pipeline_mode == "standard_legacy"
 
+    @property
+    def source_supports_append_flow_source_metadata(self) -> bool:
+        """Whether SOURCE includes the append-flow metadata fix from #444."""
+        if self.source_profile.name != "current":
+            return False
+        match = re.match(r"^v?(\d+)\.(\d+)\.(\d+)(?:$|[.+-])", self.source_ref)
+        if match is None:
+            # Custom CURRENT branches represent the latest contract unless
+            # the caller explicitly pins an older release ref.
+            return True
+        return tuple(int(part) for part in match.groups()) >= (0, 1, 1)
+
 
 class BackwardCompatRunner:
     """Two-phase orchestrator: SOURCE -> TARGET wheel swap.
@@ -1023,6 +1035,18 @@ class BackwardCompatRunner:
         the full v0.1.0+ shape). We render from the source profile's
         templates so Phase 1 onboards exactly what the customer would
         have onboarded on the source version.
+
+        The shared current-version CloudFiles fixture also exercises
+        append-flow ``source_metadata``, support added after v0.1.0 by
+        issue #444. Remove only that nested field for older sources so
+        v0.1.0 can establish the Phase 1 baseline; capable source refs
+        retain it on their upgrade path. Top-level ``source_metadata``
+        remains covered for every source.
+
+        Row filters are intentionally removed for every version because
+        this suite compares deterministic physical row counts. Their
+        group-dependent visibility is covered by the regular CloudFiles
+        integration suite instead.
         """
         subs = {
             "{uc_volume_path}": conf.uc_volume_path,
@@ -1039,12 +1063,65 @@ class BackwardCompatRunner:
             for k, v in subs.items():
                 text = text.replace(k, v or "")
             payload = json.loads(text)
+            removed_metadata, removed_row_filters = (
+                self._normalize_source_baseline_fixture(conf, payload)
+            )
+            if removed_metadata:
+                print(
+                    "  removed unsupported append-flow source_metadata from "
+                    f"{removed_metadata} backward-compatibility flow(s)"
+                )
+            if removed_row_filters:
+                print(
+                    "  removed row-filter configuration from "
+                    f"{removed_row_filters} backward-compatibility table(s)"
+                )
             with open(out, "w") as fh:
                 json.dump(payload, fh, indent=4)
             print(
                 f"  rendered onboarding from {tmpl} ({conf.source_profile.name}) "
                 f"-> {out}"
             )
+
+    @classmethod
+    def _normalize_source_baseline_fixture(
+        cls, conf: BCRunnerConf, payload
+    ) -> tuple:
+        """Apply only the compatibility harness's source-specific exclusions."""
+        removed_metadata = 0
+        if not conf.source_supports_append_flow_source_metadata:
+            removed_metadata = cls._remove_append_flow_source_metadata(payload)
+        removed_row_filters = cls._remove_row_filter_configuration(payload)
+        return removed_metadata, removed_row_filters
+
+    @staticmethod
+    def _remove_append_flow_source_metadata(payload) -> int:
+        """Keep source baselines within the pre-#444 append-flow contract."""
+        removed = 0
+        for row in payload:
+            for layer in ("bronze", "silver"):
+                for append_flow in row.get(f"{layer}_append_flows") or []:
+                    source_details = append_flow.get("source_details") or {}
+                    if "source_metadata" in source_details:
+                        del source_details["source_metadata"]
+                        removed += 1
+        return removed
+
+    @staticmethod
+    def _remove_row_filter_configuration(payload) -> int:
+        """Keep compatibility row counts independent of the caller's groups."""
+        removed = 0
+        for row in payload:
+            for key in (
+                "bronze_row_filter",
+                "bronze_quarantine_row_filter",
+                "silver_row_filter",
+                "silver_quarantine_row_filter",
+            ):
+                if key in row:
+                    del row[key]
+                    removed += 1
+        return removed
 
     # ----- workspace upload ---------------------------------------------
 
@@ -1133,7 +1210,10 @@ class BackwardCompatRunner:
         self.ws.workspace.mkdirs(f"{conf.runners_nb_path}/runners")
         local_runners = f"{conf.int_tests_dir}/notebooks/backward_compat_runners"
         for nb in os.listdir(local_runners):
-            with open(os.path.join(local_runners, nb), "rb") as fh:
+            local_path = os.path.join(local_runners, nb)
+            if not os.path.isfile(local_path):
+                continue
+            with open(local_path, "rb") as fh:
                 content = fh.read()
                 if phase2:
                     content = self._notebook_source_for_upload(conf, nb, content)
@@ -1533,6 +1613,7 @@ class BackwardCompatRunner:
                         "uc_volume_path": conf.uc_volume_path,
                         "output_file_path": f"/Workspace{conf.phase1_output_ws}",
                         "run_id": conf.run_id,
+                        "source_ref": conf.source_ref,
                     },
                 ),
             ),
@@ -1598,6 +1679,9 @@ class BackwardCompatRunner:
                         # ``from src.dataflow_spec import …``.
                         "target_main_whl": self.install_spec_target_main(conf),
                         "target_install_surface": conf.target_install_surface,
+                        "source_profile": conf.source_profile.name,
+                        "source_ref": conf.source_ref,
+                        "target_ref": conf.target_ref,
                         # None in primary_wheel mode (validate_phase2 only
                         # reads this in compat_wheelhouse mode, where
                         # build_wheels has pinned it); coerce so the SDK
