@@ -87,6 +87,33 @@ except AssertionError:
         f"append={metadata_stats.append_rows}. Failed!"
     )
 
+# Regression coverage for issue #445. The bronze custom transform adds
+# processing_ts to the primary source and every append source feeding the same
+# target. Before the fix, append-flow rows reached this table with a null value.
+transform_stats = spark.sql(
+    f"""
+    SELECT
+      COUNT(*) AS total_rows,
+      COUNT(processing_ts) AS transformed_rows
+    FROM {transactions_table}
+    """
+).collect()[0]
+log_list.append(
+    "Validating custom transform output for bronze append-flow rows."
+)
+try:
+    assert transform_stats.total_rows == transform_stats.transformed_rows
+    log_list.append(
+        f"processing_ts populated for all {transform_stats.total_rows} "
+        "primary and append-flow rows. Passed!"
+    )
+except AssertionError:
+    log_list.append(
+        "Append-flow custom transform validation failed: "
+        f"total={transform_stats.total_rows}, "
+        f"transformed={transform_stats.transformed_rows}. Failed!"
+    )
+
 # Row filter wiring assertion (UC only). The cloudfiles customers flow declares
 # bronze_row_filter / silver_row_filter on `operation` referencing the UDF
 # `<catalog>.<bronze_schema>.customer_op_filter`. Confirm via
