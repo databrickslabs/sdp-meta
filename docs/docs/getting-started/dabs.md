@@ -158,6 +158,7 @@ To switch: change `pipeline_mode` in `resources/variables.yml` and redeploy.
 | `bundle-init` | Scaffold a new SDP-META DAB from the packaged template |
 | `bundle-prepare-wheel` | Build the local wheel and upload it to a UC Volume |
 | `bundle-add-flow` | Append one or more flow entries to the bundle's onboarding file |
+| `bundle-add-pipeline` | Add another independently configured pipeline topology |
 | `bundle-validate` | Run `databricks bundle validate` plus SDP-META-specific consistency checks |
 
 ### Adding flows with bundle-add-flow
@@ -172,6 +173,20 @@ databricks labs sdp-meta bundle-add-flow
 ```
 
 `bundle-add-flow` pulls bundle defaults from `resources/variables.yml`, auto-increments `data_flow_id`, and refuses to write on ID collisions.
+
+### Adding independent pipelines
+
+One bundle can contain multiple pipeline topologies with different layers,
+data-flow groups, and target schemas:
+
+```bash
+databricks labs sdp-meta bundle-add-pipeline
+```
+
+Choose a resource name, layer (`bronze`, `silver`, or `bronze_silver`), split
+or combined mode where applicable, and the `data_flow_group`. The command
+updates both `resources.pipelines` and the `pipelines` job. Add matching
+onboarding rows with `bundle-add-flow`, then run `bundle-validate`.
 
 :::tip
 After editing the onboarding file, re-run only the **onboarding job** — not `databricks bundle deploy` — unless you also changed `resources/variables.yml` or the bundle YAML files.

@@ -7,6 +7,7 @@ subprocesses are mocked at the bundle.py boundary.
 """
 
 import asyncio
+import importlib.util
 import os
 import shutil
 import sys
@@ -17,10 +18,16 @@ from unittest.mock import MagicMock, patch
 
 try:
     from mcp import Client, StdioServerParameters, stdio_client
+except ImportError as exc:  # pragma: no cover - environment-dependent path
+    if importlib.util.find_spec("mcp") is not None:
+        raise RuntimeError(
+            "An incompatible MCP SDK is installed. Install the supported "
+            "`mcp>=2.0.0,<3.0` extra instead of silently skipping MCP tests."
+        ) from exc
+    _MCP_AVAILABLE = False
+else:
     from databricks.labs.sdp_meta import mcp_server  # noqa: F401
     _MCP_AVAILABLE = True
-except ImportError:  # pragma: no cover - skip path
-    _MCP_AVAILABLE = False
 
 
 @unittest.skipUnless(_MCP_AVAILABLE, "mcp extra not installed")
@@ -95,6 +102,7 @@ class ListToolsTests(unittest.TestCase):
                 "sdp_meta_bundle_init",
                 "sdp_meta_bundle_validate",
                 "sdp_meta_bundle_add_flow",
+                "sdp_meta_bundle_add_pipeline",
                 "sdp_meta_list_templates",
                 "sdp_meta_get_onboarding_template",
             },
@@ -135,7 +143,7 @@ class ProtocolTests(unittest.TestCase):
                 return tools, resources
 
         tools, resources = asyncio.run(inspect_server())
-        self.assertEqual(len(tools), 5)
+        self.assertEqual(len(tools), 6)
         self.assertEqual(resources, [])
 
     def test_client_call_returns_structured_content(self):
@@ -209,7 +217,7 @@ class ProtocolTests(unittest.TestCase):
                 return tools, result, resource
 
         tools, result, resource = asyncio.run(exercise_stdio())
-        self.assertEqual(len(tools.tools), 5)
+        self.assertEqual(len(tools.tools), 6)
         self.assertFalse(result.is_error)
         self.assertIn("data_flow_id", resource.contents[0].text)
 
@@ -515,6 +523,46 @@ class BundleAddFlowToolTests(unittest.TestCase):
             mcp_server.call_tool(
                 "sdp_meta_bundle_add_flow",
                 {"bundle_dir": str(self.root / "b"), "flows": []},
+            )
+
+    @patch("databricks.labs.sdp_meta.bundle.bundle_add_pipeline")
+    def test_add_pipeline_builds_pipeline_spec(self, mock_add):
+        mock_add.return_value = 0
+        bundle_dir = self.root / "b"
+        result = mcp_server.call_tool(
+            "sdp_meta_bundle_add_pipeline",
+            {
+                "bundle_dir": str(bundle_dir),
+                "pipeline": {
+                    "name": "orders",
+                    "layer": "bronze_silver",
+                    "pipeline_mode": "split",
+                    "dataflow_group": "orders",
+                },
+                "dry_run": True,
+            },
+        )
+        cmd = mock_add.call_args[0][0]
+        self.assertEqual(cmd.bundle_dir, str(bundle_dir))
+        self.assertTrue(cmd.dry_run)
+        self.assertEqual(cmd.pipeline.name, "orders")
+        self.assertEqual(cmd.pipeline.layer, "bronze_silver")
+        self.assertEqual(result["pipeline_added"]["dataflow_group"], "orders")
+
+    @patch("databricks.labs.sdp_meta.bundle.bundle_add_pipeline")
+    def test_add_pipeline_surfaces_nonzero_returncode(self, mock_add):
+        mock_add.return_value = 2
+        with self.assertRaisesRegex(RuntimeError, '"returncode": 2'):
+            mcp_server.call_tool(
+                "sdp_meta_bundle_add_pipeline",
+                {
+                    "bundle_dir": str(self.root / "b"),
+                    "pipeline": {
+                        "name": "orders",
+                        "layer": "bronze",
+                        "dataflow_group": "orders",
+                    },
+                },
             )
 
 

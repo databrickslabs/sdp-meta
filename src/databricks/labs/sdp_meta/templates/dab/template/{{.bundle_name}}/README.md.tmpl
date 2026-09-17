@@ -111,7 +111,28 @@ The job and both pipelines install sdp-meta from `${var.sdp_meta_dependency}`. T
 databricks labs sdp-meta bundle-validate
 ```
 
-Runs `databricks bundle validate` plus sdp-meta-specific checks: onboarding file exists, dataflow_group referenced by the pipelines is present in onboarding flows, and the configured `layer` matches which pipeline resources are deployed.
+Runs `databricks bundle validate` plus sdp-meta-specific checks: the onboarding
+file exists, every pipeline's group is present in the onboarding flows, each
+layer has the required dataflowspec-table configuration, and the `pipelines`
+job references every pipeline exactly once.
+
+## Adding independent pipeline topologies
+
+The generated topology is only the starting point. One bundle may contain
+multiple bronze-only, silver-only, split, and combined pipelines, each with
+its own `data_flow_group` and target schemas:
+
+```bash
+databricks labs sdp-meta bundle-add-pipeline
+```
+
+The command updates `resources/sdp_meta_pipelines.yml`, adding both the pipeline
+resources and their tasks in the `pipelines` job. It also widens the onboarding
+job when a newly introduced layer is required. For split topologies, the silver
+task depends on its matching bronze task. Flows subsequently added to the
+selected group inherit that topology's layer and target schemas. Run
+`bundle-validate`; validation checks each pipeline and its job wiring
+independently.
 
 ## Adding more flows
 

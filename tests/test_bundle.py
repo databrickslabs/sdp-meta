@@ -33,14 +33,17 @@ from databricks.labs.sdp_meta.bundle import (
     QUICKSTART_BUNDLE_INIT_DEFAULTS,
     TEMPLATE_DIR,
     BundleAddFlowCommand,
+    BundleAddPipelineCommand,
     BundleInitCommand,
     BundlePrepareWheelCommand,
     BundleValidateCommand,
     FlowSpec,
+    PipelineSpec,
     _discover_bundle_dir,
     _sdp_meta_sanity_checks,
     _stamp_sdp_meta_version,
     bundle_add_flow,
+    bundle_add_pipeline,
     bundle_init,
     bundle_prepare_wheel,
     bundle_validate,
@@ -225,6 +228,100 @@ class SanityChecksTests(unittest.TestCase):
         if with_combined:
             pipelines["resources"]["pipelines"]["bronze_silver"] = {}
         self._write(tmp / "resources" / "sdp_meta_pipelines.yml", yaml.safe_dump(pipelines))
+        onboarding_parameters = {"onboard_layer": "${var.layer}"}
+        if layer in ("bronze", "bronze_silver"):
+            onboarding_parameters["bronze_dataflowspec_table"] = (
+                "${var.bronze_dataflowspec_table}"
+            )
+        if layer in ("silver", "bronze_silver"):
+            onboarding_parameters["silver_dataflowspec_table"] = (
+                "${var.silver_dataflowspec_table}"
+            )
+        self._write(
+            tmp / "resources" / "sdp_meta_onboarding_job.yml",
+            yaml.safe_dump({
+                "resources": {
+                    "jobs": {
+                        "onboarding": {
+                            "tasks": [{
+                                "task_key": "onboard_dataflowspecs",
+                                "python_wheel_task": {
+                                    "named_parameters": onboarding_parameters
+                                },
+                            }]
+                        }
+                    }
+                }
+            }),
+        )
+
+    @staticmethod
+    def _configured_pipeline(layer: str, group: str):
+        config = {
+            "layer": layer,
+            "sdp_meta_dependency": "${var.sdp_meta_dependency}",
+        }
+        if layer in ("bronze", "bronze_silver"):
+            config.update({
+                "bronze.dataflowspecTable": "${var.uc_catalog_name}.meta.bronze_specs",
+                "bronze.group": group,
+            })
+        if layer in ("silver", "bronze_silver"):
+            config.update({
+                "silver.dataflowspecTable": "${var.uc_catalog_name}.meta.silver_specs",
+                "silver.group": group,
+            })
+        return {"schema": "${var.bronze_target_schema}", "configuration": config}
+
+    def _write_configured_topologies(self, tmp: Path, *, omit_dependency=False):
+        pipelines = {
+            "orders_bronze": self._configured_pipeline("bronze", "orders"),
+            "orders_silver": self._configured_pipeline("silver", "orders"),
+            "customers_bronze_silver": self._configured_pipeline(
+                "bronze_silver", "customers"
+            ),
+            "audit_bronze": self._configured_pipeline("bronze", "audit"),
+        }
+        silver_task = {
+            "task_key": "orders_silver",
+            "pipeline_task": {
+                "pipeline_id": "${resources.pipelines.orders_silver.id}"
+            },
+        }
+        if not omit_dependency:
+            silver_task["depends_on"] = [{"task_key": "orders_bronze"}]
+        tasks = [
+            {
+                "task_key": "orders_bronze",
+                "pipeline_task": {
+                    "pipeline_id": "${resources.pipelines.orders_bronze.id}"
+                },
+            },
+            silver_task,
+            {
+                "task_key": "customers_bronze_silver",
+                "pipeline_task": {
+                    "pipeline_id": (
+                        "${resources.pipelines.customers_bronze_silver.id}"
+                    )
+                },
+            },
+            {
+                "task_key": "audit_bronze",
+                "pipeline_task": {
+                    "pipeline_id": "${resources.pipelines.audit_bronze.id}"
+                },
+            },
+        ]
+        self._write(
+            tmp / "resources" / "sdp_meta_pipelines.yml",
+            yaml.safe_dump({
+                "resources": {
+                    "pipelines": pipelines,
+                    "jobs": {"pipelines": {"tasks": tasks}},
+                }
+            }),
+        )
 
     def test_happy_path_bronze_silver(self):
         with _tempdir() as tmp:
@@ -297,6 +394,162 @@ class SanityChecksTests(unittest.TestCase):
             )
             errors = _sdp_meta_sanity_checks(tmp)
             self.assertTrue(any("pipeline_mode=split" in e for e in errors), errors)
+
+    def test_multiple_configured_topologies_are_validated_independently(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp, layer="bronze_silver")
+            self._write(
+                tmp / "conf" / "onboarding.yml",
+                yaml.safe_dump([
+                    {
+                        "data_flow_id": "1", "data_flow_group": "orders",
+                        "bronze_database_dev": "cat.bronze",
+                        "bronze_table": "orders",
+                        "silver_database_dev": "cat.silver",
+                        "silver_table": "orders",
+                    },
+                    {
+                        "data_flow_id": "2", "data_flow_group": "customers",
+                        "bronze_database_dev": "cat.bronze",
+                        "bronze_table": "customers",
+                        "silver_database_dev": "cat.silver",
+                        "silver_table": "customers",
+                    },
+                    {
+                        "data_flow_id": "3", "data_flow_group": "audit",
+                        "bronze_database_dev": "cat.bronze",
+                        "bronze_table": "audit",
+                    },
+                ]),
+            )
+            self._write_configured_topologies(tmp)
+
+            self.assertEqual(_sdp_meta_sanity_checks(tmp), [])
+
+    def test_multi_topology_rejects_unwired_pipeline(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp, layer="bronze_silver")
+            self._write(
+                tmp / "conf" / "onboarding.yml",
+                yaml.safe_dump([
+                    {
+                        "data_flow_id": "1", "data_flow_group": "orders",
+                        "bronze_database_dev": "cat.bronze",
+                        "bronze_table": "orders",
+                        "silver_database_dev": "cat.silver",
+                        "silver_table": "orders",
+                    },
+                    {
+                        "data_flow_id": "2", "data_flow_group": "customers",
+                        "bronze_database_dev": "cat.bronze",
+                        "bronze_table": "customers",
+                        "silver_database_dev": "cat.silver",
+                        "silver_table": "customers",
+                    },
+                    {
+                        "data_flow_id": "3", "data_flow_group": "audit",
+                        "bronze_database_dev": "cat.bronze",
+                        "bronze_table": "audit",
+                    },
+                ]),
+            )
+            self._write_configured_topologies(tmp)
+            path = tmp / "resources" / "sdp_meta_pipelines.yml"
+            doc = yaml.safe_load(path.read_text())
+            doc["resources"]["jobs"]["pipelines"]["tasks"].pop()
+            path.write_text(yaml.safe_dump(doc))
+
+            errors = _sdp_meta_sanity_checks(tmp)
+            self.assertTrue(
+                any("audit_bronze" in error and "found 0" in error for error in errors),
+                errors,
+            )
+
+    def test_multi_topology_rejects_missing_split_dependency(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp, layer="bronze_silver")
+            self._write(
+                tmp / "conf" / "onboarding.yml",
+                yaml.safe_dump([
+                    {
+                        "data_flow_id": "1", "data_flow_group": "orders",
+                        "bronze_database_dev": "cat.bronze",
+                        "bronze_table": "orders",
+                        "silver_database_dev": "cat.silver",
+                        "silver_table": "orders",
+                    },
+                    {
+                        "data_flow_id": "2", "data_flow_group": "customers",
+                        "bronze_database_dev": "cat.bronze",
+                        "bronze_table": "customers",
+                        "silver_database_dev": "cat.silver",
+                        "silver_table": "customers",
+                    },
+                    {
+                        "data_flow_id": "3", "data_flow_group": "audit",
+                        "bronze_database_dev": "cat.bronze",
+                        "bronze_table": "audit",
+                    },
+                ]),
+            )
+            self._write_configured_topologies(tmp, omit_dependency=True)
+
+            errors = _sdp_meta_sanity_checks(tmp)
+            self.assertTrue(
+                any("does not depend" in error for error in errors),
+                errors,
+            )
+
+    def test_target_override_is_used_for_pipeline_group_validation(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp, layer="bronze", with_silver=False)
+            self._write(
+                tmp / "databricks.yml",
+                yaml.safe_dump({
+                    "bundle": {"name": "t"},
+                    "targets": {
+                        "dev": {"variables": {"dataflow_group": "dev_group"}}
+                    },
+                }),
+            )
+            self._write(
+                tmp / "conf" / "onboarding.yml",
+                yaml.safe_dump([
+                    {
+                        "data_flow_id": "1", "data_flow_group": "dev_group",
+                        "bronze_database_dev": "cat.bronze",
+                        "bronze_table": "orders",
+                    }
+                ]),
+            )
+            self._write(
+                tmp / "resources" / "sdp_meta_pipelines.yml",
+                yaml.safe_dump({
+                    "resources": {
+                        "pipelines": {
+                            "bronze": self._configured_pipeline(
+                                "bronze", "${var.dataflow_group}"
+                            )
+                        },
+                        "jobs": {
+                            "pipelines": {
+                                "tasks": [{
+                                    "task_key": "bronze",
+                                    "pipeline_task": {
+                                        "pipeline_id": (
+                                            "${resources.pipelines.bronze.id}"
+                                        )
+                                    },
+                                }]
+                            }
+                        },
+                    }
+                }),
+            )
+
+            self.assertEqual(_sdp_meta_sanity_checks(tmp, target="dev"), [])
+            errors = _sdp_meta_sanity_checks(tmp)
+            self.assertTrue(any("bronze.group='g'" in error for error in errors))
 
     def test_sentinel_dependency_is_flagged(self):
         with _tempdir() as tmp:
@@ -1395,6 +1648,95 @@ class EndToEndRenderTests(unittest.TestCase):
             rendered = self._render(self._common_answers(), tmp)
             self._assert_rendered_bundle_is_valid(rendered, expect_ext="yml", expect_layer="bronze_silver")
 
+    def test_rendered_bundle_supports_multiple_independent_topologies(self):
+        """Real template render + add-flow + add-pipeline + validation."""
+        with _tempdir() as tmp:
+            rendered = self._render(self._common_answers(), tmp)
+            self._strip_placeholders(
+                rendered / "conf" / "onboarding.yml", "yml"
+            )
+
+            additions = [
+                (
+                    FlowSpec(
+                        source_format="delta",
+                        source_database="main.raw",
+                        source_table="audit_events",
+                        bronze_table="audit_events",
+                        layer="bronze",
+                        data_flow_group="audit_group",
+                        bronze_target_schema="audit_bronze",
+                    ),
+                    PipelineSpec(
+                        name="audit",
+                        layer="bronze",
+                        dataflow_group="audit_group",
+                        bronze_target_schema="audit_bronze",
+                    ),
+                ),
+                (
+                    FlowSpec(
+                        source_format="delta",
+                        source_database="main.raw",
+                        source_table="payments",
+                        bronze_table="payments",
+                        silver_table="payments",
+                        layer="bronze_silver",
+                        data_flow_group="finance_group",
+                        bronze_target_schema="finance_bronze",
+                        silver_target_schema="finance_silver",
+                    ),
+                    PipelineSpec(
+                        name="finance",
+                        layer="bronze_silver",
+                        pipeline_mode="combined",
+                        dataflow_group="finance_group",
+                        bronze_target_schema="finance_bronze",
+                        silver_target_schema="finance_silver",
+                    ),
+                ),
+            ]
+            for flow, pipeline in additions:
+                self.assertEqual(
+                    bundle_add_flow(BundleAddFlowCommand(
+                        bundle_dir=str(rendered), flows=[flow]
+                    )),
+                    0,
+                )
+                self.assertEqual(
+                    bundle_add_pipeline(BundleAddPipelineCommand(
+                        bundle_dir=str(rendered), pipeline=pipeline
+                    )),
+                    0,
+                )
+
+            self.assertEqual(_sdp_meta_sanity_checks(rendered), [])
+            resources = yaml.safe_load(
+                (rendered / "resources" / "sdp_meta_pipelines.yml").read_text()
+            )["resources"]
+            self.assertEqual(
+                set(resources["pipelines"]),
+                {"bronze", "silver", "audit_bronze", "finance_bronze_silver"},
+            )
+            tasks = {
+                task["task_key"]: task
+                for task in resources["jobs"]["pipelines"]["tasks"]
+            }
+            self.assertEqual(set(tasks), set(resources["pipelines"]))
+            rows = yaml.safe_load(
+                (rendered / "conf" / "onboarding.yml").read_text()
+            )
+            finance = next(
+                row for row in rows
+                if row["data_flow_group"] == "finance_group"
+            )
+            self.assertEqual(
+                finance["bronze_database_dev"], "main.finance_bronze"
+            )
+            self.assertEqual(
+                finance["silver_database_dev"], "main.finance_silver"
+            )
+
     def test_rendered_databricks_yml_keeps_run_as_block_commented(self):
         """E2E lock-in: the run_as guidance lives in the rendered bundle so
         users see it; it stays commented so a fresh `bundle deploy` works
@@ -1725,6 +2067,235 @@ class _tempdir:
         return False
 
 
+class BundleAddPipelineTests(unittest.TestCase):
+    """Unit tests for adding independent pipeline topology resources."""
+
+    def _make_bundle(self, tmp: Path):
+        (tmp / "resources").mkdir()
+        (tmp / "conf").mkdir()
+        (tmp / "databricks.yml").write_text("bundle: {name: test}\n")
+        (tmp / "resources" / "variables.yml").write_text(
+            yaml.safe_dump({
+                "variables": {
+                    "layer": {"default": "bronze"},
+                    "pipeline_mode": {"default": "split"},
+                    "dataflow_group": {"default": "base"},
+                    "onboarding_file_name": {"default": "onboarding.yml"},
+                    "uc_catalog_name": {"default": "test_cat"},
+                    "bronze_target_schema": {"default": "test_bronze"},
+                    "silver_target_schema": {"default": "test_silver"},
+                    "wheel_source": {"default": "pypi"},
+                    "sdp_meta_dependency": {
+                        "default": "databricks-labs-sdp-meta==0.1.0"
+                    },
+                }
+            })
+        )
+        (tmp / "conf" / "onboarding.yml").write_text(
+            yaml.safe_dump([
+                {
+                    "data_flow_id": "1",
+                    "data_flow_group": "base",
+                    "bronze_database_dev": "test_cat.test_bronze",
+                    "bronze_table": "base",
+                },
+                {
+                    "data_flow_id": "2",
+                    "data_flow_group": "orders",
+                    "bronze_database_dev": "test_cat.test_bronze",
+                    "bronze_table": "orders",
+                },
+            ])
+        )
+        (tmp / "resources" / "sdp_meta_onboarding_job.yml").write_text(
+            yaml.safe_dump({
+                "resources": {
+                    "jobs": {
+                        "onboarding": {
+                            "tasks": [{
+                                "task_key": "onboard_dataflowspecs",
+                                "python_wheel_task": {
+                                    "named_parameters": {
+                                        "onboard_layer": "${var.layer}",
+                                        "bronze_dataflowspec_table": (
+                                            "${var.bronze_dataflowspec_table}"
+                                        ),
+                                    }
+                                },
+                            }]
+                        }
+                    }
+                }
+            }, sort_keys=False)
+        )
+        (tmp / "resources" / "sdp_meta_pipelines.yml").write_text(
+            yaml.safe_dump({
+                "resources": {
+                    "pipelines": {
+                        "bronze": {
+                            "schema": "${var.bronze_target_schema}",
+                            "configuration": {
+                                "layer": "bronze",
+                                "sdp_meta_dependency": (
+                                    "${var.sdp_meta_dependency}"
+                                ),
+                                "bronze.dataflowspecTable": (
+                                    "${var.uc_catalog_name}.${var.sdp_meta_schema}."
+                                    "${var.bronze_dataflowspec_table}"
+                                ),
+                                "bronze.group": "base",
+                            }
+                        }
+                    },
+                    "jobs": {
+                        "pipelines": {
+                            "tasks": [{
+                                "task_key": "bronze",
+                                "pipeline_task": {
+                                    "pipeline_id": (
+                                        "${resources.pipelines.bronze.id}"
+                                    )
+                                },
+                            }]
+                        }
+                    },
+                }
+            }, sort_keys=False)
+        )
+
+    def test_adds_split_topology_and_job_dependency(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp)
+            rc = bundle_add_pipeline(BundleAddPipelineCommand(
+                bundle_dir=str(tmp),
+                pipeline=PipelineSpec(
+                    name="orders",
+                    layer="bronze_silver",
+                    pipeline_mode="split",
+                    dataflow_group="orders",
+                    bronze_target_schema="orders_bronze",
+                    silver_target_schema="orders_silver",
+                ),
+            ))
+            self.assertEqual(rc, 0)
+
+            doc = yaml.safe_load(
+                (tmp / "resources" / "sdp_meta_pipelines.yml").read_text()
+            )
+            pipelines = doc["resources"]["pipelines"]
+            self.assertIn("orders_bronze", pipelines)
+            self.assertIn("orders_silver", pipelines)
+            self.assertEqual(pipelines["orders_bronze"]["schema"], "orders_bronze")
+            self.assertEqual(
+                pipelines["orders_silver"]["configuration"]["silver.group"],
+                "orders",
+            )
+            tasks = {
+                task["task_key"]: task
+                for task in doc["resources"]["jobs"]["pipelines"]["tasks"]
+            }
+            self.assertEqual(
+                tasks["orders_silver"]["depends_on"],
+                [{"task_key": "orders_bronze"}],
+            )
+            variables = yaml.safe_load(
+                (tmp / "resources" / "variables.yml").read_text()
+            )["variables"]
+            self.assertEqual(variables["layer"]["default"], "bronze_silver")
+            onboarding_job = yaml.safe_load(
+                (tmp / "resources" / "sdp_meta_onboarding_job.yml").read_text()
+            )
+            named_parameters = onboarding_job["resources"]["jobs"]["onboarding"][
+                "tasks"
+            ][0]["python_wheel_task"]["named_parameters"]
+            self.assertIn("silver_dataflowspec_table", named_parameters)
+            onboarding_rows = yaml.safe_load(
+                (tmp / "conf" / "onboarding.yml").read_text()
+            )
+            orders_row = next(
+                row for row in onboarding_rows
+                if row["data_flow_group"] == "orders"
+            )
+            self.assertEqual(orders_row["silver_table"], "orders")
+            self.assertEqual(
+                orders_row["silver_database_dev"], "test_cat.orders_silver"
+            )
+            transformations = yaml.safe_load(
+                (tmp / "conf" / "silver_transformations.yml").read_text()
+            )
+            self.assertIn(
+                {"target_table": "orders", "select_exp": ["*"]},
+                transformations,
+            )
+            self.assertEqual(_sdp_meta_sanity_checks(tmp), [])
+
+            flow = FlowSpec(
+                source_format="delta",
+                source_database="raw",
+                source_table="order_lines",
+                bronze_table="order_lines",
+                data_flow_group="orders",
+            )
+            self.assertEqual(
+                bundle_add_flow(BundleAddFlowCommand(
+                    bundle_dir=str(tmp), flows=[flow]
+                )),
+                0,
+            )
+            added_row = yaml.safe_load(
+                (tmp / "conf" / "onboarding.yml").read_text()
+            )[-1]
+            self.assertEqual(
+                added_row["bronze_database_dev"], "test_cat.orders_bronze"
+            )
+            self.assertEqual(
+                added_row["silver_database_dev"], "test_cat.orders_silver"
+            )
+
+    def test_adds_combined_topology(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp)
+            self.assertEqual(
+                bundle_add_pipeline(BundleAddPipelineCommand(
+                    bundle_dir=str(tmp),
+                    pipeline=PipelineSpec(
+                        name="orders",
+                        layer="bronze_silver",
+                        pipeline_mode="combined",
+                        dataflow_group="orders",
+                    ),
+                )),
+                0,
+            )
+            doc = yaml.safe_load(
+                (tmp / "resources" / "sdp_meta_pipelines.yml").read_text()
+            )
+            self.assertIn(
+                "orders_bronze_silver", doc["resources"]["pipelines"]
+            )
+
+    def test_collision_is_rejected_without_writing(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp)
+            cmd = BundleAddPipelineCommand(
+                bundle_dir=str(tmp),
+                pipeline=PipelineSpec(
+                    name="orders",
+                    layer="bronze",
+                    dataflow_group="orders",
+                ),
+            )
+            self.assertEqual(bundle_add_pipeline(cmd), 0)
+            before = (
+                tmp / "resources" / "sdp_meta_pipelines.yml"
+            ).read_text()
+            self.assertEqual(bundle_add_pipeline(cmd), 2)
+            self.assertEqual(
+                (tmp / "resources" / "sdp_meta_pipelines.yml").read_text(),
+                before,
+            )
+
+
 class BundleAddFlowTests(unittest.TestCase):
     """Unit tests for the `bundle-add-flow` engine. Pure file I/O — no CLI."""
 
@@ -1801,6 +2372,38 @@ class BundleAddFlowTests(unittest.TestCase):
             self.assertIn(
                 "${workspace.file_path}/conf/dqe/orders/bronze_expectations.yml",
                 new["bronze_data_quality_expectations_json_dev"],
+            )
+
+    def test_flow_can_override_layer_group_and_target_schemas(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp, layer="bronze", seed_flows=[])
+            cmd = BundleAddFlowCommand(
+                bundle_dir=str(tmp),
+                flows=[FlowSpec(
+                    source_format="delta",
+                    source_database="raw",
+                    source_table="orders",
+                    bronze_table="orders",
+                    silver_table="orders",
+                    layer="bronze_silver",
+                    data_flow_group="orders_group",
+                    bronze_target_schema="orders_bronze",
+                    silver_target_schema="orders_silver",
+                )],
+            )
+            self.assertEqual(bundle_add_flow(cmd), 0)
+            row = yaml.safe_load(
+                (tmp / "conf" / "onboarding.yml").read_text()
+            )[0]
+            self.assertEqual(row["data_flow_group"], "orders_group")
+            self.assertEqual(
+                row["bronze_database_dev"], "test_cat.orders_bronze"
+            )
+            self.assertEqual(
+                row["silver_database_dev"], "test_cat.orders_silver"
+            )
+            self.assertTrue(
+                (tmp / "conf" / "silver_transformations.yml").is_file()
             )
 
     def test_appends_to_json_onboarding_file(self):
@@ -2121,9 +2724,8 @@ class SilverTransformationsAutoSeedTests(BundleAddFlowTests):
             rows = self._read_transformations(tmp, ext="json")
             self.assertIn("orders", {r["target_table"] for r in rows})
 
-    def test_missing_transformations_file_is_a_quiet_noop(self):
-        """If the user removed the transformations file, the helper should
-        not crash -- it just skips seeding."""
+    def test_missing_transformations_file_is_created_for_silver_flow(self):
+        """A silver flow added to a bronze-origin bundle creates its config."""
         with _tempdir() as tmp:
             self._make_bundle(tmp, seed_flows=[])
             (tmp / "conf" / "silver_transformations.yml").unlink()
@@ -2134,7 +2736,12 @@ class SilverTransformationsAutoSeedTests(BundleAddFlowTests):
                                 bronze_table="orders", silver_table="orders")],
             )
             self.assertEqual(bundle_add_flow(cmd), 0)
-            self.assertFalse((tmp / "conf" / "silver_transformations.yml").exists())
+            path = tmp / "conf" / "silver_transformations.yml"
+            self.assertTrue(path.exists())
+            self.assertEqual(
+                yaml.safe_load(path.read_text()),
+                [{"target_table": "orders", "select_exp": ["*"]}],
+            )
 
 
 if __name__ == "__main__":

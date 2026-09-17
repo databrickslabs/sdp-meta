@@ -273,10 +273,58 @@ class FlowInput(BaseModel):
     snapshot_format: str = "delta"
     bronze_table: Optional[str] = None
     silver_table: Optional[str] = None
+    layer: Optional[str] = None
+    bronze_target_schema: Optional[str] = None
+    silver_target_schema: Optional[str] = None
     data_flow_id: str = "auto"
     data_flow_group: Optional[str] = None
     source_system: str = "auto_added"
     cloudfiles_format: str = "json"
+
+
+class PipelineInput(BaseModel):
+    """Validated input model for one bundle pipeline topology."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    layer: str
+    dataflow_group: str
+    pipeline_mode: str = "split"
+    bronze_target_schema: Optional[str] = None
+    silver_target_schema: Optional[str] = None
+
+
+def _run_bundle_add_pipeline(
+    pipeline: PipelineInput,
+    bundle_dir: str = ".",
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    from databricks.labs.sdp_meta.bundle import (
+        BundleAddPipelineCommand,
+        PipelineSpec,
+        bundle_add_pipeline,
+    )
+
+    resolved_bundle = _resolve_within_root(bundle_dir, kind="bundle_dir")
+    pipeline_spec = PipelineSpec(**pipeline.model_dump(exclude_none=True))
+    output = io.StringIO()
+    returncode = bundle_add_pipeline(
+        BundleAddPipelineCommand(
+            bundle_dir=str(resolved_bundle),
+            pipeline=pipeline_spec,
+            dry_run=dry_run,
+        ),
+        output=output,
+    )
+    payload = {
+        "returncode": returncode,
+        "output": output.getvalue(),
+        "pipeline_added": asdict(pipeline_spec),
+    }
+    if returncode:
+        raise RuntimeError(json.dumps(payload, default=str))
+    return payload
 
 
 def _run_bundle_add_flow(
@@ -352,6 +400,11 @@ _DIRECT_HANDLERS = {
         flows=[FlowInput.model_validate(flow) for flow in args.get("flows", [])],
         bundle_dir=args.get("bundle_dir", "."),
         onboarding_file=args.get("onboarding_file"),
+        dry_run=args.get("dry_run", False),
+    ),
+    "sdp_meta_bundle_add_pipeline": lambda args: _run_bundle_add_pipeline(
+        pipeline=PipelineInput.model_validate(args.get("pipeline")),
+        bundle_dir=args.get("bundle_dir", "."),
         dry_run=args.get("dry_run", False),
     ),
     "sdp_meta_list_templates": lambda args: _list_templates(),
@@ -458,6 +511,29 @@ def build_server(_sdp_meta: Any = None) -> MCPServer:
             flows,
             bundle_dir,
             onboarding_file,
+            dry_run,
+        )
+
+    @server.tool(
+        name="sdp_meta_bundle_add_pipeline",
+        description="Add and wire an independently configured bundle pipeline.",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=True,
+            idempotentHint=False,
+            openWorldHint=False,
+        ),
+        structured_output=True,
+    )
+    def bundle_add_pipeline_tool(
+        pipeline: PipelineInput,
+        bundle_dir: str = ".",
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        return _invoke_mcp_tool(
+            _run_bundle_add_pipeline,
+            pipeline,
+            bundle_dir,
             dry_run,
         )
 

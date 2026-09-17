@@ -1747,7 +1747,7 @@ def _is_truthy_flag(value) -> bool:
 # them through SDPMeta keeps the dispatcher's signature uniform with the
 # legacy commands.
 #
-# These four entries MUST stay in lock-step with `labs.yml commands:` and
+# These entries MUST stay in lock-step with `labs.yml commands:` and
 # the `MAPPING` dict below. The `tests/test_cli.py::CliCommandWiringTests`
 # regression test enforces both.
 # ---------------------------------------------------------------------------
@@ -1870,6 +1870,18 @@ def bundle_add_flow(sdp_meta: SDPMeta, flags: dict = None):
         sys.exit(rc)
 
 
+def bundle_add_pipeline(sdp_meta: SDPMeta, flags: dict = None):
+    del flags
+    logger.info("Adding an independently configured pipeline to the bundle.")
+    from databricks.labs.sdp_meta.bundle import (
+        _load_bundle_add_pipeline_config,
+        bundle_add_pipeline as _run,
+    )
+    rc = _run(_load_bundle_add_pipeline_config(sdp_meta._wsi))
+    if rc != 0:
+        sys.exit(rc)
+
+
 def mcp(sdp_meta: SDPMeta, flags: dict = None):
     """Run the sdp-meta MCP server over stdio.
 
@@ -1906,6 +1918,7 @@ MAPPING = {
     "bundle-prepare-wheel": bundle_prepare_wheel,
     "bundle-validate": bundle_validate,
     "bundle-add-flow": bundle_add_flow,
+    "bundle-add-pipeline": bundle_add_pipeline,
     "mcp": mcp,
 }
 

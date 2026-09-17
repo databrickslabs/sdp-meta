@@ -2386,6 +2386,7 @@ class CliCommandWiringTests(unittest.TestCase):
             "bundle-prepare-wheel",
             "bundle-validate",
             "bundle-add-flow",
+            "bundle-add-pipeline",
         ):
             self.assertIn(cmd, mapping, f"{cmd!r} missing from cli.MAPPING")
             self.assertIn(cmd, labs_yml_cmds, f"{cmd!r} missing from labs.yml")

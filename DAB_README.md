@@ -53,14 +53,16 @@ databricks bundle run pipelines  --target dev
 | `databricks labs sdp-meta bundle-prepare-wheel` | Builds the local sdp-meta wheel and uploads it to a UC volume. Prints the resulting `/Volumes/...` path so you can paste it into `resources/variables.yml` as the `sdp_meta_dependency` default. |
 | `databricks labs sdp-meta bundle-validate` | Runs `databricks bundle validate` plus sdp-meta-specific static checks. |
 | `databricks labs sdp-meta bundle-add-flow` | Appends one or more flow entries to the bundle's onboarding file. Two modes: single (interactive prompts per source format) and CSV (batch). Auto-increments `data_flow_id`, refuses to write on collisions, preserves YAML/JSON. |
+| `databricks labs sdp-meta bundle-add-pipeline` | Adds an independently configured pipeline topology and wires its task(s) into the bundle's `pipelines` job. |
 
 `bundle-validate` catches common authoring mistakes that the upstream `databricks bundle validate` doesn't:
 
 - onboarding file referenced by `variables.yml` is missing
 - onboarding file is not a YAML/JSON list of flow dicts
-- `dataflow_group` variable is not used by any flow in the onboarding file
-- `layer` variable doesn't match the pipelines actually declared
-- `pipeline_mode=combined` bundle has split pipelines (or vice versa)
+- a pipeline's `bronze.group` / `silver.group` is not used by any onboarding flow
+- a pipeline is missing layer-specific dataflowspec table configuration
+- a pipeline is missing or duplicated in the `pipelines` job
+- a split silver task does not depend on a bronze task for the same group
 - `<your-...>` placeholders left in `conf/onboarding.{yml,json}` (eventhub keys, kafka brokers, etc.)
 - `<your-...>` placeholders left in `databricks.yml` itself — most commonly an uncommented `run_as.service_principal_name` block that still says `<your-prod-service-principal-application-id>`. (Comments are stripped at YAML parse time, so the shipped commented block is silent until you uncomment it.)
 
@@ -199,7 +201,10 @@ After appending, run:
 databricks labs sdp-meta bundle-validate
 ```
 
-The sanity checks confirm that the new `data_flow_group` values still line up with the bundle's `dataflow_group` variable, the file is parseable, and the layer/pipeline_mode topology is consistent.
+The sanity checks confirm that each pipeline's configured group exists in the
+onboarding file, every layer has the required dataflowspec-table settings, and
+the `pipelines` job references each pipeline exactly once with valid split
+dependencies.
 
 ## Generating flows programmatically (100s of tables)
 
