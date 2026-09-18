@@ -151,7 +151,14 @@ Source: https://github.com/databrickslabs/sdp-meta
     # installed. Maintainers running editable installs should
     # explicitly ``import dlt_meta`` in their notebooks.
     cmdclass={"bdist_wheel": bdist_wheel_with_pth_file},
-    entry_points={"group_1": "run=dlt_meta:main"},
+    # Preserve the Python wheel task contract published by dlt-meta v0.0.10:
+    # Databricks invokes ``group_1:run`` with onboarding parameters in
+    # ``sys.argv``. ``dlt_meta.main`` is the Labs CLI JSON dispatcher and
+    # requires a positional ``raw`` argument, so it is not compatible with
+    # that contract. Forward to the canonical zero-argument wheel entry point.
+    entry_points={
+        "group_1": "run=databricks.labs.sdp_meta.__main__:main"
+    },
     # Must stay identical to the primary package's version classifiers so both
     # advertise the same interpreters; tests/test_packaging_metadata.py enforces it.
     classifiers=[

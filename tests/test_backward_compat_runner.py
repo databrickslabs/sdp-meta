@@ -356,6 +356,93 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
             "legacy",
         )
 
+    def test_phase2_compat_surface_runs_legacy_wheel_entrypoint(self):
+        self.conf.target_install_surface = "compat_wheelhouse"
+        self.conf.target_main_whl_remote = "/Volumes/test/target/main.whl"
+        self.conf.target_compat_whl_remote = "/Volumes/test/target/compat.whl"
+        self.conf.uc_volume_path = "/Volumes/catalog/specs/volume/"
+        self.conf.a1_onboarding_file = "conf/a1.json"
+        self.conf.bronze_a1_pipeline_id = "bronze-a1"
+        self.conf.silver_pipeline_id = "silver"
+
+        self.runner.build_phase2_job(self.conf)
+
+        kwargs = self.ws.jobs.create.call_args.kwargs
+        environment = kwargs["environments"][0]
+        self.assertEqual(environment.spec.client, "2")
+        self.assertEqual(
+            environment.spec.dependencies,
+            [
+                "/Volumes/test/target/main.whl",
+                "/Volumes/test/target/compat.whl",
+            ],
+        )
+        tasks = {task.task_key: task for task in kwargs["tasks"]}
+        legacy_task = tasks["phase2_legacy_entrypoint_onboard"]
+        self.assertEqual(legacy_task.python_wheel_task.package_name, "dlt_meta")
+        self.assertEqual(legacy_task.python_wheel_task.entry_point, "run")
+        self.assertEqual(
+            legacy_task.python_wheel_task.named_parameters[
+                "onboarding_file_path"
+            ],
+            "/Volumes/catalog/specs/volume/conf/a1.json",
+        )
+        self.assertEqual(
+            tasks["phase2_bronze"].depends_on[0].task_key,
+            "phase2_legacy_entrypoint_onboard",
+        )
+
+    def test_phase2_primary_surface_keeps_existing_pipeline_only_flow(self):
+        self.conf.bronze_a1_pipeline_id = "bronze-a1"
+        self.conf.silver_pipeline_id = "silver"
+
+        self.runner.build_phase2_job(self.conf)
+
+        kwargs = self.ws.jobs.create.call_args.kwargs
+        self.assertIsNone(kwargs["environments"])
+        task_keys = [task.task_key for task in kwargs["tasks"]]
+        self.assertNotIn("phase2_legacy_entrypoint_onboard", task_keys)
+        phase2_bronze = next(
+            task for task in kwargs["tasks"]
+            if task.task_key == "phase2_bronze"
+        )
+        self.assertEqual(
+            phase2_bronze.depends_on[0].task_key,
+            "phase2_add_incremental",
+        )
+
+    @patch("integration_tests.run_backward_compat_tests.os.walk")
+    def test_upload_compat_wheelhouse_retains_project_wheel_paths(
+        self, walk
+    ):
+        walk.return_value = []
+        self.conf.target_install_surface = "compat_wheelhouse"
+        self.conf.source_main_whl_local = "/tmp/source.whl"
+        self.conf.target_main_whl_local = "/tmp/target.whl"
+        self.conf.target_compat_whl_local = "/tmp/compat.whl"
+        self.conf.target_dependency_whls_local = [
+            "/tmp/sdk.whl",
+            "/tmp/yaml.whl",
+        ]
+        self.conf.uc_volume_path = "/Volumes/catalog/specs/volume/"
+        self.runner.upload_runner_notebooks = MagicMock()
+
+        def remote_path(_conf, local_path, destination):
+            return f"/Volumes/uploaded/{destination}/{os.path.basename(local_path)}"
+
+        self.runner.upload_wheel = MagicMock(side_effect=remote_path)
+
+        self.runner.upload_files(self.conf)
+
+        self.assertEqual(
+            self.conf.target_main_whl_remote,
+            "/Volumes/uploaded/target/wheelhouse/target.whl",
+        )
+        self.assertEqual(
+            self.conf.target_compat_whl_remote,
+            "/Volumes/uploaded/target/wheelhouse/compat.whl",
+        )
+
     @patch.object(BackwardCompatRunner, "_download_compat_runtime_wheels")
     @patch("integration_tests.run_backward_compat_tests.GitRefWheelBuilder")
     def test_compat_wheelhouse_builds_primary_redirect_and_dependency_wheels(
