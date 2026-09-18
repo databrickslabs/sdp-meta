@@ -52,9 +52,14 @@ phase2_customer_delta = int(dbutils.widgets.get("phase2_customer_delta"))
 phase2_transaction_delta = int(dbutils.widgets.get("phase2_transaction_delta"))
 target_install_surface = dbutils.widgets.get("target_install_surface")
 target_package_version = dbutils.widgets.get("target_package_version")
+source_profile = dbutils.widgets.get("source_profile")
+source_ref = dbutils.widgets.get("source_ref")
+target_ref = dbutils.widgets.get("target_ref")
 
 log_list = []
-log_list.append("Backward-compat Phase 2 (v0.1.0 upgrade) validation starting.")
+log_list.append(
+    f"Backward-compat Phase 2 ({source_ref} -> {target_ref}) validation starting."
+)
 # Validation contract: run_backward_compat_tests.py scans persisted report cells
 # for the exact "Failed!" marker. Keep that wording on every failure written
 # to log_list; checks that raise directly are enforced by the failed task.
@@ -140,20 +145,37 @@ for table in silver_tables:
             "Failed!"
         )
 
-# (3) Schema-compatibility check: load v0.0.10's persisted dataflowspec
-# rows through v0.1.0's dataclasses and confirm new fields backfilled
-# to documented defaults. We import via ``src.*`` to also exercise the
-# compat shim end-to-end.
+# (3) Schema-compatibility check: load SOURCE's persisted dataflowspec
+# rows through TARGET's dataclasses. Legacy sources must receive the
+# documented field backfills and import through the ``src.*`` shim;
+# current sources retain their canonical namespace and row shape.
 log_list.append(
-    "Verifying v0.0.10 persisted dataflowspec rows are consumable by v0.1.0..."
+    f"Verifying {source_ref} persisted dataflowspec rows are consumable "
+    f"by {target_ref}..."
 )
 
 bronze_table = f"{uc_catalog_name}.{sdp_meta_schema}.bronze_dataflowspec"
 silver_table = f"{uc_catalog_name}.{sdp_meta_schema}.silver_dataflowspec"
 
 try:
-    from src.dataflow_spec import BronzeDataflowSpec, SilverDataflowSpec, DataflowSpecUtils
-    log_list.append("Imported BronzeDataflowSpec/SilverDataflowSpec via src.* shim. Passed!")
+    if source_profile == "legacy":
+        from src.dataflow_spec import (
+            BronzeDataflowSpec,
+            DataflowSpecUtils,
+            SilverDataflowSpec,
+        )
+        import_surface = "src.* compatibility shim"
+    else:
+        from databricks.labs.sdp_meta.dataflow_spec import (
+            BronzeDataflowSpec,
+            DataflowSpecUtils,
+            SilverDataflowSpec,
+        )
+        import_surface = "databricks.labs.sdp_meta"
+    log_list.append(
+        "Imported BronzeDataflowSpec/SilverDataflowSpec via "
+        f"{import_surface}. Passed!"
+    )
 except Exception as exc:
     # Capture the full traceback so DLT-runtime-specific failures
     # (e.g. a top-level statement in cli.py iterating over a config
@@ -162,7 +184,8 @@ except Exception as exc:
     import traceback as _tb
     tb_text = _tb.format_exc()
     log_list.append(
-        f"Failed to import via src.* shim: {type(exc).__name__}: {exc}. Failed!"
+        f"Failed to import target dataflow spec: "
+        f"{type(exc).__name__}: {exc}. Failed!"
     )
     log_list.append(f"  traceback: {tb_text}")
     BronzeDataflowSpec = SilverDataflowSpec = DataflowSpecUtils = None
@@ -198,6 +221,9 @@ if BronzeDataflowSpec is not None:
                 f"BronzeDataflowSpec from row dataFlowId={row.get('dataFlowId')} "
                 f"failed: {exc}. Failed!"
             )
+            continue
+        if source_profile != "legacy":
+            bronze_ok += 1
             continue
         # New v0.1.0 bronze fields must be present on the dataclass
         # AND backfilled to whatever ``populate_additional_df_cols``
@@ -239,9 +265,14 @@ if BronzeDataflowSpec is not None:
                 f"defaults wrong: {actuals}. Failed!"
             )
     if bronze_ok == len(rows):
+        contract = (
+            "legacy fields backfilled to v0.1.0 defaults"
+            if source_profile == "legacy"
+            else "current-shape fields preserved"
+        )
         log_list.append(
             f"BronzeDataflowSpec backward-compat: {bronze_ok}/{len(rows)} rows "
-            "materialized with v0.1.0 defaults. Passed!"
+            f"materialized with {contract}. Passed!"
         )
     else:
         log_list.append(
@@ -270,6 +301,9 @@ if BronzeDataflowSpec is not None:
                 f"failed: {exc}. Failed!"
             )
             continue
+        if source_profile != "legacy":
+            silver_ok += 1
+            continue
         # Silver has the same set of new v0.1.0 fields as bronze
         # MINUS ``cdcApplyChangesFlowsSchemas`` (silver doesn't carry
         # a per-flow schemas map -- see additional_silver_df_columns
@@ -297,9 +331,14 @@ if BronzeDataflowSpec is not None:
                 f"defaults wrong: {actuals}. Failed!"
             )
     if silver_ok == len(rows):
+        contract = (
+            "legacy fields backfilled to v0.1.0 defaults"
+            if source_profile == "legacy"
+            else "current-shape fields preserved"
+        )
         log_list.append(
             f"SilverDataflowSpec backward-compat: {silver_ok}/{len(rows)} rows "
-            "materialized with v0.1.0 defaults. Passed!"
+            f"materialized with {contract}. Passed!"
         )
     else:
         log_list.append(

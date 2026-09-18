@@ -17,9 +17,12 @@ uc_catalog_name = dbutils.widgets.get("uc_catalog_name")
 bronze_schema = dbutils.widgets.get("bronze_schema")
 silver_schema = dbutils.widgets.get("silver_schema")
 output_file_path = dbutils.widgets.get("output_file_path")
+source_ref = dbutils.widgets.get("source_ref")
 log_list = []
 
-log_list.append("Backward-compat Phase 1 (v0.0.10 wheel) validation starting.")
+log_list.append(
+    f"Backward-compat Phase 1 ({source_ref} wheel) validation starting."
+)
 
 # Expected row counts after Phase 1 (A1 initial + A2 incremental). These
 # match ``cloudfile_runners/validate.py`` exactly: same seed data, same
