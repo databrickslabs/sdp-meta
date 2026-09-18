@@ -276,17 +276,17 @@ class BCRunnerConf:
     # ``source_main_whl`` -- main wheel built from --source_version.
     # ``target_main_whl`` -- main wheel built from --target_version.
     #
-    # No companion compat-shim wheel: the target wheel bundles its own
-    # legacy-namespace compat surface (a real ``src`` package +
-    # ``dlt_meta`` package) when needed, so a single wheel install is
-    # always enough for both same-namespace and cross-namespace
-    # upgrades.
+    # The target wheel bundles the legacy Python import surface. The separate
+    # compatibility distribution is built only for ``compat_wheelhouse`` so
+    # Phase 2 can also exercise the legacy ``package_name=dlt_meta`` Python
+    # wheel task contract.
     source_main_whl_local: str = ""
     target_main_whl_local: str = ""
     target_compat_whl_local: str = ""
     target_dependency_whls_local: List[str] = field(default_factory=list)
     source_main_whl_remote: str = ""
     target_main_whl_remote: str = ""
+    target_compat_whl_remote: str = ""
     target_wheelhouse_remote: str = ""
 
     # Generated onboarding-file output paths (one per group) --
@@ -1176,15 +1176,18 @@ class BackwardCompatRunner:
                 # _notebook_source_for_upload), so the driving path is the
                 # wheelhouse DIRECTORY, not any individual wheel's remote
                 # path. We upload the primary, redirect, and dependency
-                # wheels into that one directory and don't retain their
-                # per-wheel remotes -- nothing reads them in this mode.
+                # wheels into that one directory. Retain the two pure-Python
+                # project-wheel paths for the Phase 2 legacy entry-point
+                # JobEnvironment. Platform-specific transitive wheels remain
+                # isolated to the pipeline notebook's offline install because
+                # serverless Jobs and Pipelines may use different Python ABIs.
                 conf.target_wheelhouse_remote = (
                     f"{conf.uc_volume_path}wheels/target/wheelhouse/"
                 )
-                self.upload_wheel(
+                conf.target_main_whl_remote = self.upload_wheel(
                     conf, conf.target_main_whl_local, "target/wheelhouse"
                 )
-                self.upload_wheel(
+                conf.target_compat_whl_remote = self.upload_wheel(
                     conf, conf.target_compat_whl_local, "target/wheelhouse"
                 )
                 for dependency_whl in conf.target_dependency_whls_local:
@@ -1624,15 +1627,62 @@ class BackwardCompatRunner:
             tasks=tasks,
         )
 
-    def build_phase2_job(self, conf: BCRunnerConf):
-        """Phase 2 workflow: drop incremental seed -> bronze A1 -> silver ->
-        validate_phase2.
+    def _phase2_legacy_entrypoint_dependencies(
+        self, conf: BCRunnerConf
+    ) -> List[str]:
+        """Dependencies for exercising the target ``dlt_meta:run`` contract."""
+        if not conf.is_cross_namespace_upgrade:
+            return []
+        if conf.target_install_surface == "compat_wheelhouse":
+            required = {
+                "target primary wheel": conf.target_main_whl_remote,
+                "target compatibility wheel": conf.target_compat_whl_remote,
+            }
+            missing = [name for name, path in required.items() if not path]
+            if missing:
+                raise ValueError(
+                    "Cannot test the target dlt_meta wheel entry point; "
+                    f"missing uploaded {', '.join(missing)}"
+                )
+            return [
+                conf.target_main_whl_remote,
+                conf.target_compat_whl_remote,
+            ]
+        if conf.install_mode == "pypi":
+            return [self.install_spec_target_main(conf)]
+        return []
 
-        No onboarding. No A2 redo. The dataflowspec persisted by Phase 1
-        IS the spec Phase 2 runs. The only thing that changed between
-        phases is the wheel attached to each pipeline -- swapped via
-        ``pipelines.update()`` BEFORE this job is built.
+    def build_phase2_job(self, conf: BCRunnerConf):
+        """Run target entry-point smoke, incremental pipelines, and validation.
+
+        The dataflowspec persisted by Phase 1 remains the input to the target
+        pipelines. For cross-namespace upgrades installed through the
+        compatibility distribution, Phase 2 first re-runs A1 onboarding with
+        ``overwrite=False`` using the legacy ``dlt_meta`` package name and
+        ``run`` entry point. This proves an existing v0.0.10 wheel task remains
+        executable after the target wheel swap without replacing Phase 1 state.
         """
+        legacy_dependencies = self._phase2_legacy_entrypoint_dependencies(conf)
+        legacy_env_key = "bc_phase2_legacy_entrypoint_env"
+        environments = (
+            [
+                jobs.JobEnvironment(
+                    environment_key=legacy_env_key,
+                    spec=compute.Environment(
+                        # Client v2 isolates task dependencies from the
+                        # serverless kernel's core packages. Client v1 lets
+                        # the target wheel's databricks-sdk dependency shadow
+                        # dbruntime dependencies and can prevent Python from
+                        # restarting before the entry point is invoked.
+                        client="2",
+                        dependencies=legacy_dependencies,
+                    ),
+                )
+            ]
+            if legacy_dependencies
+            else None
+        )
+        bronze_dependency = "phase2_add_incremental"
         tasks = [
             jobs.Task(
                 task_key="phase2_add_incremental",
@@ -1648,9 +1698,56 @@ class BackwardCompatRunner:
                     },
                 ),
             ),
+        ]
+        if legacy_dependencies:
+            tasks.append(
+                jobs.Task(
+                    task_key="phase2_legacy_entrypoint_onboard",
+                    description=(
+                        f"Phase 2 ({conf.target_profile.name} / "
+                        f"{conf.target_ref}): exercise legacy dlt_meta:run"
+                    ),
+                    depends_on=[
+                        jobs.TaskDependency(
+                            task_key="phase2_add_incremental"
+                        )
+                    ],
+                    environment_key=legacy_env_key,
+                    python_wheel_task=jobs.PythonWheelTask(
+                        package_name="dlt_meta",
+                        entry_point="run",
+                        named_parameters={
+                            "database": (
+                                f"{conf.uc_catalog_name}."
+                                f"{conf.sdp_meta_schema}"
+                            ),
+                            "bronze_dataflowspec_table": (
+                                "bronze_dataflowspec"
+                            ),
+                            "silver_dataflowspec_table": (
+                                "silver_dataflowspec"
+                            ),
+                            "import_author": "backward_compat",
+                            "version": "v1",
+                            "env": "it",
+                            "uc_enabled": "True",
+                            "onboard_layer": "bronze_silver",
+                            "onboarding_file_path": (
+                                f"{conf.uc_volume_path}"
+                                f"{conf.a1_onboarding_file}"
+                            ),
+                            "overwrite": "False",
+                        },
+                    ),
+                )
+            )
+            bronze_dependency = "phase2_legacy_entrypoint_onboard"
+        tasks.extend([
             jobs.Task(
                 task_key="phase2_bronze",
-                depends_on=[jobs.TaskDependency(task_key="phase2_add_incremental")],
+                depends_on=[
+                    jobs.TaskDependency(task_key=bronze_dependency)
+                ],
                 pipeline_task=jobs.PipelineTask(pipeline_id=conf.bronze_a1_pipeline_id),
             ),
             jobs.Task(
@@ -1690,9 +1787,10 @@ class BackwardCompatRunner:
                     },
                 ),
             ),
-        ]
+        ])
         return self.ws.jobs.create(
             name=f"backward-compat-phase2-{conf.run_id}",
+            environments=environments,
             tasks=tasks,
         )
 

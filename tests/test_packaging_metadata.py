@@ -113,6 +113,17 @@ class CompatibilityDependencyMetadataTests(unittest.TestCase):
             "traceback on machines without pyspark)",
         )
 
+    def test_compat_wrapper_preserves_legacy_wheel_task_entrypoint(self):
+        compat = _setup_kwargs(COMPAT_SETUP)
+        self.assertEqual(
+            compat.get("entry_points"),
+            {
+                "group_1": (
+                    "run=databricks.labs.sdp_meta.__main__:main"
+                )
+            },
+        )
+
 
 class VersionSynchronizationTests(unittest.TestCase):
     """The two distributions and ``__about__`` must move in lockstep.
