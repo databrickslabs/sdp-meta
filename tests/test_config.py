@@ -23,6 +23,7 @@ real ``Config`` object.
 """
 from __future__ import annotations
 
+import copy
 import json
 import unittest
 from dataclasses import dataclass
@@ -73,6 +74,10 @@ _WORKSPACE_PAYLOAD = {
         "cluster_id": "cid-123",
     },
 }
+
+_V0010_CONFIG_PATH = (
+    Path(__file__).parent / "fixtures" / "config" / "v0.0.10-config.json"
+)
 
 
 def _fake_databricks_config(**kwargs) -> SimpleNamespace:
@@ -259,6 +264,60 @@ class TestUnderscoreConfigBaseClass(unittest.TestCase):
 
 class TestWorkspaceConfig(unittest.TestCase):
     """End-to-end ``WorkspaceConfig`` -> ``WorkspaceClient`` plumbing."""
+
+    def test_v0010_config_file_migrates_all_legacy_keys(self):
+        with self.assertLogs(
+            "databricks.labs.sdp_meta.config", level="WARNING"
+        ) as captured:
+            config = WorkspaceConfig.from_file(_V0010_CONFIG_PATH)
+
+        self.assertEqual(config.sdp_meta_operation, "onboard")
+        self.assertEqual(config.sdp_meta_schema, "dlt_meta_dataflowspecs")
+        self.assertEqual(config.sdp_meta_layer, "bronze_silver")
+        self.assertEqual(config.sdp_meta_onboard_group, "A1")
+        for legacy_key in (
+            "dlt_meta_operation",
+            "dlt_meta_schema",
+            "dlt_meta_layer",
+            "dlt_meta_onboard_group",
+        ):
+            self.assertTrue(
+                any(legacy_key in message for message in captured.output),
+                captured.output,
+            )
+
+    def test_current_config_load_does_not_mutate_input_or_warn(self):
+        payload = copy.deepcopy(_WORKSPACE_PAYLOAD)
+        original = copy.deepcopy(payload)
+
+        with patch(
+            "databricks.labs.sdp_meta.config.logger.warning"
+        ) as warning:
+            config = WorkspaceConfig.from_dict(payload)
+
+        warning.assert_not_called()
+        self.assertEqual(payload, original)
+        self.assertEqual(config.sdp_meta_schema, "sdp_meta")
+
+    def test_current_key_wins_when_legacy_and_current_keys_conflict(self):
+        payload = copy.deepcopy(_WORKSPACE_PAYLOAD)
+        payload["dlt_meta_schema"] = "legacy_schema"
+        original = copy.deepcopy(payload)
+
+        with self.assertLogs(
+            "databricks.labs.sdp_meta.config", level="WARNING"
+        ) as captured:
+            config = WorkspaceConfig.from_dict(payload)
+
+        self.assertEqual(config.sdp_meta_schema, "sdp_meta")
+        self.assertEqual(payload, original)
+        self.assertTrue(
+            any(
+                "current key takes precedence" in message
+                for message in captured.output
+            ),
+            captured.output,
+        )
 
     def test_to_workspace_client_returns_configured_workspace_client(self):
         wc = WorkspaceConfig.from_dict(dict(_WORKSPACE_PAYLOAD))

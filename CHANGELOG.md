@@ -72,7 +72,7 @@ See [docs/operations/migration](https://databrickslabs.github.io/sdp-meta/docs/o
 ### Backward Compatibility
 - The `dlt-meta` compatibility wrapper package re-exports all public symbols and forwards CLI commands to `sdp-meta` with a deprecation banner.
 - `from dlt_meta import ...` and `import src.*` continue to work with `DeprecationWarning`; both shims are scheduled for removal in v0.2.0.
-- Legacy config key `dlt_meta_schema` is still read with a logged warning; prefer `sdp_meta_schema`.
+- v0.0.10 workspace configuration keys (`dlt_meta_operation`, `dlt_meta_schema`, `dlt_meta_layer`, and `dlt_meta_onboard_group`) are migrated to their `sdp_meta_*` equivalents with logged deprecation warnings. If both forms are present, the current key takes precedence. [Issue #456](https://github.com/databrickslabs/sdp-meta/issues/456)
 
 ## [v0.0.10]
 ### ⚠️ Breaking Changes
