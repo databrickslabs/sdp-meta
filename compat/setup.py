@@ -151,7 +151,7 @@ Source: https://github.com/databrickslabs/sdp-meta
     # installed. Maintainers running editable installs should
     # explicitly ``import dlt_meta`` in their notebooks.
     cmdclass={"bdist_wheel": bdist_wheel_with_pth_file},
-    entry_points={"group_1": "run=dlt_meta:main"},
+    entry_points={"group_1": "run=databricks.labs.sdp_meta.__main__:main"},
     # Must stay identical to the primary package's version classifiers so both
     # advertise the same interpreters; tests/test_packaging_metadata.py enforces it.
     classifiers=[

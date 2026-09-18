@@ -1,5 +1,6 @@
 """Clean-environment test for the ``dlt-meta`` compatibility redirect."""
 
+import configparser
 import json
 import os
 import shutil
@@ -8,6 +9,7 @@ import sys
 import tempfile
 import unittest
 import venv
+import zipfile
 from pathlib import Path
 
 
@@ -34,6 +36,34 @@ def _run(command, *, cwd=None, env=None, timeout=300):
             f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
         )
     return result
+
+
+class CompatibilityWheelEntrypointTests(unittest.TestCase):
+    """Prove legacy wheel tasks use the argument-parsing entry point."""
+
+    def test_run_entry_point_uses_wheel_task_cli(self):
+        with tempfile.TemporaryDirectory(prefix="sdp-meta-compat-entrypoint-") as tmp:
+            dist = Path(tmp)
+            _run(
+                [sys.executable, "setup.py", "bdist_wheel", "--dist-dir", dist],
+                cwd=REPO_ROOT / "compat",
+            )
+            wheel = next(dist.glob("dlt_meta-*.whl"))
+            with zipfile.ZipFile(wheel) as archive:
+                entry_points_file = next(
+                    name
+                    for name in archive.namelist()
+                    if name.endswith(".dist-info/entry_points.txt")
+                )
+                entry_points = configparser.ConfigParser()
+                entry_points.read_string(
+                    archive.read(entry_points_file).decode("utf-8")
+                )
+
+            self.assertEqual(
+                entry_points["group_1"]["run"],
+                "databricks.labs.sdp_meta.__main__:main",
+            )
 
 
 @unittest.skipIf(
