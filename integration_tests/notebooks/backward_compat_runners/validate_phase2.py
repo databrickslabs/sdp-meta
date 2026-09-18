@@ -55,6 +55,9 @@ target_package_version = dbutils.widgets.get("target_package_version")
 source_profile = dbutils.widgets.get("source_profile")
 source_ref = dbutils.widgets.get("source_ref")
 target_ref = dbutils.widgets.get("target_ref")
+phase2_append_onboarding = (
+    dbutils.widgets.get("phase2_append_onboarding").lower() == "true"
+)
 
 log_list = []
 log_list.append(
@@ -157,6 +160,80 @@ log_list.append(
 bronze_table = f"{uc_catalog_name}.{sdp_meta_schema}.bronze_dataflowspec"
 silver_table = f"{uc_catalog_name}.{sdp_meta_schema}.silver_dataflowspec"
 
+if phase2_append_onboarding:
+    expected_new_fields = {
+        bronze_table: {
+            "clusterByAuto",
+            "cdcApplyChangesFlows",
+            "cdcApplyChangesFlowsSchemas",
+            "rowFilter",
+            "quarantineRowFilter",
+        },
+        silver_table: {
+            "clusterByAuto",
+            "cdcApplyChangesFlows",
+            "rowFilter",
+            "quarantineRowFilter",
+        },
+    }
+    for table, expected_fields in expected_new_fields.items():
+        physical_fields = set(spark.read.table(table).columns)
+        missing = expected_fields - physical_fields
+        status = "Passed" if not missing else "Failed"
+        log_list.append(
+            f"Phase2 additive schema evolution {table}: "
+            f"missing={sorted(missing)}. {status}!"
+        )
+
+    phase1_audit_path = (
+        f"{uc_volume_path}/tmp/"
+        f"backward_compat_phase1_spec_audit_{run_id}.json"
+    )
+    phase1_spec_audit = json.loads(
+        dbutils.fs.head(phase1_audit_path, 1024 * 1024)
+    )
+    for layer, table in (
+        ("bronze", bronze_table),
+        ("silver", silver_table),
+    ):
+        rows = {
+            row.dataFlowId: row
+            for row in spark.read.table(table).collect()
+        }
+        inserted = rows.get("schema-evolution-new")
+        inserted_ok = (
+            inserted is not None and inserted.clusterByAuto is True
+        )
+        inserted_status = "Passed" if inserted_ok else "Failed"
+        log_list.append(
+            f"Phase2 {layer} new schema-evolution row retained current "
+            f"field values. {inserted_status}!"
+        )
+
+        existing = rows.get("100")
+        expected_audit = phase1_spec_audit[layer]
+        audit_ok = (
+            existing is not None
+            and existing.createDate.isoformat()
+            == expected_audit["createDate"]
+            and existing.createdBy == expected_audit["createdBy"]
+        )
+        audit_status = "Passed" if audit_ok else "Failed"
+        log_list.append(
+            f"Phase2 {layer} existing row retained create audit fields. "
+            f"{audit_status}!"
+        )
+
+        expected_count = 4 if layer == "bronze" else 3
+        count_status = (
+            "Passed" if len(rows) == expected_count else "Failed"
+        )
+        log_list.append(
+            f"Phase2 {layer} append onboarding is idempotent: "
+            f"row_count={len(rows)} expected={expected_count}. "
+            f"{count_status}!"
+        )
+
 try:
     if source_profile == "legacy":
         from src.dataflow_spec import (
@@ -251,8 +328,9 @@ if BronzeDataflowSpec is not None:
             "cdcApplyChangesFlowsSchemas",
             "clusterByAuto",
         )
-        defaults_ok = all(
-            getattr(spec, fname, "MISSING") is None for fname in new_v011_fields
+        defaults_ok = phase2_append_onboarding or all(
+            getattr(spec, fname, "MISSING") is None
+            for fname in new_v011_fields
         )
         if defaults_ok:
             bronze_ok += 1
@@ -266,9 +344,13 @@ if BronzeDataflowSpec is not None:
             )
     if bronze_ok == len(rows):
         contract = (
-            "legacy fields backfilled to v0.1.0 defaults"
-            if source_profile == "legacy"
-            else "current-shape fields preserved"
+            "current fields persisted by append onboarding"
+            if phase2_append_onboarding
+            else (
+                "legacy fields backfilled to v0.1.0 defaults"
+                if source_profile == "legacy"
+                else "current-shape fields preserved"
+            )
         )
         log_list.append(
             f"BronzeDataflowSpec backward-compat: {bronze_ok}/{len(rows)} rows "
@@ -315,7 +397,7 @@ if BronzeDataflowSpec is not None:
             "cdcApplyChangesFlows",
             "clusterByAuto",
         )
-        defaults_ok = all(
+        defaults_ok = phase2_append_onboarding or all(
             getattr(spec, fname, "MISSING") is None
             for fname in new_v011_silver_fields
         )
@@ -332,9 +414,13 @@ if BronzeDataflowSpec is not None:
             )
     if silver_ok == len(rows):
         contract = (
-            "legacy fields backfilled to v0.1.0 defaults"
-            if source_profile == "legacy"
-            else "current-shape fields preserved"
+            "current fields persisted by append onboarding"
+            if phase2_append_onboarding
+            else (
+                "legacy fields backfilled to v0.1.0 defaults"
+                if source_profile == "legacy"
+                else "current-shape fields preserved"
+            )
         )
         log_list.append(
             f"SilverDataflowSpec backward-compat: {silver_ok}/{len(rows)} rows "
