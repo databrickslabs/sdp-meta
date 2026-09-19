@@ -24,6 +24,9 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEMO_DIR = REPO_ROOT / "demo" / "dab_template_demo"
@@ -359,7 +362,135 @@ class LauncherRegistryTests(unittest.TestCase):
         split = self.module.SCENARIOS["cloudfiles"]
         self.assertEqual(scenario.extra_flows_csv, split.extra_flows_csv)
         self.assertEqual(scenario.recipe_name, split.recipe_name)
-        self.assertEqual(scenario.recipe_args_template, split.recipe_args_template)
+        self.assertEqual(
+            scenario.recipe_args_template, split.recipe_args_template
+        )
+
+    def test_duplicate_ownership_stage_rejects_without_writing(self):
+        import tempfile
+
+        scenario = self.module.SCENARIOS["multi_pipeline_cloudfiles"]
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle_dir = Path(tmp)
+            (bundle_dir / "resources").mkdir()
+            (bundle_dir / "conf").mkdir()
+            tracked = bundle_dir / "resources" / "pipelines.yml"
+            tracked.write_text("unchanged\n")
+
+            def reject(command, *, output):
+                print(
+                    "ERROR: Duplicate bronze ownership for dataflow group "
+                    "'dab_demo_cf_group'",
+                    file=output,
+                )
+                self.assertEqual(
+                    command.pipeline.dataflow_group,
+                    "dab_demo_cf_group",
+                )
+                return 2
+
+            with patch.object(
+                self.module,
+                "bundle_add_pipeline",
+                side_effect=reject,
+            ):
+                self.module.stage_assert_duplicate_pipeline_rejected(
+                    scenario,
+                    bundle_dir,
+                    uc_schema="ownership_it",
+                )
+
+            self.assertEqual(tracked.read_text(), "unchanged\n")
+
+    def test_duplicate_ownership_stage_detects_rejected_write(self):
+        import tempfile
+
+        scenario = self.module.SCENARIOS["multi_pipeline_cloudfiles"]
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle_dir = Path(tmp)
+            (bundle_dir / "resources").mkdir()
+            (bundle_dir / "conf").mkdir()
+            tracked = bundle_dir / "README.md"
+            tracked.write_text("before\n")
+
+            def reject_after_write(_command, *, output):
+                tracked.write_text("after\n")
+                print(
+                    "ERROR: Duplicate bronze ownership",
+                    file=output,
+                )
+                return 2
+
+            with (
+                patch.object(
+                    self.module,
+                    "bundle_add_pipeline",
+                    side_effect=reject_after_write,
+                ),
+                self.assertRaisesRegex(SystemExit, "modified bundle file"),
+            ):
+                self.module.stage_assert_duplicate_pipeline_rejected(
+                    scenario,
+                    bundle_dir,
+                    uc_schema="ownership_it",
+                )
+
+    def test_set_onboarding_file_path_updates_named_parameter(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "onboarding.yml"
+            path.write_text(yaml.safe_dump({
+                "resources": {
+                    "jobs": {
+                        "onboarding": {
+                            "tasks": [{
+                                "task_key": "onboard_dataflowspecs",
+                                "python_wheel_task": {
+                                    "named_parameters": {
+                                        "onboarding_file_path": "old",
+                                    },
+                                },
+                            }],
+                        },
+                    },
+                },
+            }, sort_keys=False))
+
+            self.module._set_onboarding_file_path(
+                path,
+                "/Volumes/catalog/schema/volume/conf/onboarding.yml",
+            )
+
+            doc = yaml.safe_load(path.read_text())
+            params = doc["resources"]["jobs"]["onboarding"]["tasks"][0][
+                "python_wheel_task"
+            ]["named_parameters"]
+            self.assertEqual(
+                params["onboarding_file_path"],
+                "/Volumes/catalog/schema/volume/conf/onboarding.yml",
+            )
+
+    def test_set_onboarding_file_path_reports_missing_task(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "onboarding.yml"
+            path.write_text(yaml.safe_dump({
+                "resources": {
+                    "jobs": {
+                        "onboarding": {
+                            "tasks": [],
+                        },
+                    },
+                },
+            }))
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "missing task `onboard_dataflowspecs`",
+            ):
+                self.module._set_onboarding_file_path(path, "/new/path")
 
     def test_delta_scenario_marked_as_workspace_required(self):
         delta = self.module.SCENARIOS["delta"]

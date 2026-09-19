@@ -68,6 +68,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -1143,6 +1144,74 @@ def stage_add_independent_pipeline(
         )
 
 
+def stage_assert_duplicate_pipeline_rejected(
+    scenario: Scenario,
+    bundle_dir: Path,
+    *,
+    uc_schema: Optional[str],
+) -> None:
+    """Prove Issue #458 rejects duplicate ownership without changing files."""
+    if scenario.name != "multi_pipeline_cloudfiles":
+        return
+
+    _banner(
+        "STAGE 3C",
+        "bundle-add-pipeline duplicate ownership rejection (Issue #458)",
+    )
+
+    def snapshot() -> Dict[Path, bytes]:
+        return {
+            path.relative_to(bundle_dir): path.read_bytes()
+            for path in bundle_dir.rglob("*")
+            if path.is_file()
+            and ".git" not in path.relative_to(bundle_dir).parts
+        }
+
+    before = snapshot()
+    schemas = _resolve_demo_schemas(scenario, uc_schema)
+    output = StringIO()
+    rc = bundle_add_pipeline(
+        BundleAddPipelineCommand(
+            bundle_dir=str(bundle_dir),
+            pipeline=PipelineSpec(
+                name="rejected_duplicate_owner",
+                layer="bronze",
+                dataflow_group="dab_demo_cf_group",
+                bronze_target_schema=(
+                    f"{schemas['bronze_target_schema']}_must_not_apply"
+                ),
+            ),
+        ),
+        output=output,
+    )
+    message = output.getvalue()
+    after = snapshot()
+    changed = sorted(
+        str(path)
+        for path in set(before).union(after)
+        if before.get(path) != after.get(path)
+    )
+    if rc == 0:
+        raise SystemExit(
+            "Issue #458 regression: duplicate group/layer ownership was "
+            "accepted"
+        )
+    if "Duplicate bronze ownership" not in message:
+        raise SystemExit(
+            "Issue #458 regression: duplicate request failed for an "
+            f"unexpected reason:\n{message}"
+        )
+    if changed:
+        raise SystemExit(
+            "Issue #458 regression: rejected duplicate request modified "
+            f"bundle file(s): {changed}"
+        )
+    print(
+        "[STAGE 3C] Duplicate bronze ownership rejected and bundle files "
+        "remained byte-for-byte unchanged."
+    )
+
+
 def stage_recipe(scenario: Scenario, bundle_dir: Path, *, apply_recipe: bool,
                  uc_catalog_name: str, profile: Optional[str],
                  uc_source_catalog: Optional[str] = None,
@@ -1587,6 +1656,50 @@ def _resolve_onboarding_file_name(bundle_dir: Path) -> str:
     return name
 
 
+def _set_onboarding_file_path(
+    onboarding_job_path: Path,
+    onboarding_path: str,
+) -> None:
+    """Update the onboarding task or fail clearly on hand-edited YAML."""
+    onboarding_job = yaml.safe_load(onboarding_job_path.read_text()) or {}
+    tasks = (
+        (((onboarding_job.get("resources") or {}).get("jobs") or {})
+         .get("onboarding") or {}).get("tasks")
+    )
+    if not isinstance(tasks, list):
+        raise ValueError(
+            f"{onboarding_job_path}: job `onboarding` must define a task list"
+        )
+    onboarding_task = next(
+        (
+            task for task in tasks
+            if isinstance(task, dict)
+            and task.get("task_key") == "onboard_dataflowspecs"
+        ),
+        None,
+    )
+    if onboarding_task is None:
+        raise ValueError(
+            f"{onboarding_job_path}: missing task `onboard_dataflowspecs`"
+        )
+    wheel_task = onboarding_task.get("python_wheel_task")
+    if not isinstance(wheel_task, dict):
+        raise ValueError(
+            f"{onboarding_job_path}: task `onboard_dataflowspecs` is missing "
+            "`python_wheel_task`"
+        )
+    named_parameters = wheel_task.get("named_parameters")
+    if not isinstance(named_parameters, dict):
+        raise ValueError(
+            f"{onboarding_job_path}: task `onboard_dataflowspecs` is missing "
+            "`python_wheel_task.named_parameters`"
+        )
+    named_parameters["onboarding_file_path"] = onboarding_path
+    onboarding_job_path.write_text(
+        yaml.safe_dump(onboarding_job, sort_keys=False)
+    )
+
+
 def stage_deploy_and_run(bundle_dir: Path, profile: Optional[str], *,
                          uc_catalog: Optional[str] = None,
                          uc_schema: Optional[str] = None,
@@ -1624,18 +1737,15 @@ def stage_deploy_and_run(bundle_dir: Path, profile: Optional[str], *,
         onboarding_job_path = (
             bundle_dir / "resources" / "sdp_meta_onboarding_job.yml"
         )
-        onboarding_job = yaml.safe_load(onboarding_job_path.read_text())
-        tasks = onboarding_job["resources"]["jobs"]["onboarding"]["tasks"]
-        onboarding_task = next(
-            task for task in tasks
-            if task.get("task_key") == "onboard_dataflowspecs"
-        )
-        onboarding_task["python_wheel_task"]["named_parameters"][
-            "onboarding_file_path"
-        ] = onboarding_path
-        onboarding_job_path.write_text(
-            yaml.safe_dump(onboarding_job, sort_keys=False)
-        )
+        try:
+            _set_onboarding_file_path(
+                onboarding_job_path,
+                onboarding_path,
+            )
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            raise SystemExit(
+                f"Cannot update onboarding file path: {exc}"
+            ) from exc
         print(
             f"[STAGE 6] Onboarding task file path -> {onboarding_path}"
         )
@@ -1932,6 +2042,11 @@ def main() -> int:
                 bundle_dir,
                 uc_schema=args.uc_schema,
                 demo_data_volume_path=demo_data_volume_path,
+            )
+            stage_assert_duplicate_pipeline_rejected(
+                scenario,
+                bundle_dir,
+                uc_schema=args.uc_schema,
             )
             stage_recipe(
                 scenario, bundle_dir,
