@@ -40,9 +40,14 @@ from databricks.labs.sdp_meta.bundle import (
     BundleValidateCommand,
     FlowSpec,
     PipelineSpec,
+    _effective_pipeline_resources,
+    _effective_pipeline_tasks,
     _discover_bundle_dir,
+    _pipeline_ownership_errors,
     _resolved_variable,
     _sdp_meta_sanity_checks,
+    _split_dependency_errors,
+    _wire_split_pipeline_dependencies,
     _stamp_sdp_meta_version,
     bundle_add_flow,
     bundle_add_pipeline,
@@ -2090,6 +2095,237 @@ class _tempdir:
         return False
 
 
+class PipelineOwnershipHelperTests(unittest.TestCase):
+    """Branch coverage for defensive target/topology resolution."""
+
+    def test_ownership_skips_invalid_layers_and_blank_groups(self):
+        pipelines = {
+            "invalid": {
+                "configuration": {
+                    "layer": "gold",
+                    "bronze.group": "g",
+                },
+            },
+            "blank": {
+                "schema": "bronze",
+                "configuration": {
+                    "layer": "bronze",
+                    "bronze.group": " ",
+                },
+            },
+            "valid": {
+                "schema": "bronze",
+                "configuration": {
+                    "layer": "bronze",
+                    "bronze.group": "valid",
+                },
+            },
+        }
+
+        self.assertEqual(
+            _pipeline_ownership_errors(pipelines, {}, {}),
+            [],
+        )
+
+    def test_effective_resources_handles_new_and_malformed_overrides(self):
+        base = {"bronze": {"configuration": {"layer": "bronze"}}}
+        self.assertIs(
+            _effective_pipeline_resources(base, {}, None),
+            base,
+        )
+        self.assertIs(
+            _effective_pipeline_resources(
+                base,
+                {"targets": {"prod": {"resources": "invalid"}}},
+                "prod",
+            ),
+            base,
+        )
+
+        effective = _effective_pipeline_resources(
+            base,
+            {
+                "targets": {
+                    "prod": {
+                        "resources": {
+                            "pipelines": {
+                                "silver": {
+                                    "configuration": {
+                                        "layer": "silver",
+                                    },
+                                },
+                                "disabled": False,
+                            },
+                        },
+                    },
+                },
+            },
+            "prod",
+        )
+
+        self.assertEqual(
+            effective["silver"]["configuration"]["layer"],
+            "silver",
+        )
+        self.assertFalse(effective["disabled"])
+
+    def test_effective_tasks_merges_and_appends_target_tasks(self):
+        base = [
+            {
+                "task_key": "bronze",
+                "pipeline_task": {"pipeline_id": "bronze-id"},
+            },
+            "ignored",
+        ]
+        self.assertIs(_effective_pipeline_tasks(base, {}, None), base)
+        self.assertIs(
+            _effective_pipeline_tasks(
+                base,
+                {"targets": {"prod": {"resources": []}}},
+                "prod",
+            ),
+            base,
+        )
+
+        effective = _effective_pipeline_tasks(
+            base,
+            {
+                "targets": {
+                    "prod": {
+                        "resources": {
+                            "jobs": {
+                                "pipelines": {
+                                    "tasks": [
+                                        {
+                                            "task_key": "bronze",
+                                            "depends_on": [],
+                                        },
+                                        {
+                                            "task_key": "silver",
+                                            "pipeline_task": {
+                                                "pipeline_id": "silver-id",
+                                            },
+                                        },
+                                        "ignored-target-task",
+                                    ],
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            "prod",
+        )
+
+        self.assertEqual(
+            effective[0]["pipeline_task"]["pipeline_id"],
+            "bronze-id",
+        )
+        self.assertEqual(effective[1], "ignored")
+        self.assertEqual(effective[2]["task_key"], "silver")
+        self.assertEqual(effective[3], "ignored-target-task")
+
+    def test_split_validation_skips_unowned_and_unreferenced_specs(self):
+        pipelines = {
+            "not-a-mapping": "invalid",
+            "combined": {
+                "configuration": {
+                    "layer": "bronze_silver",
+                },
+            },
+            "bronze": {
+                "configuration": {
+                    "layer": "bronze",
+                    "bronze.group": "g",
+                },
+            },
+            "silver_other": {
+                "configuration": {
+                    "layer": "silver",
+                    "silver.group": "other",
+                },
+            },
+            "silver_without_task": {
+                "configuration": {
+                    "layer": "silver",
+                    "silver.group": "g",
+                },
+            },
+            "silver_without_group": {
+                "configuration": {
+                    "layer": "silver",
+                },
+            },
+        }
+        tasks = [
+            "invalid",
+            {"task_key": "no_pipeline_reference"},
+            {
+                "task_key": "bronze",
+                "pipeline_task": {
+                    "pipeline_id": (
+                        "${resources.pipelines.bronze.id}"
+                    ),
+                },
+            },
+        ]
+
+        self.assertEqual(
+            _split_dependency_errors(
+                pipelines,
+                tasks,
+                {},
+                {},
+                None,
+            ),
+            [],
+        )
+
+    def test_split_wiring_skips_malformed_specs_and_missing_tasks(self):
+        pipelines = {
+            "invalid": "not-a-mapping",
+            "ungrouped": {
+                "configuration": {
+                    "layer": "bronze",
+                },
+            },
+            "bronze": {
+                "configuration": {
+                    "layer": "bronze",
+                    "bronze.group": "g",
+                },
+            },
+            "silver": {
+                "configuration": {
+                    "layer": "silver",
+                    "silver.group": "g",
+                },
+            },
+        }
+        tasks = [
+            "not-a-task",
+            {"task_key": "no-pipeline-reference"},
+            {
+                "task_key": "bronze",
+                "pipeline_task": {
+                    "pipeline_id": (
+                        "${resources.pipelines.bronze.id}"
+                    ),
+                },
+            },
+        ]
+
+        _wire_split_pipeline_dependencies(
+            pipelines,
+            tasks,
+            {"silver"},
+            {},
+            {},
+        )
+
+        self.assertEqual(len(tasks), 3)
+
+
 class BundleAddPipelineTests(unittest.TestCase):
     """Unit tests for adding independent pipeline topology resources."""
 
@@ -2734,6 +2970,86 @@ class BundleAddPipelineTests(unittest.TestCase):
             self.assertEqual(rc, 2)
             self.assertIn(
                 "expected a top-level mapping",
+                output.getvalue(),
+            )
+
+    def test_nested_pipeline_yaml_shape_errors_are_clean(self):
+        cases = {
+            "resources": (
+                {"resources": []},
+                "`resources` must be a mapping",
+            ),
+            "pipelines": (
+                {"resources": {"pipelines": [], "jobs": {}}},
+                "`resources.pipelines` and `resources.jobs`",
+            ),
+            "pipeline_job": (
+                {
+                    "resources": {
+                        "pipelines": {},
+                        "jobs": {"pipelines": []},
+                    },
+                },
+                "`resources.jobs.pipelines` must be a mapping",
+            ),
+            "tasks": (
+                {
+                    "resources": {
+                        "pipelines": {},
+                        "jobs": {
+                            "pipelines": {"tasks": {}},
+                        },
+                    },
+                },
+                "`resources.jobs.pipelines.tasks` must be a list",
+            ),
+        }
+        for name, (doc, expected) in cases.items():
+            with self.subTest(name=name), _tempdir() as tmp:
+                self._make_bundle(tmp)
+                (
+                    tmp / "resources" / "sdp_meta_pipelines.yml"
+                ).write_text(yaml.safe_dump(doc))
+                output = StringIO()
+
+                rc = bundle_add_pipeline(
+                    BundleAddPipelineCommand(
+                        bundle_dir=str(tmp),
+                        pipeline=PipelineSpec(
+                            name="orders",
+                            layer="bronze",
+                            dataflow_group="orders",
+                        ),
+                    ),
+                    output=output,
+                )
+
+                self.assertEqual(rc, 2)
+                self.assertIn(expected, output.getvalue())
+
+    def test_invalid_variables_shape_returns_clean_error(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp)
+            (tmp / "resources" / "variables.yml").write_text(
+                yaml.safe_dump({"variables": ["invalid"]})
+            )
+            output = StringIO()
+
+            rc = bundle_add_pipeline(
+                BundleAddPipelineCommand(
+                    bundle_dir=str(tmp),
+                    pipeline=PipelineSpec(
+                        name="orders",
+                        layer="bronze",
+                        dataflow_group="orders",
+                    ),
+                ),
+                output=output,
+            )
+
+            self.assertEqual(rc, 2)
+            self.assertIn(
+                "`variables` must be a mapping",
                 output.getvalue(),
             )
 
