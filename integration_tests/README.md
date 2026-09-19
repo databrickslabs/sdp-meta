@@ -229,6 +229,17 @@ python integration_tests/run_backward_compat_tests.py \
     --install_mode=git \
     --profile=<<DEFAULT>>
 
+# Issue #460: after the wheel swap, append-onboard twice with the target
+# wheel and verify the physical v0.0.10 UC spec tables evolve idempotently.
+python integration_tests/run_backward_compat_tests.py \
+    --uc_catalog_name=<<uc catalog name>> \
+    --source_version=v0.0.10 \
+    --target_version=issue_460 \
+    --target_profile=current \
+    --build_target_from_worktree \
+    --phase2_append_onboarding \
+    --profile=<<DEFAULT>>
+
 # Post-release smoke test: both phases from the LIVE PyPI index
 # (Phase 1: dlt-meta==0.0.10, Phase 2: dlt-meta==0.1.0 via the redirect).
 python integration_tests/run_backward_compat_tests.py \

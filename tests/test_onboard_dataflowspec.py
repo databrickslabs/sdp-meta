@@ -1,5 +1,6 @@
 """Test OnboardDataflowSpec class."""
 import copy
+import dataclasses
 import json
 import os
 import shutil
@@ -10,6 +11,62 @@ from databricks.labs.sdp_meta.onboard_dataflowspec import OnboardDataflowspec
 from databricks.labs.sdp_meta.dataflow_spec import BronzeDataflowSpec, SilverDataflowSpec
 from unittest.mock import MagicMock, patch
 from pyspark.sql import DataFrame, Row
+
+
+_V0010_BRONZE_SPEC_SCHEMA_DDL = """
+    dataFlowId STRING,
+    dataFlowGroup STRING,
+    sourceFormat STRING,
+    sourceDetails MAP<STRING, STRING>,
+    readerConfigOptions MAP<STRING, STRING>,
+    targetFormat STRING,
+    targetDetails MAP<STRING, STRING>,
+    tableProperties MAP<STRING, STRING>,
+    schema STRING,
+    partitionColumns ARRAY<STRING>,
+    cdcApplyChanges STRING,
+    applyChangesFromSnapshot STRING,
+    dataQualityExpectations STRING,
+    quarantineTargetDetails MAP<STRING, STRING>,
+    quarantineTableProperties MAP<STRING, STRING>,
+    appendFlows STRING,
+    appendFlowsSchemas MAP<STRING, STRING>,
+    version STRING,
+    createDate TIMESTAMP,
+    createdBy STRING,
+    updateDate TIMESTAMP,
+    updatedBy STRING,
+    clusterBy ARRAY<STRING>,
+    sinks STRING
+"""
+
+_V0010_SILVER_SPEC_SCHEMA_DDL = """
+    dataFlowId STRING,
+    dataFlowGroup STRING,
+    sourceFormat STRING,
+    sourceDetails MAP<STRING, STRING>,
+    readerConfigOptions MAP<STRING, STRING>,
+    targetFormat STRING,
+    targetDetails MAP<STRING, STRING>,
+    tableProperties MAP<STRING, STRING>,
+    selectExp ARRAY<STRING>,
+    whereClause ARRAY<STRING>,
+    partitionColumns ARRAY<STRING>,
+    cdcApplyChanges STRING,
+    applyChangesFromSnapshot STRING,
+    dataQualityExpectations STRING,
+    quarantineTargetDetails MAP<STRING, STRING>,
+    quarantineTableProperties MAP<STRING, STRING>,
+    appendFlows STRING,
+    appendFlowsSchemas MAP<STRING, STRING>,
+    version STRING,
+    createDate TIMESTAMP,
+    createdBy STRING,
+    updateDate TIMESTAMP,
+    updatedBy STRING,
+    clusterBy ARRAY<STRING>,
+    sinks STRING
+"""
 
 
 class OnboardDataflowspecTests(SDPFrameworkTestCase):
@@ -26,6 +83,118 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
         """
         params = copy.deepcopy(self.onboarding_bronze_silver_params_map)
         return OnboardDataflowspec(self.spark, params)
+
+    def _rewrite_spec_table_with_legacy_schema(
+        self, table_name, legacy_schema_ddl, path=None
+    ):
+        legacy_schema = self.spark.createDataFrame(
+            [], schema=legacy_schema_ddl
+        ).schema
+        current = self.spark.table(table_name).select(
+            *legacy_schema.fieldNames()
+        )
+        rows = current.collect()
+        self.spark.sql(f"DROP TABLE IF EXISTS {table_name}")
+        legacy = self.spark.createDataFrame(rows, legacy_schema)
+        if path is None:
+            legacy.write.format("delta").saveAsTable(table_name)
+            return
+        shutil.rmtree(path, ignore_errors=True)
+        legacy.write.format("delta").save(path)
+        database, table = table_name.rsplit(".", 1)
+        self.deltaPipelinesMetaStoreOps.register_table_in_metastore(
+            database, table, path
+        )
+
+    def _assert_append_onboarding_evolves_v0010_schema(self, uc_enabled):
+        params = copy.deepcopy(
+            self.onboarding_bronze_silver_params_uc_map
+            if uc_enabled
+            else self.onboarding_bronze_silver_params_map
+        )
+        params.pop("uc_enabled", None)
+        onboarder = OnboardDataflowspec(
+            self.spark, params, uc_enabled=uc_enabled
+        )
+        onboarder.onboard_dataflow_specs()
+
+        database = params["database"]
+        bronze_table = f"{database}.{params['bronze_dataflowspec_table']}"
+        silver_table = f"{database}.{params['silver_dataflowspec_table']}"
+        original_bronze = {
+            row["dataFlowId"]: row.asDict()
+            for row in self.spark.table(bronze_table).collect()
+        }
+        original_silver = {
+            row["dataFlowId"]: row.asDict()
+            for row in self.spark.table(silver_table).collect()
+        }
+        self._rewrite_spec_table_with_legacy_schema(
+            bronze_table,
+            _V0010_BRONZE_SPEC_SCHEMA_DDL,
+            None if uc_enabled else params["bronze_dataflowspec_path"],
+        )
+        self._rewrite_spec_table_with_legacy_schema(
+            silver_table,
+            _V0010_SILVER_SPEC_SCHEMA_DDL,
+            None if uc_enabled else params["silver_dataflowspec_path"],
+        )
+
+        with open(self.onboarding_json_file, "r") as source:
+            payload = json.load(source)
+        new_row = copy.deepcopy(payload[0])
+        new_row["data_flow_id"] = "schema-evolution-new"
+        new_row["bronze_cluster_by_auto"] = True
+        new_row["silver_cluster_by_auto"] = True
+        payload.append(new_row)
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False
+        ) as target:
+            json.dump(payload, target)
+            onboarding_path = target.name
+        self.addCleanup(
+            lambda: os.path.exists(onboarding_path)
+            and os.remove(onboarding_path)
+        )
+
+        params["overwrite"] = "False"
+        params["onboarding_file_path"] = onboarding_path
+        for _ in range(2):
+            OnboardDataflowspec(
+                self.spark, params, uc_enabled=uc_enabled
+            ).onboard_dataflow_specs()
+
+        bronze = self.spark.table(bronze_table)
+        silver = self.spark.table(silver_table)
+        self.assertEqual(
+            set(bronze.columns),
+            {field.name for field in dataclasses.fields(BronzeDataflowSpec)},
+        )
+        self.assertEqual(
+            set(silver.columns),
+            {field.name for field in dataclasses.fields(SilverDataflowSpec)},
+        )
+        bronze_rows = {
+            row["dataFlowId"]: row.asDict() for row in bronze.collect()
+        }
+        silver_rows = {
+            row["dataFlowId"]: row.asDict() for row in silver.collect()
+        }
+        self.assertEqual(len(bronze_rows), 4)
+        self.assertEqual(len(silver_rows), 4)
+        self.assertTrue(
+            bronze_rows["schema-evolution-new"]["clusterByAuto"]
+        )
+        self.assertTrue(
+            silver_rows["schema-evolution-new"]["clusterByAuto"]
+        )
+        for field in ("createDate", "createdBy"):
+            self.assertEqual(
+                bronze_rows["100"][field], original_bronze["100"][field]
+            )
+            self.assertEqual(
+                silver_rows["100"][field], original_silver["100"][field]
+            )
 
     @staticmethod
     def _row(values):
@@ -1688,6 +1857,16 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
                 self.assertIsNone(bronze_row.readerConfigOptions.get("cloudFiles.rescuedDataColumn"))
             if bronze_row.dataFlowId == "103":
                 self.assertEqual(bronze_row.readerConfigOptions.get("maxOffsetsPerTrigger"), "60000")
+
+    def test_append_onboarding_evolves_v0010_path_spec_schemas(self):
+        self._assert_append_onboarding_evolves_v0010_schema(
+            uc_enabled=False
+        )
+
+    def test_append_onboarding_evolves_v0010_uc_spec_schemas(self):
+        self._assert_append_onboarding_evolves_v0010_schema(
+            uc_enabled=True
+        )
 
     def test_onboardDataflowSpec_with_multiple_partitions(self):
         """Test for onboardDataflowspec with multiple partitions for bronze layer."""

@@ -1,5 +1,6 @@
 """Unit tests for standard-compute legacy upgrade orchestration."""
 
+import json
 import os
 import tempfile
 import zipfile
@@ -443,6 +444,81 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
             "/Volumes/uploaded/target/wheelhouse/compat.whl",
         )
 
+    def test_phase2_append_onboarding_runs_twice_before_pipelines(self):
+        self.conf.phase2_append_onboarding = True
+        self.conf.phase2_onboarding_file = "conf/phase2.json"
+        self.conf.uc_volume_path = "/Volumes/catalog/specs/volume/"
+        self.conf.bronze_a1_pipeline_id = "bronze-a1"
+        self.conf.silver_pipeline_id = "silver"
+
+        self.runner.build_phase2_job(self.conf)
+
+        kwargs = self.ws.jobs.create.call_args.kwargs
+        self.assertEqual(
+            kwargs["environments"][0].spec.dependencies,
+            ["/Volumes/test/target.whl"],
+        )
+        tasks = {task.task_key: task for task in kwargs["tasks"]}
+        first = tasks["phase2_append_onboarding"]
+        repeat = tasks["phase2_append_onboarding_idempotency"]
+        self.assertEqual(
+            first.python_wheel_task.named_parameters["overwrite"],
+            "False",
+        )
+        self.assertEqual(
+            first.python_wheel_task.named_parameters[
+                "onboarding_file_path"
+            ],
+            "/Volumes/catalog/specs/volume/conf/phase2.json",
+        )
+        self.assertEqual(
+            repeat.depends_on[0].task_key,
+            "phase2_append_onboarding",
+        )
+        self.assertEqual(
+            tasks["phase2_bronze"].depends_on[0].task_key,
+            "phase2_append_onboarding_idempotency",
+        )
+        self.assertEqual(
+            tasks["phase2_validate"].notebook_task.base_parameters[
+                "phase2_append_onboarding"
+            ],
+            "True",
+        )
+
+    def test_phase2_append_onboarding_fixture_has_current_fields_and_new_row(
+        self,
+    ):
+        self.conf.phase2_append_onboarding = True
+        self.conf.uc_volume_path = "/Volumes/catalog/specs/volume/"
+        self.conf.uc_catalog_name = "catalog"
+        self.conf.bronze_schema = "bronze"
+        self.conf.silver_schema = "silver"
+        with tempfile.TemporaryDirectory() as tmp:
+            self.conf.a1_onboarding_file = os.path.join(tmp, "a1.json")
+            self.conf.a2_onboarding_file = os.path.join(tmp, "a2.json")
+            self.conf.phase2_onboarding_file = os.path.join(
+                tmp, "phase2.json"
+            )
+
+            self.runner.generate_onboarding_files(self.conf)
+
+            with open(
+                self.conf.phase2_onboarding_file, encoding="utf-8"
+            ) as fh:
+                payload = json.load(fh)
+
+        inserted = next(
+            row
+            for row in payload
+            if row["data_flow_id"] == "schema-evolution-new"
+        )
+        self.assertEqual(
+            inserted["data_flow_group"], "schema_evolution"
+        )
+        self.assertTrue(inserted["bronze_cluster_by_auto"])
+        self.assertTrue(inserted["silver_cluster_by_auto"])
+
     @patch.object(BackwardCompatRunner, "_download_compat_runtime_wheels")
     @patch("integration_tests.run_backward_compat_tests.GitRefWheelBuilder")
     def test_compat_wheelhouse_builds_primary_redirect_and_dependency_wheels(
@@ -664,6 +740,24 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
         )
         with self.assertRaisesRegex(ValueError, "legacy-to-current"):
             same_namespace_runner._build_runner_conf()
+
+    def test_phase2_append_onboarding_rejects_compat_wheelhouse(self):
+        self.ws.current_user.me.return_value = SimpleNamespace(
+            user_name="test@example.com"
+        )
+        runner = BackwardCompatRunner(
+            {
+                "uc_catalog_name": "catalog",
+                "target_install_surface": "compat_wheelhouse",
+                "phase2_append_onboarding": True,
+            },
+            self.ws,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "requires --target_install_surface=primary_wheel"
+        ):
+            runner._build_runner_conf()
 
     def test_compat_python_version_must_be_major_minor(self):
         self.ws.current_user.me.return_value = SimpleNamespace(

@@ -113,6 +113,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import json
 import os
@@ -223,6 +224,9 @@ class BCRunnerConf:
     #   pipeline being upgraded in place to the current wheel.
     pipeline_mode: str = "serverless_dpm"
     pipeline_num_workers: Optional[int] = None
+    # Opt-in Issue #460 coverage: Phase 2 re-runs onboarding with the
+    # target wheel and overwrite=False against the physical SOURCE tables.
+    phase2_append_onboarding: bool = False
     # When True, skip the git-worktree checkout for the TARGET main
     # wheel and run ``setup.py bdist_wheel`` against the developer's
     # working tree instead. Use ONLY for iterating on uncommitted
@@ -293,6 +297,7 @@ class BCRunnerConf:
     # gitignored.
     a1_onboarding_file: str = ""
     a2_onboarding_file: str = ""
+    phase2_onboarding_file: str = ""
 
     # Pipeline IDs (created in Phase 1, reused in Phase 2).
     bronze_a1_pipeline_id: str = ""
@@ -327,6 +332,10 @@ class BCRunnerConf:
         )
         self.a2_onboarding_file = (
             f"integration_tests/conf/json/backward_compat_onboarding_A2_{self.run_id}.json"
+        )
+        self.phase2_onboarding_file = (
+            "integration_tests/conf/json/"
+            f"backward_compat_onboarding_phase2_{self.run_id}.json"
         )
 
     @property
@@ -478,6 +487,13 @@ class BackwardCompatRunner:
                     "--target_install_surface=compat_wheelhouse is intended "
                     "for a legacy-to-current cross-namespace upgrade."
                 )
+            if self.args.get("phase2_append_onboarding"):
+                raise ValueError(
+                    "--phase2_append_onboarding requires "
+                    "--target_install_surface=primary_wheel because the "
+                    "offline wheelhouse is installed inside pipeline "
+                    "notebooks, not Job Environments."
+                )
 
         # ``None`` (the default) means "derive the pinned version from the
         # TARGET wheels at build time" -- see BCRunnerConf.target_package_version
@@ -543,6 +559,9 @@ class BackwardCompatRunner:
             or BCRunnerConf.__dataclass_fields__["git_repo_url"].default,
             pipeline_mode=pipeline_mode,
             pipeline_num_workers=pipeline_num_workers,
+            phase2_append_onboarding=bool(
+                self.args.get("phase2_append_onboarding")
+            ),
             build_target_from_worktree=build_target_from_worktree,
             target_install_surface=target_install_surface,
             source_package_version=source_package_version,
@@ -1083,6 +1102,23 @@ class BackwardCompatRunner:
                 f"-> {out}"
             )
 
+        if conf.phase2_append_onboarding:
+            with open(conf.a1_onboarding_file, "r") as fh:
+                phase2_payload = json.load(fh)
+            for row in phase2_payload:
+                row["bronze_cluster_by_auto"] = True
+                row["silver_cluster_by_auto"] = True
+            inserted = copy.deepcopy(phase2_payload[0])
+            inserted["data_flow_id"] = "schema-evolution-new"
+            inserted["data_flow_group"] = "schema_evolution"
+            phase2_payload.append(inserted)
+            with open(conf.phase2_onboarding_file, "w") as fh:
+                json.dump(phase2_payload, fh, indent=4)
+            print(
+                "  rendered target-only append onboarding -> "
+                f"{conf.phase2_onboarding_file}"
+            )
+
     @classmethod
     def _normalize_source_baseline_fixture(
         cls, conf: BCRunnerConf, payload
@@ -1613,6 +1649,7 @@ class BackwardCompatRunner:
                         "uc_catalog_name": conf.uc_catalog_name,
                         "bronze_schema": conf.bronze_schema,
                         "silver_schema": conf.silver_schema,
+                        "sdp_meta_schema": conf.sdp_meta_schema,
                         "uc_volume_path": conf.uc_volume_path,
                         "output_file_path": f"/Workspace{conf.phase1_output_ws}",
                         "run_id": conf.run_id,
@@ -1653,7 +1690,7 @@ class BackwardCompatRunner:
         return []
 
     def build_phase2_job(self, conf: BCRunnerConf):
-        """Run target entry-point smoke, incremental pipelines, and validation.
+        """Run optional onboarding checks, incremental pipelines, and validation.
 
         The dataflowspec persisted by Phase 1 remains the input to the target
         pipelines. For cross-namespace upgrades installed through the
@@ -1661,11 +1698,16 @@ class BackwardCompatRunner:
         ``overwrite=False`` using the legacy ``dlt_meta`` package name and
         ``run`` entry point. This proves an existing v0.0.10 wheel task remains
         executable after the target wheel swap without replacing Phase 1 state.
+
+        ``phase2_append_onboarding`` additionally runs target-wheel onboarding
+        twice against the physical Phase 1 tables, proving Issue #460 schema
+        evolution and idempotency without changing the default test path.
         """
         legacy_dependencies = self._phase2_legacy_entrypoint_dependencies(conf)
         legacy_env_key = "bc_phase2_legacy_entrypoint_env"
-        environments = (
-            [
+        environments = []
+        if legacy_dependencies:
+            environments.append(
                 jobs.JobEnvironment(
                     environment_key=legacy_env_key,
                     spec=compute.Environment(
@@ -1678,10 +1720,7 @@ class BackwardCompatRunner:
                         dependencies=legacy_dependencies,
                     ),
                 )
-            ]
-            if legacy_dependencies
-            else None
-        )
+            )
         bronze_dependency = "phase2_add_incremental"
         tasks = [
             jobs.Task(
@@ -1742,6 +1781,67 @@ class BackwardCompatRunner:
                 )
             )
             bronze_dependency = "phase2_legacy_entrypoint_onboard"
+
+        if conf.phase2_append_onboarding:
+            environment_key = "bc_phase2_onboarding_env"
+            environments.append(
+                jobs.JobEnvironment(
+                    environment_key=environment_key,
+                    spec=compute.Environment(
+                        client="2",
+                        dependencies=[self.install_spec_target_main(conf)],
+                    ),
+                )
+            )
+            tasks.append(
+                jobs.Task(
+                    task_key="phase2_append_onboarding",
+                    depends_on=[
+                        jobs.TaskDependency(task_key=bronze_dependency)
+                    ],
+                    environment_key=environment_key,
+                    python_wheel_task=jobs.PythonWheelTask(
+                        package_name=conf.target_profile.distribution,
+                        entry_point="run",
+                        named_parameters={
+                            "database": (
+                                f"{conf.uc_catalog_name}."
+                                f"{conf.sdp_meta_schema}"
+                            ),
+                            "bronze_dataflowspec_table": (
+                                "bronze_dataflowspec"
+                            ),
+                            "silver_dataflowspec_table": (
+                                "silver_dataflowspec"
+                            ),
+                            "import_author": "backward_compat_phase2",
+                            "version": "v2",
+                            "env": "it",
+                            "uc_enabled": "True",
+                            "onboard_layer": "bronze_silver",
+                            "onboarding_file_path": (
+                                f"{conf.uc_volume_path}"
+                                f"{conf.phase2_onboarding_file}"
+                            ),
+                            "overwrite": "False",
+                        },
+                    ),
+                )
+            )
+            repeat_onboarding = copy.deepcopy(tasks[-1])
+            repeat_onboarding.task_key = (
+                "phase2_append_onboarding_idempotency"
+            )
+            repeat_onboarding.depends_on = [
+                jobs.TaskDependency(
+                    task_key="phase2_append_onboarding"
+                )
+            ]
+            tasks.append(repeat_onboarding)
+            bronze_dependency = (
+                "phase2_append_onboarding_idempotency"
+            )
+
         tasks.extend([
             jobs.Task(
                 task_key="phase2_bronze",
@@ -1779,6 +1879,9 @@ class BackwardCompatRunner:
                         "source_profile": conf.source_profile.name,
                         "source_ref": conf.source_ref,
                         "target_ref": conf.target_ref,
+                        "phase2_append_onboarding": str(
+                            conf.phase2_append_onboarding
+                        ),
                         # None in primary_wheel mode (validate_phase2 only
                         # reads this in compat_wheelhouse mode, where
                         # build_wheels has pinned it); coerce so the SDK
@@ -1790,7 +1893,7 @@ class BackwardCompatRunner:
         ])
         return self.ws.jobs.create(
             name=f"backward-compat-phase2-{conf.run_id}",
-            environments=environments,
+            environments=environments or None,
             tasks=tasks,
         )
 
@@ -2159,6 +2262,15 @@ def parse_cli() -> dict:
         help=(
             "Worker count for pipeline-managed standard compute. Required "
             "when --pipeline_mode=standard_legacy."
+        ),
+    )
+    p.add_argument(
+        "--phase2_append_onboarding",
+        action="store_true",
+        help=(
+            "After the wheel swap, run target-version onboarding with "
+            "overwrite=False before the Phase 2 pipelines. This validates "
+            "additive evolution of physical SOURCE dataflow-spec tables."
         ),
     )
     p.add_argument(

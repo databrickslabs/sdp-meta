@@ -16,6 +16,7 @@ run_id = dbutils.widgets.get("run_id")
 uc_catalog_name = dbutils.widgets.get("uc_catalog_name")
 bronze_schema = dbutils.widgets.get("bronze_schema")
 silver_schema = dbutils.widgets.get("silver_schema")
+sdp_meta_schema = dbutils.widgets.get("sdp_meta_schema")
 output_file_path = dbutils.widgets.get("output_file_path")
 source_ref = dbutils.widgets.get("source_ref")
 log_list = []
@@ -55,5 +56,28 @@ uc_volume_path = dbutils.widgets.get("uc_volume_path").rstrip("/")
 phase1_counts_dump = f"{uc_volume_path}/tmp/backward_compat_phase1_counts_{run_id}.json"
 dbutils.fs.put(phase1_counts_dump, json.dumps(phase1_counts), overwrite=True)
 log_list.append(f"Phase1 counts persisted -> {phase1_counts_dump}")
+
+phase1_spec_audit = {}
+for layer in ("bronze", "silver"):
+    table = (
+        f"{uc_catalog_name}.{sdp_meta_schema}.{layer}_dataflowspec"
+    )
+    row = (
+        spark.read.table(table)
+        .where("dataFlowId = '100'")
+        .select("createDate", "createdBy")
+        .first()
+    )
+    phase1_spec_audit[layer] = {
+        "createDate": row.createDate.isoformat(),
+        "createdBy": row.createdBy,
+    }
+phase1_audit_dump = (
+    f"{uc_volume_path}/tmp/backward_compat_phase1_spec_audit_{run_id}.json"
+)
+dbutils.fs.put(
+    phase1_audit_dump, json.dumps(phase1_spec_audit), overwrite=True
+)
+log_list.append(f"Phase1 spec audit persisted -> {phase1_audit_dump}")
 
 pd.DataFrame(log_list).to_csv(output_file_path)
