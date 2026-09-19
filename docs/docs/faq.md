@@ -67,7 +67,7 @@ The install command also changes: `databricks labs install sdp-meta`.
 
 **Q: My onboarding file was written for DLT-META. Is it compatible?**
 
-Yes — the onboarding file format (JSON or YAML) is fully backward-compatible. Field names are unchanged. The only things that need updating are config keys: `dlt_meta_schema` → `sdp_meta_schema` (the old key is still accepted with a logged warning until v0.2.0).
+Yes — the onboarding file format (JSON or YAML) is fully backward-compatible. Field names are unchanged. The only things that need updating are the workspace config keys, which were renamed from their `dlt_meta_*` spellings to `sdp_meta_*`: `dlt_meta_operation` → `sdp_meta_operation`, `dlt_meta_schema` → `sdp_meta_schema`, `dlt_meta_layer` → `sdp_meta_layer`, and `dlt_meta_onboard_group` → `sdp_meta_onboard_group` (the old keys are still accepted with a logged warning until v0.2.0; if both spellings are present, the `sdp_meta_*` value wins).
 
 **Q: My runner notebook uses `init_dlt_meta_pipeline.py`. Do I need to update it?**
 
@@ -117,9 +117,12 @@ No. Field names in the onboarding file (`bronze_cdc_apply_changes`, `silver_cdc_
 
 DBFS paths still work, but the recommended approach for Unity Catalog workspaces is UC Volumes (`/Volumes/catalog/schema/volume/...`). The CLI and DAB workflows default to UC Volumes for all file uploads. Migrate at your own pace — there is no forced cutover.
 
-**Q: What happened to the `dlt_meta_schema` config key?**
+**Q: What happened to the legacy `dlt_meta_*` workspace config keys?**
 
-It was renamed to `sdp_meta_schema` in v0.1.0. The old key is still accepted with a logged warning. Update it before v0.2.0.
+The `dlt_meta_operation`, `dlt_meta_schema`, `dlt_meta_layer`, and
+`dlt_meta_onboard_group` keys were renamed to their `sdp_meta_*` equivalents.
+SDP-META v0.1.1 accepts the old names with logged warnings; when both names are
+present, the current `sdp_meta_*` value wins. Update them before v0.2.0.
 
 **Q: My pipeline uses `database` as a single schema name (not `catalog.schema`). Does UC mode still work?**
 

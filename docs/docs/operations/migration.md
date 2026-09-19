@@ -20,7 +20,7 @@ The project was renamed from **DLT-META** to **SDP-META** to align with current 
 | Main class | `DLTMeta` | `SDPMeta` |
 | Constants | `DLT_META_RUNNER_NOTEBOOK` | `SDP_META_RUNNER_NOTEBOOK` |
 | Schemas | `dlt_meta_dataflowspecs` | `sdp_meta_dataflowspecs` |
-| Config keys | `dlt_meta_schema` | `sdp_meta_schema` |
+| Workspace config keys | `dlt_meta_operation`, `dlt_meta_schema`, `dlt_meta_layer`, `dlt_meta_onboard_group` | `sdp_meta_operation`, `sdp_meta_schema`, `sdp_meta_layer`, `sdp_meta_onboard_group` |
 | PythonWheelTask `package_name` | `dlt_meta` | `databricks_labs_sdp_meta` |
 | Runner notebook | `init_dlt_meta_pipeline.py` | `init_sdp_meta_pipeline.py` |
 
@@ -38,7 +38,7 @@ The `dlt-meta` PyPI package continues to work as a compatibility wrapper:
 - `pip install dlt-meta` installs `databricks-labs-sdp-meta` as a dependency.
 - `from dlt_meta import ...` re-exports all symbols with a `DeprecationWarning`.
 - `databricks labs dlt-meta` CLI commands are forwarded to `sdp-meta` with a deprecation banner.
-- `DLTMeta` is aliased to `SDPMeta`; legacy config key `dlt_meta_schema` is still read with a logged warning.
+- `DLTMeta` is aliased to `SDPMeta`; the legacy workspace config keys `dlt_meta_operation`, `dlt_meta_schema`, `dlt_meta_layer`, and `dlt_meta_onboard_group` are still read (migrated to their `sdp_meta_*` equivalents) with a logged warning.
 
 Legacy `src.*` imports (from v0.0.10) work via a `sys.modules` shim but **will be removed in v0.2.0**.
 
@@ -97,15 +97,30 @@ from databricks.labs.sdp_meta.dataflow_pipeline import DataflowPipeline
 DataflowPipeline.invoke_dlt_pipeline(spark, layer)
 ```
 
-### 5. Update config keys (optional)
+### 5. Update workspace config keys (optional)
 
 ```json
 // Before
-{ "dlt_meta_schema": "my_schema" }
+{
+  "dlt_meta_operation": "onboard",
+  "dlt_meta_schema": "my_schema",
+  "dlt_meta_layer": "bronze_silver",
+  "dlt_meta_onboard_group": "A1"
+}
 
 // After
-{ "sdp_meta_schema": "my_schema" }
+{
+  "sdp_meta_operation": "onboard",
+  "sdp_meta_schema": "my_schema",
+  "sdp_meta_layer": "bronze_silver",
+  "sdp_meta_onboard_group": "A1"
+}
 ```
+
+SDP-META v0.1.1 loads the four legacy names with a deprecation warning, so
+existing installations can still be upgraded or uninstalled. If a config file
+contains both forms of a key, the current `sdp_meta_*` value takes precedence.
+Update the file before the legacy aliases are removed in v0.2.0.
 
 ## v0.0.10 breaking changes
 

@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "dbr_version": "13.3.x-scala2.12",
+  "cloud_provider_name": "aws",
+  "dbfs_path": "dbfs:/dlt-meta",
+  "dlt_meta_operation": "onboard",
+  "onboarding_file_path": "dbfs:/dlt-meta/conf/onboarding.json",
+  "uc_enabled": true,
+  "uc_catalog_name": "main",
+  "dlt_meta_schema": "dlt_meta_dataflowspecs",
+  "bronze_dataflow_spec_table": "bronze_dataflowspec",
+  "bronze_dataflow_spec_path": "",
+  "silver_dataflow_spec_table": "silver_dataflowspec",
+  "silver_dataflow_spec_path": "",
+  "overwrite_dataflow_spec": false,
+  "dataflow_spec_version": "v1",
+  "bronze_schema": "bronze",
+  "silver_schema": "silver",
+  "dlt_meta_layer": "bronze_silver",
+  "dlt_meta_onboard_group": "A1",
+  "serverless": true,
+  "num_workers": 2
+}
