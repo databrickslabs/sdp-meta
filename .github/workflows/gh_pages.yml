@@ -2,7 +2,10 @@ name: Deploy documentation
 
 # Documentation is deployed to the gh-pages branch with
 # .github/scripts/deploy-docs.sh, matching the DQX release process.
-on: {}
+# Keep this workflow available for explicit recovery runs without triggering
+# an invalid, jobless workflow run on every branch push.
+on:
+  workflow_dispatch:
 
 permissions:
   contents: read
