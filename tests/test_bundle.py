@@ -532,6 +532,57 @@ class SanityChecksTests(unittest.TestCase):
                 errors,
             )
 
+    def test_multi_topology_accepts_transitive_split_dependency(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp, layer="bronze_silver")
+            self._write(
+                tmp / "conf" / "onboarding.yml",
+                yaml.safe_dump([
+                    {
+                        "data_flow_id": "1",
+                        "data_flow_group": "orders",
+                        "bronze_database_dev": "cat.bronze",
+                        "bronze_table": "orders",
+                        "silver_database_dev": "cat.silver",
+                        "silver_table": "orders",
+                    },
+                    {
+                        "data_flow_id": "2",
+                        "data_flow_group": "customers",
+                        "bronze_database_dev": "cat.bronze",
+                        "bronze_table": "customers",
+                        "silver_database_dev": "cat.silver",
+                        "silver_table": "customers",
+                    },
+                    {
+                        "data_flow_id": "3",
+                        "data_flow_group": "audit",
+                        "bronze_database_dev": "cat.bronze",
+                        "bronze_table": "audit",
+                    },
+                ]),
+            )
+            self._write_configured_topologies(tmp)
+
+            path = tmp / "resources" / "sdp_meta_pipelines.yml"
+            doc = yaml.safe_load(path.read_text())
+            tasks = doc["resources"]["jobs"]["pipelines"]["tasks"]
+
+            silver_task = next(
+                task for task in tasks
+                if task["task_key"] == "orders_silver"
+            )
+            silver_task["depends_on"] = [{"task_key": "validation"}]
+
+            tasks.append({
+                "task_key": "validation",
+                "depends_on": [{"task_key": "orders_bronze"}],
+            })
+
+            path.write_text(yaml.safe_dump(doc))
+
+            self.assertEqual(_sdp_meta_sanity_checks(tmp), [])
+
     def test_multi_topology_rejects_missing_split_dependency(self):
         with _tempdir() as tmp:
             self._make_bundle(tmp, layer="bronze_silver")
@@ -638,6 +689,57 @@ class SanityChecksTests(unittest.TestCase):
             ),
             "orders",
         )
+
+    def test_default_target_override_is_used_when_target_is_omitted(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp, layer="bronze", with_silver=False)
+            self._write(
+                tmp / "databricks.yml",
+                yaml.safe_dump({
+                    "bundle": {"name": "t"},
+                    "targets": {
+                        "dev": {
+                            "default": True,
+                            "variables": {"dataflow_group": "dev_group"},
+                        }
+                    },
+                }),
+            )
+            self._write(
+                tmp / "conf" / "onboarding.yml",
+                yaml.safe_dump([{
+                    "data_flow_id": "1",
+                    "data_flow_group": "dev_group",
+                    "bronze_database_dev": "cat.bronze",
+                    "bronze_table": "orders",
+                }]),
+            )
+            self._write(
+                tmp / "resources" / "sdp_meta_pipelines.yml",
+                yaml.safe_dump({
+                    "resources": {
+                        "pipelines": {
+                            "bronze": self._configured_pipeline(
+                                "bronze", "${var.dataflow_group}"
+                            )
+                        },
+                        "jobs": {
+                            "pipelines": {
+                                "tasks": [{
+                                    "task_key": "bronze",
+                                    "pipeline_task": {
+                                        "pipeline_id": (
+                                            "${resources.pipelines.bronze.id}"
+                                        )
+                                    },
+                                }]
+                            }
+                        },
+                    }
+                }),
+            )
+
+            self.assertEqual(_sdp_meta_sanity_checks(tmp), [])
 
     def test_sentinel_dependency_is_flagged(self):
         with _tempdir() as tmp:

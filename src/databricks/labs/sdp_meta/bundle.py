@@ -855,6 +855,25 @@ def _split_dependency_errors(
         if pipeline_ref:
             refs.setdefault(pipeline_ref, []).append(task_key)
 
+    def _transitive_dependencies(task_key: str) -> set[str]:
+        """Return all task keys reachable through depends_on."""
+        visited: set[str] = set()
+        pending = [task_key]
+
+        while pending:
+            current = pending.pop()
+            task = task_by_key.get(current) or {}
+            for dependency in task.get("depends_on") or []:
+                if not isinstance(dependency, dict):
+                    continue
+                dependency_key = dependency.get("task_key")
+                if dependency_key and dependency_key not in visited:
+                    visited.add(dependency_key)
+                    if dependency_key in task_by_key:
+                        pending.append(dependency_key)
+
+        return visited
+
     errors = []
     for silver_key, layer in layers.items():
         if layer != "silver":
@@ -867,12 +886,7 @@ def _split_dependency_errors(
         }
         if not matching_bronze or silver_key not in refs:
             continue
-        silver_task = task_by_key[refs[silver_key][0]]
-        dependencies = {
-            dep.get("task_key")
-            for dep in (silver_task.get("depends_on") or [])
-            if isinstance(dep, dict)
-        }
+        dependencies = _transitive_dependencies(refs[silver_key][0])
         matching_tasks = {
             task_key
             for key in matching_bronze
@@ -968,10 +982,20 @@ def _sdp_meta_sanity_checks(
         errors.append(f"{variables_yml.relative_to(bundle_dir)}: invalid YAML ({exc})")
         return errors
 
+    # Match Databricks bundle target selection when --target is omitted:
+    # honor the target explicitly marked as the default.
+    effective_target = target
+    if effective_target is None:
+        targets = db_yml_doc.get("targets") or {}
+        for target_name, target_doc in targets.items():
+            if isinstance(target_doc, dict) and target_doc.get("default") is True:
+                effective_target = target_name
+                break
+
     variables = variables_doc.get("variables", {}) or {}
 
     def _default(name: str):
-        return _resolved_variable(variables, db_yml_doc, name, target)
+        return _resolved_variable(variables, db_yml_doc, name, effective_target)
 
     onboarding_file_name = _default("onboarding_file_name")
     groups_in_file = set()
@@ -1125,7 +1149,7 @@ def _sdp_meta_sanity_checks(
                         )
                         continue
                     group = _resolve_bundle_reference(
-                        raw_group, variables, db_yml_doc, target
+                        raw_group, variables, db_yml_doc, effective_target
                     )
                     resolved_groups.append(group)
                     if group not in groups_in_file:
@@ -1241,18 +1265,20 @@ def _sdp_meta_sanity_checks(
             }
             refs: Dict[str, List[str]] = {}
             for task_key, task in task_by_key.items():
-                ref = _pipeline_reference(task)
-                if not ref:
-                    errors.append(
-                        f"Job task `{task_key}` must reference a pipeline as "
-                        "`${resources.pipelines.<key>.id}`"
-                    )
-                    continue
-                refs.setdefault(ref, []).append(task_key)
-                if ref not in configured:
-                    errors.append(
-                        f"Job task `{task_key}` references unknown pipeline `{ref}`"
-                    )
+                pipeline_task = task.get("pipeline_task")
+                if isinstance(pipeline_task, dict):
+                    ref = _pipeline_reference(task)
+                    if not ref:
+                        errors.append(
+                            f"Job task `{task_key}` must reference a pipeline as "
+                            "`${resources.pipelines.<key>.id}`"
+                        )
+                    else:
+                        refs.setdefault(ref, []).append(task_key)
+                        if ref not in configured:
+                            errors.append(
+                                f"Job task `{task_key}` references unknown pipeline `{ref}`"
+                            )
                 dependencies = {
                     dep.get("task_key")
                     for dep in (task.get("depends_on") or [])
