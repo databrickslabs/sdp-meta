@@ -954,6 +954,7 @@ def _split_dependency_errors_across_targets(
         errors.append(f"Target(s) {labels}: {error}")
     return errors
 
+
 def _sdp_meta_sanity_checks(
     bundle_dir: Path, target: Optional[str] = None
 ) -> List[str]:
