@@ -526,7 +526,10 @@ _PIPELINE_REF_RE = re.compile(
 
 def _pipeline_reference(task: Dict[str, Any]) -> Optional[str]:
     """Return the resource key referenced by a pipeline job task."""
-    pipeline_id = (task.get("pipeline_task") or {}).get("pipeline_id")
+    pipeline_task = task.get("pipeline_task")
+    if not isinstance(pipeline_task, dict):
+        return None
+    pipeline_id = pipeline_task.get("pipeline_id")
     match = (
         _PIPELINE_REF_RE.fullmatch(pipeline_id)
         if isinstance(pipeline_id, str)
@@ -618,6 +621,39 @@ def _legacy_topology_errors(
                 f"bronze_silver={has_combined}"
             )
     return errors
+
+
+def _transitive_dependencies(
+    task_key: str,
+    task_by_key: Dict[str, Dict[str, Any]],
+) -> Tuple[set[str], List[List[str]]]:
+    """Return reachable dependencies and dependency cycles for a job task."""
+    visited: set[str] = set()
+    cycles: List[List[str]] = []
+
+    def _walk(current: str, path: List[str]) -> None:
+        task = task_by_key.get(current) or {}
+        for dependency in task.get("depends_on") or []:
+            if not isinstance(dependency, dict):
+                continue
+            dependency_key = dependency.get("task_key")
+            if not dependency_key:
+                continue
+
+            if dependency_key in path:
+                cycle_start = path.index(dependency_key)
+                cycle = path[cycle_start:] + [dependency_key]
+                if cycle not in cycles:
+                    cycles.append(cycle)
+                continue
+
+            if dependency_key not in visited:
+                visited.add(dependency_key)
+                if dependency_key in task_by_key:
+                    _walk(dependency_key, path + [dependency_key])
+
+    _walk(task_key, [task_key])
+    return visited, cycles
 
 
 def _pipeline_ownership_errors(
@@ -855,25 +891,6 @@ def _split_dependency_errors(
         if pipeline_ref:
             refs.setdefault(pipeline_ref, []).append(task_key)
 
-    def _transitive_dependencies(task_key: str) -> set[str]:
-        """Return all task keys reachable through depends_on."""
-        visited: set[str] = set()
-        pending = [task_key]
-
-        while pending:
-            current = pending.pop()
-            task = task_by_key.get(current) or {}
-            for dependency in task.get("depends_on") or []:
-                if not isinstance(dependency, dict):
-                    continue
-                dependency_key = dependency.get("task_key")
-                if dependency_key and dependency_key not in visited:
-                    visited.add(dependency_key)
-                    if dependency_key in task_by_key:
-                        pending.append(dependency_key)
-
-        return visited
-
     errors = []
     for silver_key, layer in layers.items():
         if layer != "silver":
@@ -886,7 +903,9 @@ def _split_dependency_errors(
         }
         if not matching_bronze or silver_key not in refs:
             continue
-        dependencies = _transitive_dependencies(refs[silver_key][0])
+        dependencies, _ = _transitive_dependencies(
+            refs[silver_key][0], task_by_key
+        )
         matching_tasks = {
             task_key
             for key in matching_bronze
@@ -935,7 +954,6 @@ def _split_dependency_errors_across_targets(
         errors.append(f"Target(s) {labels}: {error}")
     return errors
 
-
 def _sdp_meta_sanity_checks(
     bundle_dir: Path, target: Optional[str] = None
 ) -> List[str]:
@@ -982,20 +1000,32 @@ def _sdp_meta_sanity_checks(
         errors.append(f"{variables_yml.relative_to(bundle_dir)}: invalid YAML ({exc})")
         return errors
 
-    # Match Databricks bundle target selection when --target is omitted:
-    # honor the target explicitly marked as the default.
-    effective_target = target
-    if effective_target is None:
+    # Match Databricks bundle target selection when --target is omitted.
+    # A single target is implicitly selected; otherwise exactly one target
+    # may be marked `default: true`. Ownership and split-job checks still
+    # walk every target when the caller did not pass `--target`.
+    requested_target = target
+    if target is None:
         targets = db_yml_doc.get("targets") or {}
-        for target_name, target_doc in targets.items():
-            if isinstance(target_doc, dict) and target_doc.get("default") is True:
-                effective_target = target_name
-                break
+        default_targets = [
+            target_name
+            for target_name, target_doc in targets.items()
+            if isinstance(target_doc, dict) and target_doc.get("default") is True
+        ]
+        if len(default_targets) > 1:
+            errors.append(
+                "databricks.yml: multiple targets are marked `default: true`: "
+                f"{sorted(default_targets)}"
+            )
+        elif len(default_targets) == 1:
+            target = default_targets[0]
+        elif len(targets) == 1:
+            target = next(iter(targets))
 
     variables = variables_doc.get("variables", {}) or {}
 
     def _default(name: str):
-        return _resolved_variable(variables, db_yml_doc, name, effective_target)
+        return _resolved_variable(variables, db_yml_doc, name, target)
 
     onboarding_file_name = _default("onboarding_file_name")
     groups_in_file = set()
@@ -1149,7 +1179,7 @@ def _sdp_meta_sanity_checks(
                         )
                         continue
                     group = _resolve_bundle_reference(
-                        raw_group, variables, db_yml_doc, effective_target
+                        raw_group, variables, db_yml_doc, target
                     )
                     resolved_groups.append(group)
                     if group not in groups_in_file:
@@ -1185,7 +1215,7 @@ def _sdp_meta_sanity_checks(
                     )
             errors.extend(
                 _pipeline_ownership_errors_across_targets(
-                    pipes, variables, db_yml_doc, target
+                    pipes, variables, db_yml_doc, requested_target
                 )
             )
 
@@ -1266,7 +1296,12 @@ def _sdp_meta_sanity_checks(
             refs: Dict[str, List[str]] = {}
             for task_key, task in task_by_key.items():
                 pipeline_task = task.get("pipeline_task")
-                if isinstance(pipeline_task, dict):
+                if "pipeline_task" in task and not isinstance(pipeline_task, dict):
+                    errors.append(
+                        f"Job task `{task_key}` has malformed `pipeline_task`; "
+                        "expected a mapping"
+                    )
+                elif isinstance(pipeline_task, dict):
                     ref = _pipeline_reference(task)
                     if not ref:
                         errors.append(
@@ -1291,6 +1326,26 @@ def _sdp_meta_sanity_checks(
                         f"{sorted(unknown_dependencies)}"
                     )
 
+            reported_cycles: set[Tuple[str, ...]] = set()
+            for task_key in task_by_key:
+                _, cycles = _transitive_dependencies(task_key, task_by_key)
+                for cycle in cycles:
+                    cycle_nodes = cycle[:-1]
+                    if not cycle_nodes:
+                        continue
+                    rotations = [
+                        tuple(cycle_nodes[i:] + cycle_nodes[:i])
+                        for i in range(len(cycle_nodes))
+                    ]
+                    canonical = min(rotations)
+                    if canonical in reported_cycles:
+                        continue
+                    reported_cycles.add(canonical)
+                    errors.append(
+                        "Job `pipelines` contains a dependency cycle: "
+                        + " -> ".join(cycle)
+                    )
+
             for key in configured:
                 count = len(refs.get(key, []))
                 if count != 1:
@@ -1305,7 +1360,7 @@ def _sdp_meta_sanity_checks(
                     tasks,
                     variables,
                     db_yml_doc,
-                    target,
+                    requested_target,
                 )
             )
 
