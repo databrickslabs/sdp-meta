@@ -125,6 +125,25 @@ class CompatibilityDependencyMetadataTests(unittest.TestCase):
         )
 
 
+class DatabricksSdkDependencyMetadataTests(unittest.TestCase):
+
+    def test_minimum_sdk_matches_runtime_requirements_file(self):
+        expected = "databricks-sdk>=0.138.0,<1"
+        setup_text = PRIMARY_SETUP.read_text(encoding="utf-8")
+        requirements = (
+            REPO_ROOT / "requirements.txt"
+        ).read_text(encoding="utf-8").splitlines()
+        app_requirements = (
+            REPO_ROOT / "databricks_app" / "requirements.txt"
+        ).read_text(encoding="utf-8").splitlines()
+
+        self.assertIn(f'"{expected}"', setup_text)
+        self.assertIn(expected, requirements)
+        self.assertIn(expected, app_requirements)
+        self.assertNotIn("databricks-sdk>=0.20,<1", setup_text)
+        self.assertNotIn("databricks-sdk>=0.20,<1", requirements)
+
+
 class VersionSynchronizationTests(unittest.TestCase):
     """The two distributions and ``__about__`` must move in lockstep.
 

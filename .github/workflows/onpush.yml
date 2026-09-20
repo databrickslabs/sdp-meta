@@ -102,6 +102,49 @@ jobs:
           name: codecov-umbrella
           verbose: true
 
+  # The package metadata must never admit an SDK older than the generated
+  # models used by serverless onboarding jobs. Keep this job pinned to the
+  # declared floor so the main test job's latest compatible SDK cannot hide
+  # an accidental lower-bound regression.
+  minimum-sdk-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.10'
+
+      - name: Install package with minimum supported SDK
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . "databricks-sdk==0.138.0"
+
+      - name: Exercise serverless job environment models
+        run: |
+          python - <<'EOF'
+          from importlib.metadata import version
+
+          from databricks.sdk.service import compute, jobs
+
+          assert version("databricks-sdk") == "0.138.0"
+          environment = jobs.JobEnvironment(
+              environment_key="Default",
+              spec=compute.Environment(
+                  client="1",
+                  dependencies=["databricks-labs-sdp-meta"],
+              ),
+          )
+          assert environment.as_dict() == {
+              "environment_key": "Default",
+              "spec": {
+                  "client": "1",
+                  "dependencies": ["databricks-labs-sdp-meta"],
+              },
+          }
+          print("minimum Databricks SDK smoke test OK")
+          EOF
+
   # Guards the compat shim's hard invariant: the dlt_meta.pth startup hook
   # must never write anything to stderr, whatever the environment lacks —
   # no pyspark, not even the shim's own runtime deps. site.py prints any

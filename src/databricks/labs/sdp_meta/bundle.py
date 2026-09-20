@@ -1137,7 +1137,11 @@ def _sdp_meta_sanity_checks(
                     has_layer_row = any(
                         flow.get("data_flow_group") == group
                         and any(
-                            field.startswith(f"{prefix}_database_") and value
+                            field.startswith(f"{prefix}_database_")
+                            and not field.startswith(
+                                f"{prefix}_database_quarantine_"
+                            )
+                            and value
                             for field, value in flow.items()
                         )
                         and flow.get(f"{prefix}_table")
