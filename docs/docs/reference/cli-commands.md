@@ -101,6 +101,13 @@ the matching bronze task. It widens the onboarding job when another layer is
 introduced; later `bundle-add-flow` calls for that group inherit the pipeline's
 layer and target schemas.
 
+Each `data_flow_group` and layer may have exactly one pipeline owner. A
+bronze owner and silver owner may intentionally share a group as a split
+topology, but duplicate bronze, duplicate silver, and combined/split overlap
+are rejected before files are written. The preflight checks the complete
+merged topology—including every bundle target override—so a pre-existing
+ownership conflict must be repaired before another pipeline can be added.
+
 ## `bundle-validate`
 
 Validates every configured pipeline independently, checks its layer-specific

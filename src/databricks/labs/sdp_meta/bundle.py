@@ -8,16 +8,19 @@ commands are module-level functions:
   to a UC volume for use as the bundle's ``sdp_meta_dependency``.
 - :func:`bundle_validate` — run ``databricks bundle validate`` plus
   sdp-meta-specific sanity checks on a rendered bundle.
+- :func:`bundle_add_flow` — append validated flows to onboarding config.
 - :func:`bundle_add_pipeline` — add an independent pipeline topology and
   wire it into the bundle's pipelines job.
 
-All three shell out to the Databricks CLI for bundle-level work. Everything
-else is deliberately thin so behavior is easy to audit and mock in tests.
+Only operations that need Databricks bundle functionality shell out to the
+Databricks CLI; local mutation commands edit the rendered YAML/JSON directly.
+Everything else is deliberately thin so behavior is easy to audit and mock.
 """
 
 from __future__ import annotations
 
 import csv
+import copy
 import json
 import logging
 import os
@@ -27,7 +30,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TextIO, Tuple
+from typing import Any, Dict, List, Optional, Set, TextIO, Tuple
 
 import yaml
 
@@ -437,6 +440,17 @@ def _load_yaml_or_json(path: Path):
     return json.loads(text)
 
 
+def _load_yaml_mapping(path: Path) -> Dict[str, Any]:
+    """Load a YAML document and require a top-level mapping."""
+    doc = yaml.safe_load(path.read_text()) or {}
+    if not isinstance(doc, dict):
+        raise ValueError(
+            f"{path.name}: expected a top-level mapping, "
+            f"got {type(doc).__name__}"
+        )
+    return doc
+
+
 # Matches the convention used by every seeded onboarding placeholder
 # (e.g. `<your-kafka-host>`, `<your-secret-name>`, `<your-eventhub-namespace>`).
 # Validates only on the well-known prefix `your-` so it can't false-positive
@@ -510,6 +524,17 @@ _PIPELINE_REF_RE = re.compile(
 )
 
 
+def _pipeline_reference(task: Dict[str, Any]) -> Optional[str]:
+    """Return the resource key referenced by a pipeline job task."""
+    pipeline_id = (task.get("pipeline_task") or {}).get("pipeline_id")
+    match = (
+        _PIPELINE_REF_RE.fullmatch(pipeline_id)
+        if isinstance(pipeline_id, str)
+        else None
+    )
+    return match.group(1) if match else None
+
+
 def _resolved_variable(
     variables: Dict[str, Any],
     databricks_doc: Dict[str, Any],
@@ -524,11 +549,13 @@ def _resolved_variable(
         overrides = target_doc.get("variables") or {}
         if name in overrides:
             override = overrides[name]
-            value = (
-                override.get("value")
-                if isinstance(override, dict) and "value" in override
-                else override
-            )
+            if isinstance(override, dict):
+                value = override.get(
+                    "value",
+                    override.get("default", override),
+                )
+            else:
+                value = override
     return value
 
 
@@ -590,6 +617,308 @@ def _legacy_topology_errors(
                 f"bronze={has_bronze}, silver={has_silver}, "
                 f"bronze_silver={has_combined}"
             )
+    return errors
+
+
+def _pipeline_ownership_errors(
+    configured: Dict[str, Dict[str, Any]],
+    variables: Dict[str, Any],
+    databricks_doc: Dict[str, Any],
+    target: Optional[str] = None,
+) -> List[str]:
+    """Reject multiple pipelines owning the same group/layer pair."""
+    owners: Dict[Tuple[str, str], List[Tuple[str, Any]]] = {}
+    for key, spec in configured.items():
+        config = spec.get("configuration") or {}
+        pipeline_layer = config.get("layer")
+        if pipeline_layer not in ("bronze", "silver", "bronze_silver"):
+            continue
+        layers = (
+            ("bronze", "silver")
+            if pipeline_layer == "bronze_silver"
+            else (pipeline_layer,)
+        )
+        for layer in layers:
+            group = _resolve_bundle_reference(
+                config.get(f"{layer}.group"),
+                variables,
+                databricks_doc,
+                target,
+            )
+            if group is None or not str(group).strip():
+                continue
+            schema = _resolve_bundle_reference(
+                config.get(
+                    f"sdp_meta.{layer}TargetSchema",
+                    spec.get("schema"),
+                ),
+                variables,
+                databricks_doc,
+                target,
+            )
+            owners.setdefault((layer, str(group)), []).append(
+                (key, schema)
+            )
+
+    errors = []
+    for (layer, group), layer_owners in sorted(owners.items()):
+        if len(layer_owners) < 2:
+            continue
+        descriptions = ", ".join(
+            f"`{key}` (target schema {schema!r})"
+            for key, schema in layer_owners
+        )
+        errors.append(
+            f"Duplicate {layer} ownership for dataflow group {group!r}: "
+            f"{descriptions}. Each group/layer pair must be owned by exactly "
+            "one pipeline; an intentional split may use one bronze owner and "
+            "one silver owner."
+        )
+    return errors
+
+
+def _deep_merge_mapping(
+    base: Dict[str, Any],
+    override: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Recursively merge a bundle target override onto a base mapping."""
+    merged = copy.deepcopy(base)
+    for key, value in override.items():
+        if isinstance(merged.get(key), dict) and isinstance(value, dict):
+            merged[key] = _deep_merge_mapping(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _effective_pipeline_resources(
+    pipelines: Dict[str, Any],
+    databricks_doc: Dict[str, Any],
+    target: Optional[str],
+) -> Dict[str, Any]:
+    """Return base pipelines with target resource overrides applied."""
+    if target is None:
+        return pipelines
+    target_doc = ((databricks_doc.get("targets") or {}).get(target) or {})
+    target_resources = target_doc.get("resources") or {}
+    target_pipelines = (
+        target_resources.get("pipelines")
+        if isinstance(target_resources, dict)
+        else None
+    )
+    if not isinstance(target_pipelines, dict):
+        return pipelines
+    merged = copy.deepcopy(pipelines)
+    for key, override in target_pipelines.items():
+        if isinstance(merged.get(key), dict) and isinstance(override, dict):
+            merged[key] = _deep_merge_mapping(merged[key], override)
+        else:
+            merged[key] = copy.deepcopy(override)
+    return merged
+
+
+def _pipeline_ownership_errors_across_targets(
+    configured: Dict[str, Dict[str, Any]],
+    variables: Dict[str, Any],
+    databricks_doc: Dict[str, Any],
+    target: Optional[str] = None,
+) -> List[str]:
+    """Validate ownership for one target, or defaults plus every target."""
+    targets = (
+        [target]
+        if target is not None
+        else [None] + list((databricks_doc.get("targets") or {}).keys())
+    )
+    contexts: Dict[str, List[Optional[str]]] = {}
+    for target_name in targets:
+        effective_pipelines = _effective_pipeline_resources(
+            configured,
+            databricks_doc,
+            target_name,
+        )
+        for error in _pipeline_ownership_errors(
+            effective_pipelines,
+            variables,
+            databricks_doc,
+            target_name,
+        ):
+            contexts.setdefault(error, []).append(target_name)
+
+    errors = []
+    for error, target_names in contexts.items():
+        if target is not None or None in target_names:
+            errors.append(error)
+            continue
+        labels = ", ".join(repr(name) for name in target_names)
+        errors.append(f"Target(s) {labels}: {error}")
+    return errors
+
+
+def _effective_pipeline_tasks(
+    tasks: List[Dict[str, Any]],
+    databricks_doc: Dict[str, Any],
+    target: Optional[str],
+) -> List[Dict[str, Any]]:
+    """Return target job tasks when explicitly overridden, otherwise base."""
+    if target is None:
+        return tasks
+    target_doc = ((databricks_doc.get("targets") or {}).get(target) or {})
+    target_resources = target_doc.get("resources") or {}
+    target_jobs = (
+        target_resources.get("jobs")
+        if isinstance(target_resources, dict)
+        else None
+    )
+    pipeline_job = (
+        target_jobs.get("pipelines")
+        if isinstance(target_jobs, dict)
+        else None
+    )
+    target_tasks = (
+        pipeline_job.get("tasks")
+        if isinstance(pipeline_job, dict)
+        else None
+    )
+    if not isinstance(target_tasks, list):
+        return tasks
+
+    merged = copy.deepcopy(tasks)
+    by_key = {
+        task.get("task_key"): index
+        for index, task in enumerate(merged)
+        if isinstance(task, dict) and task.get("task_key")
+    }
+    for override in target_tasks:
+        task_key = (
+            override.get("task_key")
+            if isinstance(override, dict)
+            else None
+        )
+        if task_key in by_key:
+            index = by_key[task_key]
+            merged[index] = _deep_merge_mapping(
+                merged[index],
+                override,
+            )
+        else:
+            merged.append(copy.deepcopy(override))
+            if task_key:
+                by_key[task_key] = len(merged) - 1
+    return merged
+
+
+def _split_dependency_errors(
+    pipelines: Dict[str, Any],
+    tasks: List[Dict[str, Any]],
+    variables: Dict[str, Any],
+    databricks_doc: Dict[str, Any],
+    target: Optional[str],
+) -> List[str]:
+    """Validate bronze-before-silver ordering for one effective target."""
+    effective_pipelines = _effective_pipeline_resources(
+        pipelines,
+        databricks_doc,
+        target,
+    )
+    effective_tasks = _effective_pipeline_tasks(
+        tasks,
+        databricks_doc,
+        target,
+    )
+    layers: Dict[str, str] = {}
+    groups: Dict[str, Any] = {}
+    for key, spec in effective_pipelines.items():
+        if not isinstance(spec, dict):
+            continue
+        config = spec.get("configuration") or {}
+        layer = config.get("layer")
+        if layer not in ("bronze", "silver"):
+            continue
+        group = _resolve_bundle_reference(
+            config.get(f"{layer}.group"),
+            variables,
+            databricks_doc,
+            target,
+        )
+        if group is not None:
+            layers[key] = layer
+            groups[key] = group
+
+    task_by_key = {
+        task.get("task_key"): task
+        for task in effective_tasks
+        if isinstance(task, dict) and task.get("task_key")
+    }
+    refs: Dict[str, List[str]] = {}
+    for task_key, task in task_by_key.items():
+        pipeline_ref = _pipeline_reference(task)
+        if pipeline_ref:
+            refs.setdefault(pipeline_ref, []).append(task_key)
+
+    errors = []
+    for silver_key, layer in layers.items():
+        if layer != "silver":
+            continue
+        matching_bronze = {
+            key
+            for key, candidate_layer in layers.items()
+            if candidate_layer == "bronze"
+            and groups.get(key) == groups.get(silver_key)
+        }
+        if not matching_bronze or silver_key not in refs:
+            continue
+        silver_task = task_by_key[refs[silver_key][0]]
+        dependencies = {
+            dep.get("task_key")
+            for dep in (silver_task.get("depends_on") or [])
+            if isinstance(dep, dict)
+        }
+        matching_tasks = {
+            task_key
+            for key in matching_bronze
+            for task_key in refs.get(key, [])
+        }
+        if not dependencies.intersection(matching_tasks):
+            errors.append(
+                f"Silver pipeline `{silver_key}` shares dataflow group "
+                f"{groups.get(silver_key)!r} with bronze pipeline(s) "
+                f"{sorted(matching_bronze)} but its job task does not depend "
+                "on a matching bronze task"
+            )
+    return errors
+
+
+def _split_dependency_errors_across_targets(
+    pipelines: Dict[str, Any],
+    tasks: List[Dict[str, Any]],
+    variables: Dict[str, Any],
+    databricks_doc: Dict[str, Any],
+    target: Optional[str],
+) -> List[str]:
+    """Validate split dependencies for one target or every target."""
+    targets = (
+        [target]
+        if target is not None
+        else [None] + list((databricks_doc.get("targets") or {}).keys())
+    )
+    contexts: Dict[str, List[Optional[str]]] = {}
+    for target_name in targets:
+        for error in _split_dependency_errors(
+            pipelines,
+            tasks,
+            variables,
+            databricks_doc,
+            target_name,
+        ):
+            contexts.setdefault(error, []).append(target_name)
+
+    errors = []
+    for error, target_names in contexts.items():
+        if target is not None or None in target_names:
+            errors.append(error)
+            continue
+        labels = ", ".join(repr(name) for name in target_names)
+        errors.append(f"Target(s) {labels}: {error}")
     return errors
 
 
@@ -754,7 +1083,6 @@ def _sdp_meta_sanity_checks(
                     "be validated as an sdp-meta pipeline"
                 )
 
-            pipeline_groups: Dict[str, Any] = {}
             pipeline_layers: Dict[str, str] = {}
             for key, spec in configured.items():
                 config = spec["configuration"]
@@ -827,8 +1155,11 @@ def _sdp_meta_sanity_checks(
                         f"Pipeline `{key}` uses different bronze/silver groups "
                         f"{resolved_groups}; a combined pipeline must use one group"
                     )
-                if resolved_groups:
-                    pipeline_groups[key] = resolved_groups[0]
+            errors.extend(
+                _pipeline_ownership_errors_across_targets(
+                    pipes, variables, db_yml_doc, target
+                )
+            )
 
             required_onboarding_layers = set()
             for pipeline_layer in pipeline_layers.values():
@@ -906,19 +1237,13 @@ def _sdp_meta_sanity_checks(
             }
             refs: Dict[str, List[str]] = {}
             for task_key, task in task_by_key.items():
-                pipeline_id = (task.get("pipeline_task") or {}).get("pipeline_id")
-                match = (
-                    _PIPELINE_REF_RE.fullmatch(pipeline_id)
-                    if isinstance(pipeline_id, str)
-                    else None
-                )
-                if not match:
+                ref = _pipeline_reference(task)
+                if not ref:
                     errors.append(
                         f"Job task `{task_key}` must reference a pipeline as "
                         "`${resources.pipelines.<key>.id}`"
                     )
                     continue
-                ref = match.group(1)
                 refs.setdefault(ref, []).append(task_key)
                 if ref not in configured:
                     errors.append(
@@ -944,38 +1269,15 @@ def _sdp_meta_sanity_checks(
                         f"in job `pipelines`; found {count}"
                     )
 
-            # A silver pipeline sharing a group with a bronze pipeline is a
-            # split topology. Its task must wait for at least one matching
-            # bronze task so the upstream tables are refreshed first.
-            for silver_key, silver_layer in pipeline_layers.items():
-                if silver_layer != "silver":
-                    continue
-                matching_bronze = {
-                    key
-                    for key, candidate_layer in pipeline_layers.items()
-                    if candidate_layer == "bronze"
-                    and pipeline_groups.get(key) == pipeline_groups.get(silver_key)
-                }
-                if not matching_bronze or silver_key not in refs:
-                    continue
-                silver_task = task_by_key[refs[silver_key][0]]
-                dependencies = {
-                    dep.get("task_key")
-                    for dep in (silver_task.get("depends_on") or [])
-                    if isinstance(dep, dict)
-                }
-                matching_tasks = {
-                    task_key
-                    for key in matching_bronze
-                    for task_key in refs.get(key, [])
-                }
-                if not dependencies.intersection(matching_tasks):
-                    errors.append(
-                        f"Silver pipeline `{silver_key}` shares dataflow group "
-                        f"{pipeline_groups.get(silver_key)!r} with bronze pipeline(s) "
-                        f"{sorted(matching_bronze)} but its job task does not depend "
-                        "on a matching bronze task"
-                    )
+            errors.extend(
+                _split_dependency_errors_across_targets(
+                    pipes,
+                    tasks,
+                    variables,
+                    db_yml_doc,
+                    target,
+                )
+            )
 
     return errors
 
@@ -1173,6 +1475,81 @@ def _pipeline_entries(spec: PipelineSpec) -> Tuple[Dict[str, Any], List[Dict[str
         bronze_key = add("bronze", bronze_schema)
         add("silver", silver_schema, depends_on=bronze_key)
     return resources, tasks
+
+
+def _wire_split_pipeline_dependencies(
+    pipelines: Dict[str, Any],
+    tasks: List[Dict[str, Any]],
+    new_pipeline_keys: Set[str],
+    variables: Dict[str, Any],
+    databricks_doc: Dict[str, Any],
+) -> None:
+    """Wire intentional same-group bronze/silver owners in execution order."""
+    tasks_by_pipeline = {}
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        pipeline_ref = _pipeline_reference(task)
+        if pipeline_ref:
+            tasks_by_pipeline[pipeline_ref] = task
+
+    split_pairs = set()
+    target_names = [None] + list(
+        (databricks_doc.get("targets") or {}).keys()
+    )
+    for target_name in target_names:
+        owners: Dict[Tuple[str, str], str] = {}
+        effective_pipelines = _effective_pipeline_resources(
+            pipelines,
+            databricks_doc,
+            target_name,
+        )
+        for key, spec in effective_pipelines.items():
+            if not isinstance(spec, dict):
+                continue
+            config = spec.get("configuration") or {}
+            layer = config.get("layer")
+            if layer not in ("bronze", "silver"):
+                continue
+            group = _resolve_bundle_reference(
+                config.get(f"{layer}.group"),
+                variables,
+                databricks_doc,
+                target_name,
+            )
+            if group:
+                owners[(layer, str(group))] = key
+        for group in {group for _layer, group in owners}:
+            bronze_key = owners.get(("bronze", group))
+            silver_key = owners.get(("silver", group))
+            if bronze_key and silver_key:
+                split_pairs.add((bronze_key, silver_key))
+
+    for bronze_key, silver_key in sorted(split_pairs):
+        if (
+            not {bronze_key, silver_key}.intersection(new_pipeline_keys)
+        ):
+            continue
+        bronze_task = tasks_by_pipeline.get(bronze_key)
+        silver_task = tasks_by_pipeline.get(silver_key)
+        if not bronze_task or not silver_task:
+            continue
+        bronze_task_key = bronze_task.get("task_key")
+        dependencies = silver_task.get("depends_on")
+        if dependencies is None:
+            dependencies = []
+            silver_task["depends_on"] = dependencies
+        elif not isinstance(dependencies, list):
+            raise ValueError(
+                f"Job task {silver_task.get('task_key')!r} has malformed "
+                "`depends_on`; expected a list"
+            )
+        if bronze_task_key and not any(
+            isinstance(dep, dict)
+            and dep.get("task_key") == bronze_task_key
+            for dep in dependencies
+        ):
+            dependencies.append({"task_key": bronze_task_key})
 
 
 def _onboarding_layer_updates(
@@ -1394,23 +1771,44 @@ def bundle_add_pipeline(
             file=output,
         )
         return 2
-    doc = yaml.safe_load(pipelines_path.read_text()) or {}
-    resources_doc = doc.setdefault("resources", {})
-    pipelines = resources_doc.setdefault("pipelines", {})
-    jobs = resources_doc.setdefault("jobs", {})
-    pipeline_job = jobs.setdefault(
-        "pipelines",
-        {
-            "name": "${bundle.name} - run pipelines",
-            "description": "Runs the sdp-meta SDP Pipeline(s) end-to-end.",
-            "tasks": [],
-        },
-    )
-    tasks = pipeline_job.setdefault("tasks", [])
-    if not isinstance(pipelines, dict) or not isinstance(tasks, list):
+    try:
+        doc = _load_yaml_mapping(pipelines_path)
+        resources_doc = doc.setdefault("resources", {})
+        if not isinstance(resources_doc, dict):
+            raise ValueError(
+                "sdp_meta_pipelines.yml: `resources` must be a mapping"
+            )
+        pipelines = resources_doc.setdefault("pipelines", {})
+        jobs = resources_doc.setdefault("jobs", {})
+        if not isinstance(pipelines, dict) or not isinstance(jobs, dict):
+            raise ValueError(
+                "sdp_meta_pipelines.yml: `resources.pipelines` and "
+                "`resources.jobs` must be mappings"
+            )
+        pipeline_job = jobs.setdefault(
+            "pipelines",
+            {
+                "name": "${bundle.name} - run pipelines",
+                "description": (
+                    "Runs the sdp-meta SDP Pipeline(s) end-to-end."
+                ),
+                "tasks": [],
+            },
+        )
+        if not isinstance(pipeline_job, dict):
+            raise ValueError(
+                "sdp_meta_pipelines.yml: `resources.jobs.pipelines` "
+                "must be a mapping"
+            )
+        tasks = pipeline_job.setdefault("tasks", [])
+        if not isinstance(tasks, list):
+            raise ValueError(
+                "sdp_meta_pipelines.yml: "
+                "`resources.jobs.pipelines.tasks` must be a list"
+            )
+    except (OSError, ValueError, yaml.YAMLError) as exc:
         print(
-            "ERROR: sdp_meta_pipelines.yml must contain mapping "
-            "`resources.pipelines` and list `resources.jobs.pipelines.tasks`",
+            f"ERROR: {exc}",
             file=output,
         )
         return 2
@@ -1435,10 +1833,58 @@ def bundle_add_pipeline(
     keys = list(new_resources)
     merged_pipelines = {**pipelines, **new_resources}
     try:
+        variables_path = bundle_dir / "resources" / "variables.yml"
+        variables_doc = _load_yaml_mapping(variables_path)
+        variables = variables_doc.get("variables") or {}
+        if not isinstance(variables, dict):
+            raise ValueError(
+                "variables.yml: `variables` must be a mapping"
+            )
+        databricks_doc = _load_yaml_mapping(
+            bundle_dir / "databricks.yml"
+        )
+        # Fail closed on the entire merged topology, including every target
+        # override. A pre-existing conflict must be repaired before another
+        # pipeline can be added; otherwise this command would preserve an
+        # already ambiguous ownership map.
+        ownership_errors = _pipeline_ownership_errors_across_targets(
+            merged_pipelines, variables, databricks_doc
+        )
+        if ownership_errors:
+            for error in ownership_errors:
+                print(
+                    "ERROR: merged pipeline topology is invalid: "
+                    f"{error}",
+                    file=output,
+                )
+            return 2
+        pending_tasks = tasks + new_tasks
+        _wire_split_pipeline_dependencies(
+            merged_pipelines,
+            pending_tasks,
+            set(new_resources),
+            variables,
+            databricks_doc,
+        )
+        dependency_errors = _split_dependency_errors_across_targets(
+            merged_pipelines,
+            pending_tasks,
+            variables,
+            databricks_doc,
+            None,
+        )
+        if dependency_errors:
+            for error in dependency_errors:
+                print(
+                    "ERROR: merged pipeline topology is invalid: "
+                    f"{error}",
+                    file=output,
+                )
+            return 2
         onboarding_updates = _onboarding_layer_updates(
             bundle_dir, merged_pipelines, cmd.pipeline
         )
-    except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
+    except (OSError, ValueError, yaml.YAMLError) as exc:
         print(f"ERROR: {exc}", file=output)
         return 2
 
@@ -2014,11 +2460,11 @@ def _ensure_silver_transformation_entries(
     appended onboarding row that has a `silver_table` and isn't already
     represented. Returns the number of rows appended.
 
-    No-op when `new_entries` carry no `silver_table`, or when the
-    transformations file isn't present (the user may have replaced it with a
-    custom path). Per-flow layer overrides take precedence over the bundle's
-    original global layer, so the entries themselves are the source of truth.
-    All other failures bubble up so users see them.
+    If the canonical transformations file does not exist, it is created with
+    the required defaults. Per-flow layer overrides take precedence over the
+    bundle's original global layer, so the entries themselves are the source
+    of truth. Returns without writing only when no new silver table needs an
+    entry; all other failures bubble up so users see them.
     """
     onboarding_format = (_var_default(variables, "onboarding_file_format") or "yaml").lower()
     ext = "yml" if onboarding_format == "yaml" else "json"
