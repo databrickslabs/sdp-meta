@@ -364,6 +364,66 @@ class SanityChecksTests(unittest.TestCase):
             errors = _sdp_meta_sanity_checks(tmp)
             self.assertTrue(any("dataflow_group" in e for e in errors), errors)
 
+    def test_quarantine_database_does_not_cover_primary_layer_target(self):
+        with _tempdir() as tmp:
+            self._make_bundle(
+                tmp,
+                layer="bronze",
+                with_bronze=True,
+                with_silver=False,
+            )
+            self._write(
+                tmp / "conf" / "onboarding.yml",
+                yaml.safe_dump([
+                    {
+                        "data_flow_id": "1",
+                        "data_flow_group": "g",
+                        "bronze_database_quarantine_dev": (
+                            "cat.bronze_quarantine"
+                        ),
+                        "bronze_table": "orders",
+                    },
+                ]),
+            )
+            self._write(
+                tmp / "resources" / "sdp_meta_pipelines.yml",
+                yaml.safe_dump({
+                    "resources": {
+                        "pipelines": {
+                            "orders_bronze": self._configured_pipeline(
+                                "bronze",
+                                "g",
+                            ),
+                        },
+                        "jobs": {
+                            "pipelines": {
+                                "tasks": [
+                                    {
+                                        "task_key": "orders_bronze",
+                                        "pipeline_task": {
+                                            "pipeline_id": (
+                                                "${resources.pipelines."
+                                                "orders_bronze.id}"
+                                            ),
+                                        },
+                                    },
+                                ],
+                            },
+                        },
+                    },
+                }),
+            )
+
+            errors = _sdp_meta_sanity_checks(tmp)
+
+            self.assertTrue(
+                any(
+                    "has no bronze onboarding row" in error
+                    for error in errors
+                ),
+                errors,
+            )
+
     def test_combined_mode_happy_path(self):
         with _tempdir() as tmp:
             self._make_bundle(

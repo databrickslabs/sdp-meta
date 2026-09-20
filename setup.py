@@ -72,7 +72,7 @@ long_description = content
 
 INSTALL_REQUIRES = [
     "setuptools>=65,<83",
-    "databricks-sdk>=0.20,<1",
+    "databricks-sdk>=0.138.0,<1",
     "PyYAML>=6.0,<7",
 ]
 

@@ -895,7 +895,7 @@ class CompatWheelhouseVersionTests(TestCase):
             wheel = self._make_primary_wheel(
                 tmp,
                 [
-                    "databricks-sdk>=0.20,<1",
+                    "databricks-sdk>=0.138.0,<1",
                     "PyYAML>=6.0,<7",
                     'pytest; extra == "dev"',
                     'tomli; python_version < "3.11"',
@@ -909,7 +909,7 @@ class CompatWheelhouseVersionTests(TestCase):
     def test_assert_wheelhouse_complete_passes_when_deps_present(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.conf.target_main_whl_local = self._make_primary_wheel(
-                tmp, ["databricks-sdk>=0.20,<1", "PyYAML>=6.0,<7"]
+                tmp, ["databricks-sdk>=0.138.0,<1", "PyYAML>=6.0,<7"]
             )
             self.conf.target_dependency_whls_local = [
                 "/tmp/wh/databricks_sdk-0.30.0-py3-none-any.whl",
@@ -921,7 +921,7 @@ class CompatWheelhouseVersionTests(TestCase):
     def test_assert_wheelhouse_complete_flags_missing_dep(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.conf.target_main_whl_local = self._make_primary_wheel(
-                tmp, ["databricks-sdk>=0.20,<1", "PyYAML>=6.0,<7"]
+                tmp, ["databricks-sdk>=0.138.0,<1", "PyYAML>=6.0,<7"]
             )
             self.conf.target_dependency_whls_local = [
                 "/tmp/wh/databricks_sdk-0.30.0-py3-none-any.whl",

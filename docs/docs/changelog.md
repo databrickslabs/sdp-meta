@@ -16,6 +16,8 @@ sidebar_position: 99
 
 ### Fixes
 
+- **Databricks SDK compatibility floor** — runtime and App dependencies now require `databricks-sdk>=0.138.0,<1`, and CI tests serverless onboarding environment models against exactly that minimum. ([Issue #457](https://github.com/databrickslabs/sdp-meta/issues/457))
+- **Databricks App deployment packaging** — deployment staging now includes the `examples/` wheel-build inputs on both macOS/Linux and Windows, preventing remote App startup failures while building the SDP-META wheel.
 - **Mixed snapshot and non-snapshot pipelines** — a layer-level snapshot callback no longer suppresses input views for CloudFiles and other non-snapshot specs. ([Issue #443](https://github.com/databrickslabs/sdp-meta/issues/443))
 - **Append-flow source metadata** — CloudFiles append flows now serialize and select source metadata correctly. ([Issue #444](https://github.com/databrickslabs/sdp-meta/issues/444))
 - **Append-flow custom transformations** — custom transformation functions now run for append-flow inputs as well as primary inputs. ([Issue #445](https://github.com/databrickslabs/sdp-meta/issues/445))
