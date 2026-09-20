@@ -20,6 +20,23 @@ sidebar_position: 99
 - **Append-flow source metadata** — CloudFiles append flows now serialize and select source metadata correctly. ([Issue #444](https://github.com/databrickslabs/sdp-meta/issues/444))
 - **Append-flow custom transformations** — custom transformation functions now run for append-flow inputs as well as primary inputs. ([Issue #445](https://github.com/databrickslabs/sdp-meta/issues/445))
 
+### Compatibility warning
+
+- **Append-flow transforms now run on every input** — v0.1.1 applies
+  `bronze_custom_transform_func` and `silver_custom_transform_func` separately
+  to primary and append-flow DataFrames. This is the intended fix for
+  [Issue #445](https://github.com/databrickslabs/sdp-meta/issues/445), but
+  transforms that assume primary-only columns can fail or change append-flow
+  output. Validate every append source and normalize all inputs to one
+  target-compatible schema before upgrading.
+- **Use the official persisted-spec readers during upgrades** —
+  `DataflowSpecUtils.get_bronze_dataflow_spec()` and
+  `DataflowSpecUtils.get_silver_dataflow_spec()` backfill the registered
+  compatibility fields added since legacy schema versions. Direct dataclass
+  construction from legacy Spark rows does not. See the
+  [v0.1.1 migration guidance](./operations/migration#v011-compatibility-boundaries)
+  and [upgrade checklist](./operations/migration#v011-upgrade-checklist).
+
 ---
 
 ## v0.1.0

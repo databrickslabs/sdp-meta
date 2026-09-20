@@ -15,6 +15,26 @@
 - **DAB wheel packaging**: the primary wheel now includes the complete Declarative Automation Bundle template, so `bundle-init` works from an installed release instead of failing because `templates/dab` is absent.
 - **DAB quickstart onboarding**: generated bronze flows now include the quarantine defaults required when DQE is configured, preventing `PySparkValueError: bronze_quarantine_table`; serverless runner installs also force a clean dependency reinstall to avoid stale environment metadata.
 
+### Compatibility warning
+
+- **Append-flow custom transformations now run on every input**: starting in
+  v0.1.1, `bronze_custom_transform_func` and
+  `silver_custom_transform_func` are applied separately to primary and
+  append-flow DataFrames. This is the intended fix for
+  [Issue #445](https://github.com/databrickslabs/sdp-meta/issues/445), but a
+  transform that assumes columns found only in the primary source can now fail
+  or change append-flow output. Validate every append source and make the
+  transform produce one target-compatible schema. See the
+  [v0.1.1 migration guidance](https://databrickslabs.github.io/sdp-meta/docs/operations/migration#v011-compatibility-boundaries).
+- **Load persisted specifications through the supported readers**:
+  `DataflowSpecUtils.get_bronze_dataflow_spec()` and
+  `DataflowSpecUtils.get_silver_dataflow_spec()` backfill the registered
+  compatibility fields added since legacy schema versions. Directly
+  constructing `BronzeDataflowSpec` or `SilverDataflowSpec` from a legacy
+  Spark row does not perform that backfill and is not a supported upgrade
+  boundary. See the
+  [v0.1.1 upgrade checklist](https://databrickslabs.github.io/sdp-meta/docs/operations/migration#v011-upgrade-checklist).
+
 ## [v0.1.0]
 ### ⚠️ Breaking Changes
 - **Project rename `dlt-meta` → `sdp-meta`** to align with the Lakeflow Spark Declarative Pipelines product naming. This affects the PyPI package, CLI command, Python import path, source layout, and main class name. A backward-compatibility wrapper is published so existing installations keep working with a deprecation warning. [PR](https://github.com/databrickslabs/sdp-meta/pull/289)
