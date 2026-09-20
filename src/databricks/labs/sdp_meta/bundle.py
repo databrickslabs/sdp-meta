@@ -625,6 +625,7 @@ def _transitive_dependencies(
     _walk(task_key, [task_key])
     return visited, cycles
 
+
 def _sdp_meta_sanity_checks(
     bundle_dir: Path, target: Optional[str] = None
 ) -> List[str]:
