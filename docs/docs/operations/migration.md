@@ -125,6 +125,24 @@ Update the file before the legacy aliases are removed in v0.2.0.
 
 ## v0.1.1 compatibility boundaries
 
+### Python runtime support
+
+SDP-META v0.1.1 supports Python 3.10, 3.11, and 3.12. Python 3.8 and
+3.9 are no longer supported because the required
+`databricks-sdk>=0.138.0` supports Python 3.10 and newer. Python 3.13+
+remains unsupported by the pinned PySpark 3.5.5 development and test stack.
+
+Before upgrading, confirm the Python version used by local environments,
+Databricks jobs, and build automation:
+
+```bash
+python --version
+```
+
+Recreate environments on Python 3.10–3.12 before installing either
+`databricks-labs-sdp-meta==0.1.1` or the `dlt-meta==0.1.1` compatibility
+package.
+
 ### Custom transformations and append flows
 
 Before v0.1.1, `bronze_custom_transform_func` and
@@ -230,6 +248,8 @@ guarantee.
 
 ### Upgrading from v0.0.10
 
+- Move local and automated environments to Python 3.10–3.12 before installing
+  v0.1.1.
 - Test the upgrade against copies of the bronze and silver dataflow-spec Delta
   tables and pipeline outputs.
 - Update package names, CLI commands, imports, runner notebooks, and
@@ -248,6 +268,8 @@ guarantee.
 
 ### Upgrading from v0.1.0
 
+- Move local and automated environments to Python 3.10–3.12 before installing
+  v0.1.1.
 - Test the upgrade against copies of the dataflow-spec tables and pipeline
   outputs.
 - Verify legacy Python wheel tasks and workspace configuration before changing

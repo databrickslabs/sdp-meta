@@ -1,8 +1,11 @@
 # Migration: DLT-META to SDP-META
 
 Reference for agents helping a user migrate from **DLT-META (v0.0.10)** to
-**SDP-META (v0.1.0)**. Follow this when the user mentions upgrading, renaming,
+**SDP-META (v0.1.1)**. Follow this when the user mentions upgrading, renaming,
 or getting deprecation warnings after upgrading.
+
+SDP-META v0.1.1 requires Python 3.10–3.12. Move Python 3.8/3.9 environments
+to a supported interpreter before installing either distribution.
 
 ---
 
@@ -19,7 +22,7 @@ Wherever `dlt-meta` is installed for the onboarding job (cluster init script, jo
 pip install dlt-meta==0.0.10
 
 # After
-pip install databricks-labs-sdp-meta==0.1.0
+pip install databricks-labs-sdp-meta==0.1.1
 ```
 
 ### Step 2 — SDP Pipeline: swap the runner notebook
@@ -50,9 +53,9 @@ DataflowPipeline.invoke_dlt_pipeline(spark, layer)
 
 Copy the new notebook from [`demo/notebooks/afam_cloudfiles_runners/init_sdp_meta_pipeline.py`](../../../../demo/notebooks/afam_cloudfiles_runners/init_sdp_meta_pipeline.py) or any runner under `demo/notebooks/`.
 
-Also update the pipeline configuration key from `dlt_meta_whl` → `sdp_meta_whl` and point it at the v0.1.0 wheel path or PyPI coordinate.
+Also update the pipeline configuration key from `dlt_meta_whl` → `sdp_meta_whl` and point it at the v0.1.1 wheel path or PyPI coordinate.
 
-> **Note:** If you cannot update the notebook immediately, just swapping the `dlt_meta_whl` config to point at the v0.1.0 wheel still works — the v0.1.0 wheel bundles a `src` compat package that makes `from src.dataflow_pipeline import DataflowPipeline` keep resolving. This shim is **removed in v0.2.0**.
+> **Note:** If you cannot update the notebook immediately, just swapping the `dlt_meta_whl` config to point at the v0.1.1 wheel still works — the v0.1.1 wheel bundles a `src` compat package that makes `from src.dataflow_pipeline import DataflowPipeline` keep resolving. This shim is **removed in v0.2.0**.
 
 ---
 
@@ -60,7 +63,7 @@ Also update the pipeline configuration key from `dlt_meta_whl` → `sdp_meta_whl
 
 ## What changed at a glance
 
-| Component | Before (v0.0.10) | After (v0.1.0) |
+| Component | Before (v0.0.10) | After (v0.1.1) |
 |---|---|---|
 | PyPI package | `dlt-meta` | `databricks-labs-sdp-meta` |
 | CLI install | `databricks labs install dlt-meta` | `databricks labs install sdp-meta` |
@@ -92,7 +95,7 @@ Also update the pipeline configuration key from `dlt_meta_whl` → `sdp_meta_whl
 pip uninstall dlt-meta
 databricks labs install sdp-meta
 # or directly:
-pip install databricks-labs-sdp-meta==0.1.0
+pip install databricks-labs-sdp-meta==0.1.1
 ```
 
 ### 2. Update CLI commands
@@ -129,7 +132,7 @@ from databricks.labs.sdp_meta.onboard_dataflowspec import OnboardDataflowspec
 %pip install dlt-meta==0.0.10
 
 # After
-%pip install databricks-labs-sdp-meta==0.1.0
+%pip install databricks-labs-sdp-meta==0.1.1
 ```
 
 Pipeline invocation code is **unchanged**:
@@ -172,7 +175,7 @@ but quarantine tables will not be created.
 The `dlt-meta` PyPI package is preserved as a thin redirect — no code change
 required for customers who cannot update immediately:
 
-- `pip install dlt-meta==0.1.0` installs `databricks-labs-sdp-meta` as a dependency.
+- `pip install dlt-meta==0.1.1` installs `databricks-labs-sdp-meta==0.1.1` as a dependency.
 - `from dlt_meta import ...` re-exports all public symbols with a `DeprecationWarning`.
 - `from src.X import ...` resolves via a `sys.modules` shim (removed in v0.2.0).
 - `DLTMeta` is aliased to `SDPMeta`.
@@ -186,8 +189,9 @@ required for customers who cannot update immediately:
 
 | Version | Status | What changes |
 |---|---|---|
-| v0.1.0 | Current | Both packages work. Old names show deprecation warnings. `src.*` shim active. |
-| v0.1.x | Planned | `dlt-meta` compat maintained; no new features added to it. |
+| v0.1.0 | Previous | Initial renamed release; upgrade to v0.1.1 for compatibility fixes. |
+| v0.1.1 | Current | Both packages work. Old names show deprecation warnings. `src.*` shim active. |
+| v0.1.x | Supported series | `dlt-meta` compat maintained; no new features added to it. |
 | v0.2.0 | Planned | `src.*` shim removed — `from src.X import ...` raises `ModuleNotFoundError`. |
 | Future | Planned | `dlt-meta` compat package removed from PyPI. |
 

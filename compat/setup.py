@@ -78,11 +78,11 @@ class bdist_wheel_with_pth_file(_bdist_wheel):
 setup(
     name="dlt-meta",
     version="0.1.1",
-    # Match the primary package's Python floor and ceiling: pyspark
-    # 3.5.5 (a transitive runtime dep) is incompatible with Python
-    # 3.13's pickle changes, so cap at <3.13. Re-evaluate when pyspark
-    # ships a 3.13-compatible release.
-    python_requires=">=3.8, <3.13",
+    # Match the primary package's Python bounds: databricks-sdk>=0.138.0
+    # requires Python 3.10+, while pyspark 3.5.5 is incompatible with Python
+    # 3.13's pickle changes. Re-evaluate the ceiling when pyspark supports
+    # Python 3.13.
+    python_requires=">=3.10, <3.13",
     install_requires=[
         # Keep this redirect on the release series that provides the legacy
         # dlt_meta and src.* compatibility surfaces.
@@ -164,8 +164,6 @@ Source: https://github.com/databrickslabs/sdp-meta
     classifiers=[
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3 :: Only",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",

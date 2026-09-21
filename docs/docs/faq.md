@@ -228,7 +228,7 @@ Change `wheel_source` and `sdp_meta_dependency` in `resources/variables.yml`, th
 wheel_source:
   default: volume_path
 sdp_meta_dependency:
-  default: /Volumes/my_catalog/my_schema/my_volume/databricks_labs_sdp_meta-0.1.0-py3-none-any.whl
+  default: /Volumes/my_catalog/my_schema/my_volume/databricks_labs_sdp_meta-0.1.1-py3-none-any.whl
 ```
 Run `bundle-prepare-wheel` first to build and upload the wheel if you don't have the path yet.
 
@@ -251,7 +251,9 @@ Per-target catalog, schema, and variable overrides live under `targets.prod.vari
 
 **Q: I was using `pip install dlt-meta`. Do I need to change anything?**
 
-No. `pip install dlt-meta==0.1.0` installs `databricks-labs-sdp-meta` as a dependency automatically. Your existing `from dlt_meta import ...` imports continue to work with a deprecation warning.
+No. `pip install dlt-meta==0.1.1` installs
+`databricks-labs-sdp-meta==0.1.1` as a dependency automatically. Your existing
+`from dlt_meta import ...` imports continue to work with a deprecation warning.
 
 **Q: When will the `dlt-meta` compatibility package be removed?**
 

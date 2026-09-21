@@ -57,7 +57,7 @@ Usage examples
         --profile DEFAULT \\
         --install-source whl_file \\
         --whl-file-path /Volumes/main/sdp_meta_demo/sdp_meta_wheels/\\
-databricks_labs_sdp_meta-0.1.0-py3-none-any.whl
+    databricks_labs_sdp_meta-0.1.1-py3-none-any.whl
 
     # Deterministic data path (recommended for CI):
     python demo/launch_interactive_demo.py \\
@@ -379,7 +379,7 @@ def main() -> int:
         "--pypi-version",
         default="",
         help="Optional version pin when --install-source=pypi (e.g. "
-             "``0.1.0``). Leave blank to install the latest published "
+             "``0.1.1``). Leave blank to install the latest published "
              "``databricks-labs-sdp-meta`` release.",
     )
     parser.add_argument(

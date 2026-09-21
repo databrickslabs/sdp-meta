@@ -73,4 +73,4 @@ variables:
       notebooks via spark.conf.get('sdp_meta_whl'). Used because the package is not
       yet published to PyPI.
     type: string
-    default: /Volumes/ravi_dlt_meta_uc/sdp_meta_dataflowspecs_demo_d65f39ed6b6d4881977c595ee90e14f9/dlt_meta_files/wheels/databricks_labs_sdp_meta-0.1.0-py3-none-any.whl
+    default: /Volumes/ravi_dlt_meta_uc/sdp_meta_dataflowspecs_demo_d65f39ed6b6d4881977c595ee90e14f9/dlt_meta_files/wheels/databricks_labs_sdp_meta-0.1.1-py3-none-any.whl

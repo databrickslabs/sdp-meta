@@ -54,7 +54,7 @@
 # MAGIC | **Data Source** | `dbdatagen` (generate synthetic data) or `github` (download from repo) |
 # MAGIC | **Install Source** | `git_branch` (default — installs SDP-META from the GitHub branch above), `pypi` (installs `databricks-labs-sdp-meta` from PyPI — preferred for published releases), or `whl_file` (installs from a pre-built wheel — preferred when validating a local build) |
 # MAGIC | **Wheel File Path** | Required only when `Install Source = whl_file`. Path to the SDP-META wheel on a Volume / Workspace, e.g. `/Volumes/<catalog>/<schema>/<volume>/sdp_meta-<version>-py3-none-any.whl` |
-# MAGIC | **PyPI Version** | Optional version pin when `Install Source = pypi` (e.g. `0.1.0`). Leave blank to install the latest published `databricks-labs-sdp-meta` |
+# MAGIC | **PyPI Version** | Optional version pin when `Install Source = pypi` (e.g. `0.1.1`). Leave blank to install the latest published `databricks-labs-sdp-meta` |
 
 # COMMAND ----------
 
@@ -207,7 +207,7 @@ if install_source == "whl_file":
     sdp_meta_install_target = whl_file_path
 elif install_source == "pypi":
     # Install the published wheel from PyPI. Optional ``pypi_version``
-    # widget pins a specific release (e.g. ``0.1.0``); leaving it blank
+    # widget pins a specific release (e.g. ``0.1.1``); leaving it blank
     # installs the latest. ``databricks-labs-sdp-meta`` is the canonical
     # PyPI package name; ``dlt-meta`` exists as a compatibility shim that
     # also resolves to it.
