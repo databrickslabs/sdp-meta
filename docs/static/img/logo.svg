@@ -1,29 +1,21 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
-  <!--
-    SDP-META logo: metadata spec (DataflowSpec) drives a two-stage pipeline.
-    Left:  white doc with row-lines = the onboarding spec / DataflowSpec table.
-    Arrow: spec feeds the pipeline.
-    Right: two nodes (Bronze + Silver) connected via a forked bus.
-  -->
-  <!-- Databricks-red background -->
-  <rect width="48" height="48" rx="10" fill="#FF3621"/>
-
-  <!-- Metadata spec doc (left) -->
-  <rect x="3" y="11" width="14" height="26" rx="3" fill="white"/>
-  <!-- Spec row lines — suggest schema / config rows -->
-  <line x1="6" y1="18" x2="14" y2="18" stroke="#FF3621" stroke-width="1.5" stroke-linecap="round"/>
-  <line x1="6" y1="24" x2="14" y2="24" stroke="#FF3621" stroke-width="1.5" stroke-linecap="round"/>
-  <line x1="6" y1="30" x2="11" y2="30" stroke="#FF3621" stroke-width="1.5" stroke-linecap="round"/>
-
-  <!-- Curved path from doc centre → top stage (Bronze) -->
-  <path d="M 17 22 C 26 22 24 13 31 13" fill="none" stroke="rgba(255,255,255,0.80)" stroke-width="2.5" stroke-linecap="round"/>
-
-  <!-- Curved path from doc centre → bottom stage (Silver) -->
-  <path d="M 17 26 C 26 26 24 35 31 35" fill="none" stroke="rgba(255,255,255,0.80)" stroke-width="2.5" stroke-linecap="round"/>
-
-  <!-- Pipeline stage 1 — Bronze -->
-  <rect x="31" y="7" width="15" height="12" rx="4" fill="white"/>
-
-  <!-- Pipeline stage 2 — Silver -->
-  <rect x="31" y="29" width="15" height="12" rx="4" fill="rgba(255,255,255,0.72)"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff3621"/>
+      <stop offset="1" stop-color="#f22b1a"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="164" fill="url(#background)"/>
+  <rect x="197" y="278" width="231" height="433" rx="66" fill="#fff"/>
+  <g fill="none" stroke="#ff3621" stroke-width="36" stroke-linecap="round">
+    <path d="M257 388h112"/>
+    <path d="M257 489h112"/>
+    <path d="M257 590h112"/>
+  </g>
+  <g fill="none" stroke="#fff" stroke-width="40" stroke-linecap="round">
+    <path d="M428 461c98 0 102-150 202-150"/>
+    <path d="M428 510c98 0 102 162 202 162"/>
+  </g>
+  <rect x="630" y="210" width="235" height="208" rx="70" fill="#fff"/>
+  <rect x="630" y="572" width="235" height="208" rx="70" fill="#fff"/>
 </svg>

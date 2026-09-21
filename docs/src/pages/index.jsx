@@ -92,6 +92,19 @@ function HeroBanner() {
             GitHub ↗
           </Link>
         </div>
+        <div style={{ marginTop: '1rem' }}>
+          <Link
+            to="/docs/getting-started/#prefer-video"
+            style={{
+              color: 'rgba(255,255,255,0.85)',
+              fontSize: '0.9rem',
+              fontWeight: 600,
+              textDecoration: 'none',
+            }}
+          >
+            ▶ Watch the SDP-META deep dive
+          </Link>
+        </div>
         {/* Badges */}
         <div
           style={{
