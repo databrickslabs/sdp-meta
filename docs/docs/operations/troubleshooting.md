@@ -48,7 +48,7 @@ This migration is one-way. Verify in a non-production environment first.
 
 ```bash
 # Option 1: Use a published PyPI version
-sed -i 's/__SET_ME__/databricks-labs-sdp-meta==0.1.0/' resources/variables.yml
+sed -i 's/__SET_ME__/databricks-labs-sdp-meta==0.1.1/' resources/variables.yml
 
 # Option 2: Upload a local wheel, then set the /Volumes/... path
 databricks labs sdp-meta bundle-prepare-wheel

@@ -18,13 +18,20 @@ sidebar_position: 99
 
 - **Databricks SDK compatibility floor** — runtime and App dependencies now require `databricks-sdk>=0.138.0,<1`, and CI tests serverless onboarding environment models against exactly that minimum. ([Issue #457](https://github.com/databrickslabs/sdp-meta/issues/457))
 - **Databricks App deployment packaging** — deployment staging now includes the `examples/` wheel-build inputs on both macOS/Linux and Windows, preventing remote App startup failures while building the SDP-META wheel.
+- **DAB pipeline group ownership** — `bundle-add-pipeline` and `bundle-validate` reject duplicate ownership of the same data-flow group and layer, including conflicts introduced through target overrides. ([Issue #458](https://github.com/databrickslabs/sdp-meta/issues/458))
 - **Customized DAB validation** — `bundle-validate` now honors default and environment-selected targets, accepts transitive bronze-to-silver task dependencies, and reports malformed targets or dependency cycles cleanly. ([Issue #459](https://github.com/databrickslabs/sdp-meta/issues/459))
 - **Mixed snapshot and non-snapshot pipelines** — a layer-level snapshot callback no longer suppresses input views for CloudFiles and other non-snapshot specs. ([Issue #443](https://github.com/databrickslabs/sdp-meta/issues/443))
 - **Append-flow source metadata** — CloudFiles append flows now serialize and select source metadata correctly. ([Issue #444](https://github.com/databrickslabs/sdp-meta/issues/444))
 - **Append-flow custom transformations** — custom transformation functions now run for append-flow inputs as well as primary inputs. ([Issue #445](https://github.com/databrickslabs/sdp-meta/issues/445))
+- **Legacy dataflow-spec schema evolution** — append onboarding adds current bronze and silver fields to v0.0.10 Delta spec tables before merging, preserving existing rows and audit fields. ([Issue #460](https://github.com/databrickslabs/sdp-meta/issues/460))
+- **Legacy Python wheel task entry point** — the `dlt-meta` compatibility package restores the `group_1:run` entry point used by v0.0.10 Databricks Python wheel tasks. ([Issue #455](https://github.com/databrickslabs/sdp-meta/issues/455))
+- **Legacy workspace configuration keys** — v0.0.10 `dlt_meta_*` workspace keys migrate to their `sdp_meta_*` equivalents with deprecation warnings and deterministic precedence. ([Issue #456](https://github.com/databrickslabs/sdp-meta/issues/456))
 
 ### Compatibility warning
 
+- **Python 3.10 is now the minimum supported interpreter** — the required
+  `databricks-sdk>=0.138.0` supports Python 3.10 and newer. Upgrade Python 3.8
+  and 3.9 environments before installing either v0.1.1 distribution.
 - **Append-flow transforms now run on every input** — v0.1.1 applies
   `bronze_custom_transform_func` and `silver_custom_transform_func` separately
   to primary and append-flow DataFrames. This is the intended fix for

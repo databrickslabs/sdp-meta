@@ -255,7 +255,7 @@ def _path_to_file_uri(local_path: str) -> str:
 
 # Runner notebook template for the SDP/DLT pipeline. The ``{dependency}``
 # placeholder is replaced at deploy time with either:
-#   * a PyPI spec, e.g. ``databricks-labs-sdp-meta==0.1.0``
+#   * a PyPI spec, e.g. ``databricks-labs-sdp-meta==0.1.1``
 #   * a UC Volumes wheel path, e.g.
 #     ``/Volumes/<catalog>/<schema>/<volume>/databricks_labs_sdp_meta-<ver>-py3-none-any.whl``
 # The latter is the recommended path for air-gapped workspaces / private

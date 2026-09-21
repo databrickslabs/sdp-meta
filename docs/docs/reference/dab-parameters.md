@@ -27,7 +27,7 @@ When you run `databricks labs sdp-meta bundle-init`, the template walks you thro
 | 9 | `onboarding_file_format` | `yaml` | File format for generated onboarding and transformation files: `yaml` or `json` |
 | 10 | `dataflow_group` | `my_group` | The `data_flow_group` value used in the seeded onboarding file — must match the pipeline's `*.group` configuration |
 | 11 | `wheel_source` | `pypi` | Where sdp-meta is installed from: `pypi` or `volume_path` |
-| 12 | `sdp_meta_dependency` | `__SET_ME__` | Concrete install specification: a PyPI coordinate (e.g. `databricks-labs-sdp-meta==0.1.0`) or a `/Volumes/...` wheel path |
+| 12 | `sdp_meta_dependency` | `__SET_ME__` | Concrete install specification: a PyPI coordinate (e.g. `databricks-labs-sdp-meta==0.1.1`) or a `/Volumes/...` wheel path |
 | 13 | `author` | `sdp-meta-user` | Written to the `import_author` column on dataflowspec rows |
 
 :::warning
@@ -99,7 +99,7 @@ databricks labs sdp-meta bundle-init --quickstart
 cd my_sdp_meta_pipeline
 
 # Set a real sdp_meta_dependency value
-sed -i 's/__SET_ME__/databricks-labs-sdp-meta==0.1.0/' resources/variables.yml
+sed -i 's/__SET_ME__/databricks-labs-sdp-meta==0.1.1/' resources/variables.yml
 
 # Validate before deploying
 databricks labs sdp-meta bundle-validate

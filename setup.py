@@ -12,14 +12,14 @@ sourced from ``compat/``:
 
   * ``dlt_meta`` (from ``compat/dlt_meta/``) -- flat re-export
     package for v0.0.10 users who already migrated to
-    ``from dlt_meta import …``. Shipping it inside the v0.1.0 main
+    ``from dlt_meta import …``. Shipping it inside the v0.1.x main
     wheel means ``pip install databricks-labs-sdp-meta`` is the only
     thing customers need; they don't have to track a second package.
   * ``src`` (from ``compat/src/``) -- real Python package whose
     ``__init__.py`` populates ``sys.modules`` with ``src.<sub>`` ->
     ``databricks.labs.sdp_meta.<sub>`` aliases at import time. This
     is what makes a v0.0.10 customer's runner notebook keep working
-    unchanged after their wheel is upgraded to v0.1.0. The
+    unchanged after their wheel is upgraded to v0.1.x. The
     customer's ``from src.dataflow_pipeline import …`` line resolves
     through normal Python import machinery: load ``src/__init__.py``,
     register aliases, fetch the canonical module from
@@ -36,10 +36,9 @@ installed ``.pth`` is silently ignored. Resolving through a real
 package (``compat/src/``) sidesteps the ``.pth`` lifecycle entirely.
 
 The standalone ``compat/`` package remains as a no-op PyPI redirect
-(``install_requires=["databricks-labs-sdp-meta>=0.1.0"]``) so
-``pip install dlt-meta`` keeps working from PyPI; it ships a
-duplicate of the same shim it would otherwise install transitively,
-which pip detects as already-satisfied and no-ops.
+(``install_requires=["databricks-labs-sdp-meta>=0.1.1,<0.2.0"]``) so
+``pip install dlt-meta`` keeps working from PyPI. The primary dependency owns
+the ``dlt_meta`` and ``src`` compatibility files.
 """
 from pathlib import Path
 import shutil
@@ -139,13 +138,14 @@ class BuildPyWithExamples(build_py):
 setup(
     name="databricks-labs-sdp-meta",
     version="0.1.1",
-    # Ceiling matches compat/setup.py: the pyspark 3.5.5 stack this framework
-    # runs against is incompatible with Python 3.13+ (pickle/cloudpickle
-    # changes; see GETTING_STARTED.md prerequisites). Keeping both packages'
-    # ceilings identical means `pip install dlt-meta` and
+    # databricks-sdk>=0.138.0 requires Python 3.10+. The ceiling matches
+    # compat/setup.py: the pyspark 3.5.5 stack this framework runs against is
+    # incompatible with Python 3.13+ (pickle/cloudpickle changes; see
+    # GETTING_STARTED.md prerequisites). Keeping both packages' bounds
+    # identical means `pip install dlt-meta` and
     # `pip install databricks-labs-sdp-meta` succeed/fail on the same
     # interpreters. Re-evaluate when pyspark ships a 3.13-compatible release.
-    python_requires=">=3.8, <3.13",
+    python_requires=">=3.10, <3.13",
     # No ``setup_requires``: it makes setuptools fetch build deps from PyPI
     # mid-build, which breaks the release workflow's ``--no-isolation`` build
     # (nothing may be fetched at build time). Build deps are supplied by
@@ -209,8 +209,6 @@ setup(
     classifiers=[
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3 :: Only",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",

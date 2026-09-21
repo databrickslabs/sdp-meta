@@ -37,9 +37,9 @@ def _run(command, *, cwd=None, env=None, timeout=300):
     return result
 
 
-@unittest.skipIf(
-    sys.version_info >= (3, 13),
-    "The v0.1.0 primary and compatibility distributions require Python <3.13.",
+@unittest.skipUnless(
+    (3, 10) <= sys.version_info < (3, 13),
+    "The v0.1.1 primary and compatibility distributions require Python 3.10-3.12.",
 )
 class CompatibilityWheelResolutionTests(unittest.TestCase):
     """Prove pip resolves the legacy distribution to the local primary wheel."""

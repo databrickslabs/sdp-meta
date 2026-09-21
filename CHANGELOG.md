@@ -13,6 +13,8 @@
 - **Append-flow source metadata**: nested Spark rows are normalized before serialization, so CloudFiles append flows can select file metadata columns correctly. [Issue #444](https://github.com/databrickslabs/sdp-meta/issues/444)
 - **Append-flow custom transformations**: bronze and silver custom transformation functions now run for append-flow inputs as well as the primary input. [Issue #445](https://github.com/databrickslabs/sdp-meta/issues/445)
 - **Legacy dataflow-spec schema evolution**: append onboarding now adds current bronze and silver fields to v0.0.10 Delta spec tables before merging, preserving existing rows and audit fields while allowing new features without destructive overwrite. [Issue #460](https://github.com/databrickslabs/sdp-meta/issues/460)
+- **Legacy Python wheel task entry point**: the `dlt-meta` compatibility package restores the `group_1:run` entry point used by v0.0.10 Databricks Python wheel tasks and forwards it to the canonical SDP-META CLI handler. [Issue #455](https://github.com/databrickslabs/sdp-meta/issues/455)
+- **Legacy workspace configuration keys**: v0.0.10 keys (`dlt_meta_operation`, `dlt_meta_schema`, `dlt_meta_layer`, and `dlt_meta_onboard_group`) are migrated to their `sdp_meta_*` equivalents with logged deprecation warnings. If both forms are present, the current key takes precedence. [Issue #456](https://github.com/databrickslabs/sdp-meta/issues/456)
 - **Compat shim: no more startup tracebacks on machines without pyspark** (ships as `databricks-labs-sdp-meta` 0.1.1 + `dlt-meta` 0.1.1 — the fixed `dlt_meta` package files live in the primary wheel, so BOTH distributions are re-released and the compat wrapper now requires `databricks-labs-sdp-meta>=0.1.1`). The `dlt_meta.pth` startup hook printed a `ModuleNotFoundError: No module named 'pyspark'` traceback on every `python3` launch — and `import dlt_meta` failed outright — in any environment without pyspark (laptops/CI that `pip install dlt-meta`). Root cause: `_optional_runtime_import_error` did not recognize the `ModuleNotFoundError(name='pyspark')` shape CPython raises when the *top-level* pyspark package is absent. The predicate now recognizes it, and `import dlt_meta` never raises at import time: any failure — including missing `yaml`/`databricks-sdk` on stripped images — degrades to a stub that raises an actionable `ImportError` at first attribute access (SDP-runtime-missing message when the predicate matches, a generic missing-dependency message otherwise). Predicate tests now derive the exception shape from a real `from pyspark import pipelines` in a pyspark-free subprocess instead of hand-setting `exc.name`, new `tests/test_compat_startup.py` pins the never-raise invariant, and a new `compat-startup-smoke` CI job installs both wheels into a bare venv and fails on any interpreter-startup stderr.
 - **Onboarding PyPI dependency**: `databricks labs sdp-meta onboard` now defaults to the published `databricks-labs-sdp-meta` distribution instead of the nonexistent `sdp-meta` package, preventing serverless and classic job environment setup failures. [Issue #408](https://github.com/databrickslabs/sdp-meta/issues/408)
 - **DAB wheel packaging**: the primary wheel now includes the complete Declarative Automation Bundle template, so `bundle-init` works from an installed release instead of failing because `templates/dab` is absent.
@@ -20,6 +22,9 @@
 
 ### Compatibility warning
 
+- **Python 3.10 is now the minimum supported interpreter**: the required
+  `databricks-sdk>=0.138.0` supports Python 3.10 and newer. Upgrade Python 3.8
+  and 3.9 environments before installing either v0.1.1 distribution.
 - **Append-flow custom transformations now run on every input**: starting in
   v0.1.1, `bronze_custom_transform_func` and
   `silver_custom_transform_func` are applied separately to primary and
@@ -97,7 +102,6 @@ See [docs/operations/migration](https://databrickslabs.github.io/sdp-meta/docs/o
 ### Backward Compatibility
 - The `dlt-meta` compatibility wrapper package re-exports all public symbols and forwards CLI commands to `sdp-meta` with a deprecation banner.
 - `from dlt_meta import ...` and `import src.*` continue to work with `DeprecationWarning`; both shims are scheduled for removal in v0.2.0.
-- v0.0.10 workspace configuration keys (`dlt_meta_operation`, `dlt_meta_schema`, `dlt_meta_layer`, and `dlt_meta_onboard_group`) are migrated to their `sdp_meta_*` equivalents with logged deprecation warnings. If both forms are present, the current key takes precedence. [Issue #456](https://github.com/databrickslabs/sdp-meta/issues/456)
 
 ## [v0.0.10]
 ### ⚠️ Breaking Changes

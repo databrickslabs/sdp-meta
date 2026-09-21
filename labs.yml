@@ -4,7 +4,7 @@ description: Metadata-driven framework based on Databricks Lakeflow Spark Declar
 install:
   script: src/databricks/labs/sdp_meta/install.py
 entrypoint: src/databricks/labs/sdp_meta/cli.py
-min_python: 3.8
+min_python: 3.10
 commands:
   - name: onboard
     description: onboards sdp-meta configuration for bronze and silver layers

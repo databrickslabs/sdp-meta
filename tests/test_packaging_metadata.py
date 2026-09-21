@@ -1,9 +1,9 @@
-"""Tests that the two distributions advertise the same Python support.
+"""Tests that both distributions advertise the same Python support.
 
-The supported interpreter range is written in three places: ``python_requires``
-and the version classifiers in setup.py, plus the same pair in compat/setup.py.
-pip only enforces ``python_requires``, so a stale classifier list or a compat
-wrapper that drifts from the package it forwards to would ship unnoticed.
+The supported interpreter range is written in setup.py, compat/setup.py, and
+both Labs CLI manifests. pip only enforces ``python_requires``, so stale
+classifiers, CLI metadata, or a compat wrapper that drifts from the package it
+forwards to would ship unnoticed.
 
 The setup.py files are read with ``ast`` rather than imported -- executing them
 at test time would need setuptools' build context and would run the README
@@ -18,7 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PRIMARY_SETUP = REPO_ROOT / "setup.py"
 COMPAT_SETUP = REPO_ROOT / "compat" / "setup.py"
 
-# ">=3.8, <3.13" -- an inclusive floor and an exclusive ceiling, both 3.x.
+# ">=3.10, <3.13" -- an inclusive floor and an exclusive ceiling, both 3.x.
 PYTHON_REQUIRES_RE = re.compile(r"^>=3\.(\d+),\s*<3\.(\d+)$")
 VERSION_CLASSIFIER_RE = re.compile(r"^Programming Language :: Python :: 3\.(\d+)$")
 
@@ -48,7 +48,7 @@ class PythonSupportMetadataTests(unittest.TestCase):
         self.compat = _setup_kwargs(COMPAT_SETUP)
 
     def _declared_range(self, kwargs: dict, label: str) -> range:
-        """Minor versions covered by ``python_requires``, e.g. range(8, 13)."""
+        """Minor versions covered by ``python_requires``, e.g. range(10, 13)."""
         python_requires = kwargs.get("python_requires")
         self.assertIsNotNone(python_requires, f"{label} declares no python_requires")
         match = PYTHON_REQUIRES_RE.match(python_requires)
@@ -98,6 +98,30 @@ class PythonSupportMetadataTests(unittest.TestCase):
                 self.assertIn("Programming Language :: Python :: 3", classifiers)
                 self.assertIn("Programming Language :: Python :: 3 :: Only", classifiers)
 
+    def test_supported_range_matches_databricks_sdk_floor(self):
+        for label, kwargs in (("setup.py", self.primary), ("compat/setup.py", self.compat)):
+            with self.subTest(setup=label):
+                self.assertEqual(
+                    self._declared_range(kwargs, label),
+                    range(10, 13),
+                    f"{label} must not advertise Python versions rejected by "
+                    "databricks-sdk>=0.138.0",
+                )
+
+    def test_labs_manifests_match_supported_python_floor(self):
+        for relative_path in ("labs.yml", "compat/labs.yml"):
+            with self.subTest(path=relative_path):
+                manifest = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+                self.assertIn("min_python: 3.10", manifest)
+                self.assertNotIn("min_python: 3.8", manifest)
+
+    def test_conda_environment_uses_supported_python(self):
+        environment = (
+            REPO_ROOT / "environment.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("python=3.10.*", environment)
+        self.assertNotIn("python=3.9.*", environment)
+
 
 class CompatibilityDependencyMetadataTests(unittest.TestCase):
 
@@ -122,6 +146,17 @@ class CompatibilityDependencyMetadataTests(unittest.TestCase):
                     "run=databricks.labs.sdp_meta.__main__:main"
                 )
             },
+        )
+
+    def test_primary_setup_documents_current_compat_requirement(self):
+        setup_text = PRIMARY_SETUP.read_text(encoding="utf-8")
+        self.assertIn(
+            'install_requires=["databricks-labs-sdp-meta>=0.1.1,<0.2.0"]',
+            setup_text,
+        )
+        self.assertNotIn(
+            'install_requires=["databricks-labs-sdp-meta>=0.1.0"]',
+            setup_text,
         )
 
 
@@ -189,6 +224,91 @@ class VersionSynchronizationTests(unittest.TestCase):
             match.group("floor"), self.primary.get("version"),
             "the compat wrapper must require the primary release it ships "
             "with — an older primary wheel carries older compat files",
+        )
+
+
+class ReleaseDocumentationVersionTests(unittest.TestCase):
+    """Release-facing DAB guidance must follow the package version."""
+
+    RELEASE_FACING_DAB_FILES = (
+        "DAB_README.md",
+        "docs/docs/faq.md",
+        "docs/docs/getting-started/dabs.md",
+        "docs/docs/getting-started/quickstart.md",
+        "docs/docs/operations/troubleshooting.md",
+        "docs/docs/reference/dab-parameters.md",
+        "skills/sdp-meta/references/migration.md",
+        "src/databricks/labs/sdp_meta/bundle.py",
+        "src/databricks/labs/sdp_meta/cli.py",
+        "src/databricks/labs/sdp_meta/templates/dab/databricks_template_schema.json",
+        "src/databricks/labs/sdp_meta/templates/dab/template/"
+        "{{.bundle_name}}/README.md.tmpl",
+        "src/databricks/labs/sdp_meta/templates/dab/template/"
+        "{{.bundle_name}}/notebooks/init_sdp_meta_pipeline.py.tmpl",
+    )
+    RELEASE_VERSION_EXAMPLE_FILES = (
+        "demo/launch_interactive_demo.py",
+        "demo/SDP_META_INTERACTIVE_DEMO.py",
+    )
+
+    def test_dab_install_examples_use_current_release(self):
+        version = _setup_kwargs(PRIMARY_SETUP)["version"]
+        expected = f"databricks-labs-sdp-meta=={version}"
+        for relative_path in self.RELEASE_FACING_DAB_FILES:
+            with self.subTest(path=relative_path):
+                text = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+                self.assertIn(expected, text)
+                self.assertNotIn("databricks-labs-sdp-meta==0.1.0", text)
+
+    def test_demo_examples_use_current_release(self):
+        version = _setup_kwargs(PRIMARY_SETUP)["version"]
+        stale_install_examples = (
+            "databricks_labs_sdp_meta-0.1.0-py3-none-any.whl",
+            "(e.g. `0.1.0`)",
+            "(e.g. ``0.1.0``)",
+        )
+        for relative_path in self.RELEASE_VERSION_EXAMPLE_FILES:
+            with self.subTest(path=relative_path):
+                text = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+                self.assertIn(version, text)
+                for stale_example in stale_install_examples:
+                    self.assertNotIn(stale_example, text)
+
+
+class CiPythonMatrixTests(unittest.TestCase):
+    """CI must resolve both wheels on every advertised interpreter."""
+
+    def test_dependency_resolution_matrix_matches_python_metadata(self):
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "onpush.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("dependency-resolution:", workflow)
+        self.assertIn("python-version: ['3.10', '3.11', '3.12']", workflow)
+        self.assertIn("import databricks.labs.sdp_meta", workflow)
+        self.assertIn("import dlt_meta", workflow)
+
+
+class ReleaseWorkflowTests(unittest.TestCase):
+    """The release dry run must inspect and import both wheel artifacts."""
+
+    def test_release_workflow_verifies_wheel_assets_and_imports(self):
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "release.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Verify primary wheel assets and import", workflow)
+        self.assertIn("templates/dab/databricks_template_schema.json", workflow)
+        self.assertIn("Verify compatibility wheel import and startup", workflow)
+        self.assertIn("import databricks.labs.sdp_meta", workflow)
+        self.assertIn("import dlt_meta", workflow)
+
+    def test_obsolete_codeql_workflow_is_removed(self):
+        self.assertFalse(
+            (
+                REPO_ROOT
+                / ".github"
+                / "workflows"
+                / "codeql-analysis.yml"
+            ).exists()
         )
 
 
