@@ -44,9 +44,11 @@ from databricks.labs.sdp_meta.bundle import (
     _effective_pipeline_tasks,
     _discover_bundle_dir,
     _pipeline_ownership_errors,
+    _pipeline_ownership_errors_across_targets,
     _resolved_variable,
     _sdp_meta_sanity_checks,
     _split_dependency_errors,
+    _split_dependency_errors_across_targets,
     _wire_split_pipeline_dependencies,
     _stamp_sdp_meta_version,
     _transitive_dependencies,
@@ -600,6 +602,35 @@ class SanityChecksTests(unittest.TestCase):
         self.assertIn("task_0", dependencies)
         self.assertEqual(cycles, [])
 
+    def test_transitive_dependencies_handles_revisited_and_duplicate_edges(self):
+        tasks = {
+            "root": {
+                "depends_on": [
+                    {"task_key": "left"},
+                    {"task_key": "right"},
+                    {"task_key": "missing"},
+                    "invalid",
+                    {},
+                ]
+            },
+            "left": {"depends_on": [{"task_key": "shared"}]},
+            "right": {"depends_on": [{"task_key": "shared"}]},
+            "shared": {
+                "depends_on": [
+                    {"task_key": "left"},
+                    {"task_key": "left"},
+                ]
+            },
+        }
+
+        dependencies, cycles = _transitive_dependencies("root", tasks)
+
+        self.assertEqual(
+            dependencies,
+            {"left", "right", "shared", "missing"},
+        )
+        self.assertEqual(cycles, [["left", "shared", "left"]])
+
     def test_multi_topology_rejects_missing_split_dependency(self):
         with _tempdir() as tmp:
             self._make_bundle(tmp, layer="bronze_silver")
@@ -707,6 +738,25 @@ class SanityChecksTests(unittest.TestCase):
             ),
             "orders",
         )
+
+    def test_variable_resolution_ignores_malformed_target_shapes(self):
+        variables = {"dataflow_group": {"default": "base"}}
+        malformed_docs = (
+            {"targets": ["prod"]},
+            {"targets": {"prod": ["invalid"]}},
+            {"targets": {"prod": {"variables": ["invalid"]}}},
+        )
+        for databricks_doc in malformed_docs:
+            with self.subTest(databricks_doc=databricks_doc):
+                self.assertEqual(
+                    _resolved_variable(
+                        variables,
+                        databricks_doc,
+                        "dataflow_group",
+                        "prod",
+                    ),
+                    "base",
+                )
 
     def test_default_target_override_is_used_when_target_is_omitted(self):
         with _tempdir() as tmp:
@@ -937,6 +987,22 @@ class SanityChecksTests(unittest.TestCase):
                         errors,
                     )
 
+    def test_malformed_databricks_top_level_returns_clean_error(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp, layer="bronze", with_silver=False)
+            self._write(
+                tmp / "databricks.yml",
+                yaml.safe_dump(["not", "a", "mapping"]),
+            )
+
+            errors = _sdp_meta_sanity_checks(tmp)
+
+            self.assertTrue(
+                any("expected a mapping at the top level" in error
+                    for error in errors),
+                errors,
+            )
+
     def test_dependency_cycle_is_rejected(self):
         with _tempdir() as tmp:
             self._make_bundle(tmp, layer="bronze_silver")
@@ -1030,6 +1096,62 @@ class SanityChecksTests(unittest.TestCase):
                     self.assertTrue(
                         any("malformed `pipeline_task`" in error
                             for error in errors),
+                        errors,
+                    )
+
+    def test_invalid_and_unknown_pipeline_references_are_rejected(self):
+        cases = (
+            ("not-a-reference", "must reference a pipeline"),
+            (
+                "${resources.pipelines.unknown.id}",
+                "references unknown pipeline `unknown`",
+            ),
+        )
+        for pipeline_id, expected_error in cases:
+            with self.subTest(pipeline_id=pipeline_id):
+                with _tempdir() as tmp:
+                    self._make_bundle(
+                        tmp,
+                        layer="bronze",
+                        with_silver=False,
+                    )
+                    self._write(
+                        tmp / "conf" / "onboarding.yml",
+                        yaml.safe_dump([{
+                            "data_flow_id": "1",
+                            "data_flow_group": "g",
+                            "bronze_database_dev": "cat.bronze",
+                            "bronze_table": "orders",
+                        }]),
+                    )
+                    self._write(
+                        tmp / "resources" / "sdp_meta_pipelines.yml",
+                        yaml.safe_dump({
+                            "resources": {
+                                "pipelines": {
+                                    "bronze": self._configured_pipeline(
+                                        "bronze",
+                                        "g",
+                                    )
+                                },
+                                "jobs": {
+                                    "pipelines": {
+                                        "tasks": [{
+                                            "task_key": "bronze",
+                                            "pipeline_task": {
+                                                "pipeline_id": pipeline_id,
+                                            },
+                                        }]
+                                    }
+                                },
+                            }
+                        }),
+                    )
+
+                    errors = _sdp_meta_sanity_checks(tmp)
+
+                    self.assertTrue(
+                        any(expected_error in error for error in errors),
                         errors,
                     )
 
@@ -2650,6 +2772,22 @@ class PipelineOwnershipHelperTests(unittest.TestCase):
             ),
             base,
         )
+        self.assertIs(
+            _effective_pipeline_resources(
+                base,
+                {"targets": ["prod"]},
+                "prod",
+            ),
+            base,
+        )
+        self.assertIs(
+            _effective_pipeline_resources(
+                base,
+                {"targets": {"prod": ["invalid"]}},
+                "prod",
+            ),
+            base,
+        )
 
         effective = _effective_pipeline_resources(
             base,
@@ -2695,6 +2833,22 @@ class PipelineOwnershipHelperTests(unittest.TestCase):
             ),
             base,
         )
+        self.assertIs(
+            _effective_pipeline_tasks(
+                base,
+                {"targets": ["prod"]},
+                "prod",
+            ),
+            base,
+        )
+        self.assertIs(
+            _effective_pipeline_tasks(
+                base,
+                {"targets": {"prod": ["invalid"]}},
+                "prod",
+            ),
+            base,
+        )
 
         effective = _effective_pipeline_tasks(
             base,
@@ -2733,6 +2887,28 @@ class PipelineOwnershipHelperTests(unittest.TestCase):
         self.assertEqual(effective[1], "ignored")
         self.assertEqual(effective[2]["task_key"], "silver")
         self.assertEqual(effective[3], "ignored-target-task")
+
+    def test_cross_target_helpers_ignore_malformed_targets_mapping(self):
+        malformed_doc = {"targets": ["prod"]}
+
+        self.assertEqual(
+            _pipeline_ownership_errors_across_targets(
+                {},
+                {},
+                malformed_doc,
+            ),
+            [],
+        )
+        self.assertEqual(
+            _split_dependency_errors_across_targets(
+                {},
+                [],
+                {},
+                malformed_doc,
+                None,
+            ),
+            [],
+        )
 
     def test_split_validation_skips_unowned_and_unreferenced_specs(self):
         pipelines = {

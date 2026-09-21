@@ -1393,8 +1393,6 @@ def _sdp_meta_sanity_checks(
                 _, cycles = _transitive_dependencies(task_key, task_by_key)
                 for cycle in cycles:
                     cycle_nodes = cycle[:-1]
-                    if not cycle_nodes:
-                        continue
                     rotations = [
                         tuple(cycle_nodes[i:] + cycle_nodes[:i])
                         for i in range(len(cycle_nodes))
