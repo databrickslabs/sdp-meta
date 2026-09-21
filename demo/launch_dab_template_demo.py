@@ -93,6 +93,7 @@ from databricks.labs.sdp_meta.bundle import (  # noqa: E402
     FlowSpec,
     PipelineSpec,
     _flows_from_csv,
+    _sdp_meta_sanity_checks,
     bundle_add_flow,
     bundle_add_pipeline,
     bundle_init,
@@ -1261,6 +1262,239 @@ def stage_validate(bundle_dir: Path, profile: Optional[str]) -> None:
     _print_onboarding_summary(bundle_dir)
 
 
+_BUNDLE_TARGET_ENV_KEYS = (
+    "DATABRICKS_BUNDLE_TARGET",
+    "DATABRICKS_BUNDLE_ENV",
+)
+
+
+def _validate_with_target_environment(
+    bundle_dir: Path,
+    profile: Optional[str],
+    environment: Dict[str, str],
+) -> int:
+    """Run bundle validation with isolated Databricks target environment."""
+    saved = {
+        key: os.environ.get(key)
+        for key in _BUNDLE_TARGET_ENV_KEYS
+    }
+    try:
+        for key in _BUNDLE_TARGET_ENV_KEYS:
+            os.environ.pop(key, None)
+        os.environ.update(environment)
+        return bundle_validate(BundleValidateCommand(
+            bundle_dir=str(bundle_dir),
+            profile=profile,
+        ))
+    finally:
+        for key in _BUNDLE_TARGET_ENV_KEYS:
+            os.environ.pop(key, None)
+        for key, value in saved.items():
+            if value is not None:
+                os.environ[key] = value
+
+
+def _wire_transitive_pipeline_dependencies(bundle_dir: Path) -> None:
+    """Wire bronze -> secondary -> silver for the multi-pipeline scenario."""
+    pipelines_path = bundle_dir / "resources" / "sdp_meta_pipelines.yml"
+    pipelines_doc = yaml.safe_load(pipelines_path.read_text()) or {}
+    tasks = (
+        (((pipelines_doc.get("resources") or {}).get("jobs") or {})
+         .get("pipelines") or {}).get("tasks") or []
+    )
+    task_by_key = {
+        task.get("task_key"): task
+        for task in tasks
+        if isinstance(task, dict) and task.get("task_key")
+    }
+    required = {"bronze", "silver"}
+    missing = required - set(task_by_key)
+    if missing:
+        raise SystemExit(
+            "Customized validation stage expected pipeline task(s) "
+            f"{sorted(required)}; missing {sorted(missing)}"
+        )
+
+    secondary_candidates = [
+        task_key
+        for task_key, task in task_by_key.items()
+        if task_key not in required and isinstance(task.get("pipeline_task"), dict)
+    ]
+    if len(secondary_candidates) != 1:
+        raise SystemExit(
+            "Customized validation stage expected exactly one generated "
+            "secondary pipeline task; found "
+            f"{sorted(secondary_candidates)}"
+        )
+    secondary_task_key = secondary_candidates[0]
+    task_by_key[secondary_task_key]["depends_on"] = [
+        {"task_key": "bronze"}
+    ]
+    task_by_key["silver"]["depends_on"] = [
+        {"task_key": secondary_task_key}
+    ]
+    pipelines_path.write_text(yaml.safe_dump(pipelines_doc, sort_keys=False))
+
+
+def _set_target_group_overrides(
+    bundle_dir: Path,
+    *,
+    default_group: str,
+    dev_group: str,
+    prod_group: str,
+) -> None:
+    variables_path = bundle_dir / "resources" / "variables.yml"
+    variables_doc = yaml.safe_load(variables_path.read_text()) or {}
+    variables = variables_doc.setdefault("variables", {})
+    group_variable = variables.setdefault("dataflow_group", {})
+    if not isinstance(group_variable, dict):
+        raise SystemExit(
+            "Customized validation stage expected `dataflow_group` "
+            "to use mapping-form bundle variable configuration"
+        )
+    group_variable["default"] = default_group
+    variables_path.write_text(yaml.safe_dump(variables_doc, sort_keys=False))
+
+    databricks_path = bundle_dir / "databricks.yml"
+    databricks_doc = yaml.safe_load(databricks_path.read_text()) or {}
+    targets = databricks_doc.get("targets") or {}
+    for target_name, group in (("dev", dev_group), ("prod", prod_group)):
+        target_doc = targets.get(target_name)
+        if not isinstance(target_doc, dict):
+            raise SystemExit(
+                "Customized validation stage expected target "
+                f"`{target_name}` to be a mapping"
+            )
+        target_doc.setdefault("variables", {})["dataflow_group"] = group
+        if target_name == "prod":
+            target_doc.setdefault("workspace", {})["root_path"] = (
+                "/Workspace/Users/${workspace.current_user.userName}/"
+                ".bundle/${bundle.name}/${bundle.target}"
+            )
+    databricks_path.write_text(yaml.safe_dump(databricks_doc, sort_keys=False))
+
+
+def stage_assert_customized_bundle_validation(
+    scenario: Scenario,
+    bundle_dir: Path,
+    profile: Optional[str],
+) -> None:
+    """Exercise customized target and task wiring against a rendered bundle."""
+    if scenario.name != "multi_pipeline_cloudfiles":
+        return
+
+    _banner(
+        "STAGE 4B",
+        "custom target + transitive dependency validation",
+    )
+    _wire_transitive_pipeline_dependencies(bundle_dir)
+
+    variables_doc = yaml.safe_load(
+        (bundle_dir / "resources" / "variables.yml").read_text()
+    ) or {}
+    group_node = (variables_doc.get("variables") or {}).get("dataflow_group")
+    primary_group = (
+        group_node.get("default")
+        if isinstance(group_node, dict)
+        else None
+    )
+    if not primary_group:
+        raise SystemExit(
+            "Customized validation stage could not resolve the primary "
+            "`dataflow_group` variable"
+        )
+
+    with tempfile.TemporaryDirectory(prefix="dab_custom_validation_") as tmp:
+        tmp_root = Path(tmp)
+        target_bundle = tmp_root / "target_selection"
+        shutil.copytree(bundle_dir, target_bundle)
+
+        _set_target_group_overrides(
+            target_bundle,
+            default_group="wrong_default_group",
+            dev_group=primary_group,
+            prod_group="wrong_prod_group",
+        )
+        if _validate_with_target_environment(target_bundle, profile, {}) != 0:
+            raise SystemExit(
+                "Customized default-target validation failed"
+            )
+
+        _set_target_group_overrides(
+            target_bundle,
+            default_group="wrong_default_group",
+            dev_group="wrong_dev_group",
+            prod_group=primary_group,
+        )
+        for environment_key in _BUNDLE_TARGET_ENV_KEYS:
+            rc = _validate_with_target_environment(
+                target_bundle,
+                profile,
+                {environment_key: "prod"},
+            )
+            if rc != 0:
+                raise SystemExit(
+                    "Environment-selected target validation failed "
+                    f"for {environment_key}"
+                )
+
+        malformed_bundle = tmp_root / "malformed_targets"
+        shutil.copytree(bundle_dir, malformed_bundle)
+        databricks_path = malformed_bundle / "databricks.yml"
+        databricks_doc = yaml.safe_load(databricks_path.read_text()) or {}
+        databricks_doc["targets"] = "dev"
+        databricks_path.write_text(
+            yaml.safe_dump(databricks_doc, sort_keys=False)
+        )
+        malformed_errors = _sdp_meta_sanity_checks(malformed_bundle)
+        if not any(
+            "`targets` must be a mapping" in error
+            for error in malformed_errors
+        ):
+            raise SystemExit(
+                "Malformed-target validation did not return the "
+                f"expected clean error: {malformed_errors}"
+            )
+
+        cycle_bundle = tmp_root / "dependency_cycle"
+        shutil.copytree(bundle_dir, cycle_bundle)
+        pipelines_path = (
+            cycle_bundle / "resources" / "sdp_meta_pipelines.yml"
+        )
+        pipelines_doc = yaml.safe_load(pipelines_path.read_text()) or {}
+        tasks = (
+            (((pipelines_doc.get("resources") or {}).get("jobs") or {})
+             .get("pipelines") or {}).get("tasks") or []
+        )
+        bronze_task = next(
+            (
+                task for task in tasks
+                if isinstance(task, dict)
+                and task.get("task_key") == "bronze"
+            ),
+            None,
+        )
+        if bronze_task is None:
+            raise SystemExit(
+                "Dependency-cycle check could not find the bronze task"
+            )
+        bronze_task["depends_on"] = [{"task_key": "silver"}]
+        pipelines_path.write_text(
+            yaml.safe_dump(pipelines_doc, sort_keys=False)
+        )
+        cycle_errors = _sdp_meta_sanity_checks(cycle_bundle)
+        if not any("dependency cycle" in error for error in cycle_errors):
+            raise SystemExit(
+                "Dependency-cycle validation did not return the expected "
+                f"clean error: {cycle_errors}"
+            )
+
+    print(
+        "[STAGE 4B] Verified default and environment-selected targets, "
+        "transitive pipeline ordering, malformed targets, and cycle errors."
+    )
+
+
 # Per-flow keys that store a path to another conf file. The launcher rewrites
 # ``${workspace.file_path}/conf/...`` -> ``<uc_volume_conf_base>/...`` for
 # each one, AND drops the key entirely when the referenced file is missing
@@ -2057,6 +2291,11 @@ def main() -> int:
                 uc_source_schema=args.uc_source_schema,
                 create_missing_uc=args.create_missing_uc,
                 demo_data_volume_path=demo_data_volume_path,
+            )
+            stage_assert_customized_bundle_validation(
+                scenario,
+                bundle_dir,
+                args.profile,
             )
             stage_validate(bundle_dir, args.profile)
             if args.apply_deploy:

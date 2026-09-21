@@ -548,8 +548,15 @@ def _resolved_variable(
     node = variables.get(name) or {}
     value = node.get("default") if isinstance(node, dict) else None
     if target:
-        target_doc = ((databricks_doc.get("targets") or {}).get(target) or {})
+        targets = databricks_doc.get("targets") or {}
+        if not isinstance(targets, dict):
+            targets = {}
+        target_doc = targets.get(target) or {}
+        if not isinstance(target_doc, dict):
+            target_doc = {}
         overrides = target_doc.get("variables") or {}
+        if not isinstance(overrides, dict):
+            overrides = {}
         if name in overrides:
             override = overrides[name]
             if isinstance(override, dict):
@@ -631,28 +638,47 @@ def _transitive_dependencies(
     visited: set[str] = set()
     cycles: List[List[str]] = []
 
-    def _walk(current: str, path: List[str]) -> None:
+    def _dependency_keys(current: str) -> List[str]:
         task = task_by_key.get(current) or {}
-        for dependency in task.get("depends_on") or []:
-            if not isinstance(dependency, dict):
-                continue
-            dependency_key = dependency.get("task_key")
-            if not dependency_key:
-                continue
+        return [
+            dependency_key
+            for dependency in (task.get("depends_on") or [])
+            if isinstance(dependency, dict)
+            for dependency_key in [dependency.get("task_key")]
+            if dependency_key
+        ]
 
-            if dependency_key in path:
-                cycle_start = path.index(dependency_key)
-                cycle = path[cycle_start:] + [dependency_key]
-                if cycle not in cycles:
-                    cycles.append(cycle)
-                continue
+    path = [task_key]
+    path_indexes = {task_key: 0}
+    stack = [(task_key, iter(_dependency_keys(task_key)))]
+    while stack:
+        _, dependencies = stack[-1]
+        try:
+            dependency_key = next(dependencies)
+        except StopIteration:
+            completed, _ = stack.pop()
+            path_indexes.pop(completed, None)
+            path.pop()
+            continue
 
-            if dependency_key not in visited:
-                visited.add(dependency_key)
-                if dependency_key in task_by_key:
-                    _walk(dependency_key, path + [dependency_key])
+        if dependency_key in path_indexes:
+            cycle = path[path_indexes[dependency_key]:] + [dependency_key]
+            if cycle not in cycles:
+                cycles.append(cycle)
+            continue
 
-    _walk(task_key, [task_key])
+        if dependency_key in visited:
+            continue
+
+        visited.add(dependency_key)
+        if dependency_key in task_by_key:
+            path_indexes[dependency_key] = len(path)
+            path.append(dependency_key)
+            stack.append((
+                dependency_key,
+                iter(_dependency_keys(dependency_key)),
+            ))
+
     return visited, cycles
 
 
@@ -735,7 +761,12 @@ def _effective_pipeline_resources(
     """Return base pipelines with target resource overrides applied."""
     if target is None:
         return pipelines
-    target_doc = ((databricks_doc.get("targets") or {}).get(target) or {})
+    targets = databricks_doc.get("targets") or {}
+    if not isinstance(targets, dict):
+        return pipelines
+    target_doc = targets.get(target) or {}
+    if not isinstance(target_doc, dict):
+        return pipelines
     target_resources = target_doc.get("resources") or {}
     target_pipelines = (
         target_resources.get("pipelines")
@@ -760,10 +791,13 @@ def _pipeline_ownership_errors_across_targets(
     target: Optional[str] = None,
 ) -> List[str]:
     """Validate ownership for one target, or defaults plus every target."""
+    raw_targets = databricks_doc.get("targets") or {}
+    if not isinstance(raw_targets, dict):
+        raw_targets = {}
     targets = (
         [target]
         if target is not None
-        else [None] + list((databricks_doc.get("targets") or {}).keys())
+        else [None] + list(raw_targets.keys())
     )
     contexts: Dict[str, List[Optional[str]]] = {}
     for target_name in targets:
@@ -798,7 +832,12 @@ def _effective_pipeline_tasks(
     """Return target job tasks when explicitly overridden, otherwise base."""
     if target is None:
         return tasks
-    target_doc = ((databricks_doc.get("targets") or {}).get(target) or {})
+    targets = databricks_doc.get("targets") or {}
+    if not isinstance(targets, dict):
+        return tasks
+    target_doc = targets.get(target) or {}
+    if not isinstance(target_doc, dict):
+        return tasks
     target_resources = target_doc.get("resources") or {}
     target_jobs = (
         target_resources.get("jobs")
@@ -929,10 +968,13 @@ def _split_dependency_errors_across_targets(
     target: Optional[str],
 ) -> List[str]:
     """Validate split dependencies for one target or every target."""
+    raw_targets = databricks_doc.get("targets") or {}
+    if not isinstance(raw_targets, dict):
+        raw_targets = {}
     targets = (
         [target]
         if target is not None
-        else [None] + list((databricks_doc.get("targets") or {}).keys())
+        else [None] + list(raw_targets.keys())
     )
     contexts: Dict[str, List[Optional[str]]] = {}
     for target_name in targets:
@@ -980,6 +1022,9 @@ def _sdp_meta_sanity_checks(
         except yaml.YAMLError as exc:
             errors.append(f"databricks.yml: invalid YAML ({exc})")
             db_yml_doc = {}
+        if not isinstance(db_yml_doc, dict):
+            errors.append("databricks.yml: expected a mapping at the top level")
+            db_yml_doc = {}
         if db_yml_doc:
             for dotted_field, value in _find_yaml_placeholders(db_yml_doc):
                 errors.append(
@@ -1001,13 +1046,29 @@ def _sdp_meta_sanity_checks(
         errors.append(f"{variables_yml.relative_to(bundle_dir)}: invalid YAML ({exc})")
         return errors
 
-    # Match Databricks bundle target selection when --target is omitted.
-    # A single target is implicitly selected; otherwise exactly one target
-    # may be marked `default: true`. Ownership and split-job checks still
-    # walk every target when the caller did not pass `--target`.
+    raw_targets = db_yml_doc.get("targets") or {}
+    if not isinstance(raw_targets, dict):
+        errors.append("databricks.yml: `targets` must be a mapping")
+        targets: Dict[str, Any] = {}
+    else:
+        targets = raw_targets
+        for target_name, target_doc in targets.items():
+            if not isinstance(target_doc, dict):
+                errors.append(
+                    f"databricks.yml: target `{target_name}` must be a mapping"
+                )
+
+    # Match Databricks bundle target precedence when --target is omitted:
+    # current/legacy environment selection, declared default, then an only
+    # configured target. Ownership and split-job checks still walk every
+    # target unless the caller selected one via `--target` or environment.
+    if target is None:
+        target = (
+            os.environ.get("DATABRICKS_BUNDLE_TARGET")
+            or os.environ.get("DATABRICKS_BUNDLE_ENV")
+        )
     requested_target = target
     if target is None:
-        targets = db_yml_doc.get("targets") or {}
         default_targets = [
             target_name
             for target_name, target_doc in targets.items()
