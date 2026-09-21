@@ -44,11 +44,14 @@ from databricks.labs.sdp_meta.bundle import (
     _effective_pipeline_tasks,
     _discover_bundle_dir,
     _pipeline_ownership_errors,
+    _pipeline_ownership_errors_across_targets,
     _resolved_variable,
     _sdp_meta_sanity_checks,
     _split_dependency_errors,
+    _split_dependency_errors_across_targets,
     _wire_split_pipeline_dependencies,
     _stamp_sdp_meta_version,
+    _transitive_dependencies,
     bundle_add_flow,
     bundle_add_pipeline,
     bundle_init,
@@ -532,6 +535,102 @@ class SanityChecksTests(unittest.TestCase):
                 errors,
             )
 
+    def test_multi_topology_accepts_transitive_split_dependency(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp, layer="bronze_silver")
+            self._write(
+                tmp / "conf" / "onboarding.yml",
+                yaml.safe_dump([
+                    {
+                        "data_flow_id": "1",
+                        "data_flow_group": "orders",
+                        "bronze_database_dev": "cat.bronze",
+                        "bronze_table": "orders",
+                        "silver_database_dev": "cat.silver",
+                        "silver_table": "orders",
+                    },
+                    {
+                        "data_flow_id": "2",
+                        "data_flow_group": "customers",
+                        "bronze_database_dev": "cat.bronze",
+                        "bronze_table": "customers",
+                        "silver_database_dev": "cat.silver",
+                        "silver_table": "customers",
+                    },
+                    {
+                        "data_flow_id": "3",
+                        "data_flow_group": "audit",
+                        "bronze_database_dev": "cat.bronze",
+                        "bronze_table": "audit",
+                    },
+                ]),
+            )
+            self._write_configured_topologies(tmp)
+
+            path = tmp / "resources" / "sdp_meta_pipelines.yml"
+            doc = yaml.safe_load(path.read_text())
+            tasks = doc["resources"]["jobs"]["pipelines"]["tasks"]
+
+            silver_task = next(
+                task for task in tasks
+                if task["task_key"] == "orders_silver"
+            )
+            silver_task["depends_on"] = [{"task_key": "validation"}]
+
+            tasks.append({
+                "task_key": "validation",
+                "depends_on": [{"task_key": "orders_bronze"}],
+            })
+
+            path.write_text(yaml.safe_dump(doc))
+
+            self.assertEqual(_sdp_meta_sanity_checks(tmp), [])
+
+    def test_transitive_dependencies_handles_thousand_task_chain(self):
+        tasks = {
+            f"task_{index}": (
+                {"depends_on": [{"task_key": f"task_{index - 1}"}]}
+                if index
+                else {}
+            )
+            for index in range(1000)
+        }
+
+        dependencies, cycles = _transitive_dependencies("task_999", tasks)
+
+        self.assertEqual(len(dependencies), 999)
+        self.assertIn("task_0", dependencies)
+        self.assertEqual(cycles, [])
+
+    def test_transitive_dependencies_handles_revisited_and_duplicate_edges(self):
+        tasks = {
+            "root": {
+                "depends_on": [
+                    {"task_key": "left"},
+                    {"task_key": "right"},
+                    {"task_key": "missing"},
+                    "invalid",
+                    {},
+                ]
+            },
+            "left": {"depends_on": [{"task_key": "shared"}]},
+            "right": {"depends_on": [{"task_key": "shared"}]},
+            "shared": {
+                "depends_on": [
+                    {"task_key": "left"},
+                    {"task_key": "left"},
+                ]
+            },
+        }
+
+        dependencies, cycles = _transitive_dependencies("root", tasks)
+
+        self.assertEqual(
+            dependencies,
+            {"left", "right", "shared", "missing"},
+        )
+        self.assertEqual(cycles, [["left", "shared", "left"]])
+
     def test_multi_topology_rejects_missing_split_dependency(self):
         with _tempdir() as tmp:
             self._make_bundle(tmp, layer="bronze_silver")
@@ -615,8 +714,9 @@ class SanityChecksTests(unittest.TestCase):
             )
 
             self.assertEqual(_sdp_meta_sanity_checks(tmp, target="dev"), [])
-            errors = _sdp_meta_sanity_checks(tmp)
-            self.assertTrue(any("bronze.group='g'" in error for error in errors))
+            # With exactly one configured target, DAB selects it implicitly
+            # even when `default: true` is not present.
+            self.assertEqual(_sdp_meta_sanity_checks(tmp), [])
 
     def test_mapping_target_override_accepts_default_key(self):
         self.assertEqual(
@@ -638,6 +738,477 @@ class SanityChecksTests(unittest.TestCase):
             ),
             "orders",
         )
+
+    def test_variable_resolution_ignores_malformed_target_shapes(self):
+        variables = {"dataflow_group": {"default": "base"}}
+        malformed_docs = (
+            {"targets": ["prod"]},
+            {"targets": {"prod": ["invalid"]}},
+            {"targets": {"prod": {"variables": ["invalid"]}}},
+        )
+        for databricks_doc in malformed_docs:
+            with self.subTest(databricks_doc=databricks_doc):
+                self.assertEqual(
+                    _resolved_variable(
+                        variables,
+                        databricks_doc,
+                        "dataflow_group",
+                        "prod",
+                    ),
+                    "base",
+                )
+
+    def test_default_target_override_is_used_when_target_is_omitted(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp, layer="bronze", with_silver=False)
+            self._write(
+                tmp / "databricks.yml",
+                yaml.safe_dump({
+                    "bundle": {"name": "t"},
+                    "targets": {
+                        "dev": {
+                            "default": True,
+                            "variables": {"dataflow_group": "dev_group"},
+                        }
+                    },
+                }),
+            )
+            self._write(
+                tmp / "conf" / "onboarding.yml",
+                yaml.safe_dump([{
+                    "data_flow_id": "1",
+                    "data_flow_group": "dev_group",
+                    "bronze_database_dev": "cat.bronze",
+                    "bronze_table": "orders",
+                }]),
+            )
+            self._write(
+                tmp / "resources" / "sdp_meta_pipelines.yml",
+                yaml.safe_dump({
+                    "resources": {
+                        "pipelines": {
+                            "bronze": self._configured_pipeline(
+                                "bronze", "${var.dataflow_group}"
+                            )
+                        },
+                        "jobs": {
+                            "pipelines": {
+                                "tasks": [{
+                                    "task_key": "bronze",
+                                    "pipeline_task": {
+                                        "pipeline_id": (
+                                            "${resources.pipelines.bronze.id}"
+                                        )
+                                    },
+                                }]
+                            }
+                        },
+                    }
+                }),
+            )
+
+            self.assertEqual(_sdp_meta_sanity_checks(tmp), [])
+
+    def test_environment_target_takes_precedence_over_declared_default(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp, layer="bronze", with_silver=False)
+            self._write(
+                tmp / "databricks.yml",
+                yaml.safe_dump({
+                    "bundle": {"name": "t"},
+                    "targets": {
+                        "dev": {
+                            "default": True,
+                            "variables": {"dataflow_group": "dev_group"},
+                        },
+                        "prod": {
+                            "variables": {"dataflow_group": "prod_group"},
+                        },
+                    },
+                }),
+            )
+            self._write(
+                tmp / "conf" / "onboarding.yml",
+                yaml.safe_dump([{
+                    "data_flow_id": "1",
+                    "data_flow_group": "prod_group",
+                    "bronze_database_prod": "cat.bronze",
+                    "bronze_table": "orders",
+                }]),
+            )
+            self._write(
+                tmp / "resources" / "sdp_meta_pipelines.yml",
+                yaml.safe_dump({
+                    "resources": {
+                        "pipelines": {
+                            "bronze": self._configured_pipeline(
+                                "bronze", "${var.dataflow_group}"
+                            )
+                        },
+                        "jobs": {
+                            "pipelines": {
+                                "tasks": [{
+                                    "task_key": "bronze",
+                                    "pipeline_task": {
+                                        "pipeline_id": (
+                                            "${resources.pipelines.bronze.id}"
+                                        )
+                                    },
+                                }]
+                            }
+                        },
+                    }
+                }),
+            )
+
+            for variable in (
+                "DATABRICKS_BUNDLE_TARGET",
+                "DATABRICKS_BUNDLE_ENV",
+            ):
+                with self.subTest(variable=variable):
+                    with patch.dict(
+                        os.environ,
+                        {variable: "prod"},
+                        clear=True,
+                    ):
+                        self.assertEqual(_sdp_meta_sanity_checks(tmp), [])
+
+            with patch.dict(
+                os.environ,
+                {
+                    "DATABRICKS_BUNDLE_TARGET": "prod",
+                    "DATABRICKS_BUNDLE_ENV": "dev",
+                },
+                clear=True,
+            ):
+                self.assertEqual(_sdp_meta_sanity_checks(tmp), [])
+
+    def test_single_unmarked_target_is_used_when_target_is_omitted(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp, layer="bronze", with_silver=False)
+            self._write(
+                tmp / "databricks.yml",
+                yaml.safe_dump({
+                    "bundle": {"name": "t"},
+                    "targets": {
+                        "dev": {
+                            "variables": {"dataflow_group": "dev_group"},
+                        }
+                    },
+                }),
+            )
+            self._write(
+                tmp / "conf" / "onboarding.yml",
+                yaml.safe_dump([{
+                    "data_flow_id": "1",
+                    "data_flow_group": "dev_group",
+                }]),
+            )
+
+            self.assertEqual(_sdp_meta_sanity_checks(tmp), [])
+
+    def test_non_first_default_target_is_selected(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp, layer="bronze", with_silver=False)
+            self._write(
+                tmp / "databricks.yml",
+                yaml.safe_dump({
+                    "bundle": {"name": "t"},
+                    "targets": {
+                        "first": {
+                            "variables": {"dataflow_group": "wrong_group"},
+                        },
+                        "dev": {
+                            "default": True,
+                            "variables": {"dataflow_group": "dev_group"},
+                        },
+                    },
+                }, sort_keys=False),
+            )
+            self._write(
+                tmp / "conf" / "onboarding.yml",
+                yaml.safe_dump([{
+                    "data_flow_id": "1",
+                    "data_flow_group": "dev_group",
+                }]),
+            )
+
+            self.assertEqual(_sdp_meta_sanity_checks(tmp), [])
+
+    def test_multiple_default_targets_are_rejected(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp, layer="bronze", with_silver=False)
+            self._write(
+                tmp / "databricks.yml",
+                yaml.safe_dump({
+                    "bundle": {"name": "t"},
+                    "targets": {
+                        "dev": {"default": True},
+                        "prod": {"default": True},
+                    },
+                }),
+            )
+
+            errors = _sdp_meta_sanity_checks(tmp)
+            self.assertTrue(
+                any("multiple targets" in error and "default: true" in error
+                    for error in errors),
+                errors,
+            )
+
+    def test_malformed_targets_return_clean_errors(self):
+        malformed_cases = (
+            (
+                {"bundle": {"name": "t"}, "targets": "dev"},
+                "`targets` must be a mapping",
+            ),
+            (
+                {"bundle": {"name": "t"}, "targets": {"dev": ["invalid"]}},
+                "target `dev` must be a mapping",
+            ),
+        )
+        for databricks_doc, expected_error in malformed_cases:
+            with self.subTest(databricks_doc=databricks_doc):
+                with _tempdir() as tmp:
+                    self._make_bundle(
+                        tmp,
+                        layer="bronze",
+                        with_silver=False,
+                    )
+                    self._write(
+                        tmp / "databricks.yml",
+                        yaml.safe_dump(databricks_doc),
+                    )
+
+                    errors = _sdp_meta_sanity_checks(tmp)
+
+                    self.assertTrue(
+                        any(expected_error in error for error in errors),
+                        errors,
+                    )
+
+    def test_malformed_databricks_top_level_returns_clean_error(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp, layer="bronze", with_silver=False)
+            self._write(
+                tmp / "databricks.yml",
+                yaml.safe_dump(["not", "a", "mapping"]),
+            )
+
+            errors = _sdp_meta_sanity_checks(tmp)
+
+            self.assertTrue(
+                any("expected a mapping at the top level" in error
+                    for error in errors),
+                errors,
+            )
+
+    def test_dependency_cycle_is_rejected(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp, layer="bronze_silver")
+            self._write(
+                tmp / "conf" / "onboarding.yml",
+                yaml.safe_dump([
+                    {
+                        "data_flow_id": "1",
+                        "data_flow_group": "orders",
+                        "bronze_database_dev": "cat.bronze",
+                        "bronze_table": "orders",
+                        "silver_database_dev": "cat.silver",
+                        "silver_table": "orders",
+                    },
+                    {
+                        "data_flow_id": "2",
+                        "data_flow_group": "customers",
+                        "bronze_database_dev": "cat.bronze",
+                        "bronze_table": "customers",
+                        "silver_database_dev": "cat.silver",
+                        "silver_table": "customers",
+                    },
+                    {
+                        "data_flow_id": "3",
+                        "data_flow_group": "audit",
+                        "bronze_database_dev": "cat.bronze",
+                        "bronze_table": "audit",
+                    },
+                ]),
+            )
+            self._write_configured_topologies(tmp)
+
+            path = tmp / "resources" / "sdp_meta_pipelines.yml"
+            doc = yaml.safe_load(path.read_text())
+            tasks = doc["resources"]["jobs"]["pipelines"]["tasks"]
+
+            bronze_task = next(
+                task for task in tasks
+                if task["task_key"] == "orders_bronze"
+            )
+            silver_task = next(
+                task for task in tasks
+                if task["task_key"] == "orders_silver"
+            )
+            bronze_task["depends_on"] = [{"task_key": "orders_silver"}]
+            silver_task["depends_on"] = [{"task_key": "orders_bronze"}]
+            path.write_text(yaml.safe_dump(doc))
+
+            errors = _sdp_meta_sanity_checks(tmp)
+            self.assertTrue(
+                any("dependency cycle" in error for error in errors),
+                errors,
+            )
+
+    def test_malformed_pipeline_task_string_and_null_are_rejected(self):
+        for malformed in ("not-a-mapping", None):
+            with self.subTest(pipeline_task=malformed):
+                with _tempdir() as tmp:
+                    self._make_bundle(tmp, layer="bronze", with_silver=False)
+                    self._write(
+                        tmp / "conf" / "onboarding.yml",
+                        yaml.safe_dump([{
+                            "data_flow_id": "1",
+                            "data_flow_group": "g",
+                            "bronze_database_dev": "cat.bronze",
+                            "bronze_table": "orders",
+                        }]),
+                    )
+                    self._write(
+                        tmp / "resources" / "sdp_meta_pipelines.yml",
+                        yaml.safe_dump({
+                            "resources": {
+                                "pipelines": {
+                                    "bronze": self._configured_pipeline(
+                                        "bronze", "g"
+                                    )
+                                },
+                                "jobs": {
+                                    "pipelines": {
+                                        "tasks": [{
+                                            "task_key": "bronze",
+                                            "pipeline_task": malformed,
+                                        }]
+                                    }
+                                },
+                            }
+                        }),
+                    )
+
+                    errors = _sdp_meta_sanity_checks(tmp)
+                    self.assertTrue(
+                        any("malformed `pipeline_task`" in error
+                            for error in errors),
+                        errors,
+                    )
+
+    def test_invalid_and_unknown_pipeline_references_are_rejected(self):
+        cases = (
+            ("not-a-reference", "must reference a pipeline"),
+            (
+                "${resources.pipelines.unknown.id}",
+                "references unknown pipeline `unknown`",
+            ),
+        )
+        for pipeline_id, expected_error in cases:
+            with self.subTest(pipeline_id=pipeline_id):
+                with _tempdir() as tmp:
+                    self._make_bundle(
+                        tmp,
+                        layer="bronze",
+                        with_silver=False,
+                    )
+                    self._write(
+                        tmp / "conf" / "onboarding.yml",
+                        yaml.safe_dump([{
+                            "data_flow_id": "1",
+                            "data_flow_group": "g",
+                            "bronze_database_dev": "cat.bronze",
+                            "bronze_table": "orders",
+                        }]),
+                    )
+                    self._write(
+                        tmp / "resources" / "sdp_meta_pipelines.yml",
+                        yaml.safe_dump({
+                            "resources": {
+                                "pipelines": {
+                                    "bronze": self._configured_pipeline(
+                                        "bronze",
+                                        "g",
+                                    )
+                                },
+                                "jobs": {
+                                    "pipelines": {
+                                        "tasks": [{
+                                            "task_key": "bronze",
+                                            "pipeline_task": {
+                                                "pipeline_id": pipeline_id,
+                                            },
+                                        }]
+                                    }
+                                },
+                            }
+                        }),
+                    )
+
+                    errors = _sdp_meta_sanity_checks(tmp)
+
+                    self.assertTrue(
+                        any(expected_error in error for error in errors),
+                        errors,
+                    )
+
+    def test_non_pipeline_intermediate_task_is_accepted(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp, layer="bronze_silver")
+            self._write(
+                tmp / "conf" / "onboarding.yml",
+                yaml.safe_dump([
+                    {
+                        "data_flow_id": "1",
+                        "data_flow_group": "orders",
+                        "bronze_database_dev": "cat.bronze",
+                        "bronze_table": "orders",
+                        "silver_database_dev": "cat.silver",
+                        "silver_table": "orders",
+                    },
+                    {
+                        "data_flow_id": "2",
+                        "data_flow_group": "customers",
+                        "bronze_database_dev": "cat.bronze",
+                        "bronze_table": "customers",
+                        "silver_database_dev": "cat.silver",
+                        "silver_table": "customers",
+                    },
+                    {
+                        "data_flow_id": "3",
+                        "data_flow_group": "audit",
+                        "bronze_database_dev": "cat.bronze",
+                        "bronze_table": "audit",
+                    },
+                ]),
+            )
+            self._write_configured_topologies(tmp)
+
+            path = tmp / "resources" / "sdp_meta_pipelines.yml"
+            doc = yaml.safe_load(path.read_text())
+            tasks = doc["resources"]["jobs"]["pipelines"]["tasks"]
+
+            silver_task = next(
+                task for task in tasks
+                if task["task_key"] == "orders_silver"
+            )
+            silver_task["depends_on"] = [{"task_key": "validation"}]
+            tasks.append({
+                "task_key": "validation",
+                "depends_on": [{"task_key": "orders_bronze"}],
+            })
+            path.write_text(yaml.safe_dump(doc))
+
+            errors = _sdp_meta_sanity_checks(tmp)
+            self.assertFalse(
+                any("validation" in error and "pipeline_task" in error
+                    for error in errors),
+                errors,
+            )
+            self.assertEqual(errors, [])
 
     def test_sentinel_dependency_is_flagged(self):
         with _tempdir() as tmp:
@@ -2201,6 +2772,22 @@ class PipelineOwnershipHelperTests(unittest.TestCase):
             ),
             base,
         )
+        self.assertIs(
+            _effective_pipeline_resources(
+                base,
+                {"targets": ["prod"]},
+                "prod",
+            ),
+            base,
+        )
+        self.assertIs(
+            _effective_pipeline_resources(
+                base,
+                {"targets": {"prod": ["invalid"]}},
+                "prod",
+            ),
+            base,
+        )
 
         effective = _effective_pipeline_resources(
             base,
@@ -2246,6 +2833,22 @@ class PipelineOwnershipHelperTests(unittest.TestCase):
             ),
             base,
         )
+        self.assertIs(
+            _effective_pipeline_tasks(
+                base,
+                {"targets": ["prod"]},
+                "prod",
+            ),
+            base,
+        )
+        self.assertIs(
+            _effective_pipeline_tasks(
+                base,
+                {"targets": {"prod": ["invalid"]}},
+                "prod",
+            ),
+            base,
+        )
 
         effective = _effective_pipeline_tasks(
             base,
@@ -2284,6 +2887,28 @@ class PipelineOwnershipHelperTests(unittest.TestCase):
         self.assertEqual(effective[1], "ignored")
         self.assertEqual(effective[2]["task_key"], "silver")
         self.assertEqual(effective[3], "ignored-target-task")
+
+    def test_cross_target_helpers_ignore_malformed_targets_mapping(self):
+        malformed_doc = {"targets": ["prod"]}
+
+        self.assertEqual(
+            _pipeline_ownership_errors_across_targets(
+                {},
+                {},
+                malformed_doc,
+            ),
+            [],
+        )
+        self.assertEqual(
+            _split_dependency_errors_across_targets(
+                {},
+                [],
+                {},
+                malformed_doc,
+                None,
+            ),
+            [],
+        )
 
     def test_split_validation_skips_unowned_and_unreferenced_specs(self):
         pipelines = {

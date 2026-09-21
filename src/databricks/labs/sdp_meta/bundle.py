@@ -526,7 +526,10 @@ _PIPELINE_REF_RE = re.compile(
 
 def _pipeline_reference(task: Dict[str, Any]) -> Optional[str]:
     """Return the resource key referenced by a pipeline job task."""
-    pipeline_id = (task.get("pipeline_task") or {}).get("pipeline_id")
+    pipeline_task = task.get("pipeline_task")
+    if not isinstance(pipeline_task, dict):
+        return None
+    pipeline_id = pipeline_task.get("pipeline_id")
     match = (
         _PIPELINE_REF_RE.fullmatch(pipeline_id)
         if isinstance(pipeline_id, str)
@@ -545,8 +548,15 @@ def _resolved_variable(
     node = variables.get(name) or {}
     value = node.get("default") if isinstance(node, dict) else None
     if target:
-        target_doc = ((databricks_doc.get("targets") or {}).get(target) or {})
+        targets = databricks_doc.get("targets") or {}
+        if not isinstance(targets, dict):
+            targets = {}
+        target_doc = targets.get(target) or {}
+        if not isinstance(target_doc, dict):
+            target_doc = {}
         overrides = target_doc.get("variables") or {}
+        if not isinstance(overrides, dict):
+            overrides = {}
         if name in overrides:
             override = overrides[name]
             if isinstance(override, dict):
@@ -618,6 +628,58 @@ def _legacy_topology_errors(
                 f"bronze_silver={has_combined}"
             )
     return errors
+
+
+def _transitive_dependencies(
+    task_key: str,
+    task_by_key: Dict[str, Dict[str, Any]],
+) -> Tuple[set[str], List[List[str]]]:
+    """Return reachable dependencies and dependency cycles for a job task."""
+    visited: set[str] = set()
+    cycles: List[List[str]] = []
+
+    def _dependency_keys(current: str) -> List[str]:
+        task = task_by_key.get(current) or {}
+        return [
+            dependency_key
+            for dependency in (task.get("depends_on") or [])
+            if isinstance(dependency, dict)
+            for dependency_key in [dependency.get("task_key")]
+            if dependency_key
+        ]
+
+    path = [task_key]
+    path_indexes = {task_key: 0}
+    stack = [(task_key, iter(_dependency_keys(task_key)))]
+    while stack:
+        _, dependencies = stack[-1]
+        try:
+            dependency_key = next(dependencies)
+        except StopIteration:
+            completed, _ = stack.pop()
+            path_indexes.pop(completed, None)
+            path.pop()
+            continue
+
+        if dependency_key in path_indexes:
+            cycle = path[path_indexes[dependency_key]:] + [dependency_key]
+            if cycle not in cycles:
+                cycles.append(cycle)
+            continue
+
+        if dependency_key in visited:
+            continue
+
+        visited.add(dependency_key)
+        if dependency_key in task_by_key:
+            path_indexes[dependency_key] = len(path)
+            path.append(dependency_key)
+            stack.append((
+                dependency_key,
+                iter(_dependency_keys(dependency_key)),
+            ))
+
+    return visited, cycles
 
 
 def _pipeline_ownership_errors(
@@ -699,7 +761,12 @@ def _effective_pipeline_resources(
     """Return base pipelines with target resource overrides applied."""
     if target is None:
         return pipelines
-    target_doc = ((databricks_doc.get("targets") or {}).get(target) or {})
+    targets = databricks_doc.get("targets") or {}
+    if not isinstance(targets, dict):
+        return pipelines
+    target_doc = targets.get(target) or {}
+    if not isinstance(target_doc, dict):
+        return pipelines
     target_resources = target_doc.get("resources") or {}
     target_pipelines = (
         target_resources.get("pipelines")
@@ -724,10 +791,13 @@ def _pipeline_ownership_errors_across_targets(
     target: Optional[str] = None,
 ) -> List[str]:
     """Validate ownership for one target, or defaults plus every target."""
+    raw_targets = databricks_doc.get("targets") or {}
+    if not isinstance(raw_targets, dict):
+        raw_targets = {}
     targets = (
         [target]
         if target is not None
-        else [None] + list((databricks_doc.get("targets") or {}).keys())
+        else [None] + list(raw_targets.keys())
     )
     contexts: Dict[str, List[Optional[str]]] = {}
     for target_name in targets:
@@ -762,7 +832,12 @@ def _effective_pipeline_tasks(
     """Return target job tasks when explicitly overridden, otherwise base."""
     if target is None:
         return tasks
-    target_doc = ((databricks_doc.get("targets") or {}).get(target) or {})
+    targets = databricks_doc.get("targets") or {}
+    if not isinstance(targets, dict):
+        return tasks
+    target_doc = targets.get(target) or {}
+    if not isinstance(target_doc, dict):
+        return tasks
     target_resources = target_doc.get("resources") or {}
     target_jobs = (
         target_resources.get("jobs")
@@ -867,12 +942,9 @@ def _split_dependency_errors(
         }
         if not matching_bronze or silver_key not in refs:
             continue
-        silver_task = task_by_key[refs[silver_key][0]]
-        dependencies = {
-            dep.get("task_key")
-            for dep in (silver_task.get("depends_on") or [])
-            if isinstance(dep, dict)
-        }
+        dependencies, _ = _transitive_dependencies(
+            refs[silver_key][0], task_by_key
+        )
         matching_tasks = {
             task_key
             for key in matching_bronze
@@ -896,10 +968,13 @@ def _split_dependency_errors_across_targets(
     target: Optional[str],
 ) -> List[str]:
     """Validate split dependencies for one target or every target."""
+    raw_targets = databricks_doc.get("targets") or {}
+    if not isinstance(raw_targets, dict):
+        raw_targets = {}
     targets = (
         [target]
         if target is not None
-        else [None] + list((databricks_doc.get("targets") or {}).keys())
+        else [None] + list(raw_targets.keys())
     )
     contexts: Dict[str, List[Optional[str]]] = {}
     for target_name in targets:
@@ -947,6 +1022,9 @@ def _sdp_meta_sanity_checks(
         except yaml.YAMLError as exc:
             errors.append(f"databricks.yml: invalid YAML ({exc})")
             db_yml_doc = {}
+        if not isinstance(db_yml_doc, dict):
+            errors.append("databricks.yml: expected a mapping at the top level")
+            db_yml_doc = {}
         if db_yml_doc:
             for dotted_field, value in _find_yaml_placeholders(db_yml_doc):
                 errors.append(
@@ -967,6 +1045,44 @@ def _sdp_meta_sanity_checks(
     except yaml.YAMLError as exc:
         errors.append(f"{variables_yml.relative_to(bundle_dir)}: invalid YAML ({exc})")
         return errors
+
+    raw_targets = db_yml_doc.get("targets") or {}
+    if not isinstance(raw_targets, dict):
+        errors.append("databricks.yml: `targets` must be a mapping")
+        targets: Dict[str, Any] = {}
+    else:
+        targets = raw_targets
+        for target_name, target_doc in targets.items():
+            if not isinstance(target_doc, dict):
+                errors.append(
+                    f"databricks.yml: target `{target_name}` must be a mapping"
+                )
+
+    # Match Databricks bundle target precedence when --target is omitted:
+    # current/legacy environment selection, declared default, then an only
+    # configured target. Ownership and split-job checks still walk every
+    # target unless the caller selected one via `--target` or environment.
+    if target is None:
+        target = (
+            os.environ.get("DATABRICKS_BUNDLE_TARGET")
+            or os.environ.get("DATABRICKS_BUNDLE_ENV")
+        )
+    requested_target = target
+    if target is None:
+        default_targets = [
+            target_name
+            for target_name, target_doc in targets.items()
+            if isinstance(target_doc, dict) and target_doc.get("default") is True
+        ]
+        if len(default_targets) > 1:
+            errors.append(
+                "databricks.yml: multiple targets are marked `default: true`: "
+                f"{sorted(default_targets)}"
+            )
+        elif len(default_targets) == 1:
+            target = default_targets[0]
+        elif len(targets) == 1:
+            target = next(iter(targets))
 
     variables = variables_doc.get("variables", {}) or {}
 
@@ -1161,7 +1277,7 @@ def _sdp_meta_sanity_checks(
                     )
             errors.extend(
                 _pipeline_ownership_errors_across_targets(
-                    pipes, variables, db_yml_doc, target
+                    pipes, variables, db_yml_doc, requested_target
                 )
             )
 
@@ -1241,18 +1357,25 @@ def _sdp_meta_sanity_checks(
             }
             refs: Dict[str, List[str]] = {}
             for task_key, task in task_by_key.items():
-                ref = _pipeline_reference(task)
-                if not ref:
+                pipeline_task = task.get("pipeline_task")
+                if "pipeline_task" in task and not isinstance(pipeline_task, dict):
                     errors.append(
-                        f"Job task `{task_key}` must reference a pipeline as "
-                        "`${resources.pipelines.<key>.id}`"
+                        f"Job task `{task_key}` has malformed `pipeline_task`; "
+                        "expected a mapping"
                     )
-                    continue
-                refs.setdefault(ref, []).append(task_key)
-                if ref not in configured:
-                    errors.append(
-                        f"Job task `{task_key}` references unknown pipeline `{ref}`"
-                    )
+                elif isinstance(pipeline_task, dict):
+                    ref = _pipeline_reference(task)
+                    if not ref:
+                        errors.append(
+                            f"Job task `{task_key}` must reference a pipeline as "
+                            "`${resources.pipelines.<key>.id}`"
+                        )
+                    else:
+                        refs.setdefault(ref, []).append(task_key)
+                        if ref not in configured:
+                            errors.append(
+                                f"Job task `{task_key}` references unknown pipeline `{ref}`"
+                            )
                 dependencies = {
                     dep.get("task_key")
                     for dep in (task.get("depends_on") or [])
@@ -1263,6 +1386,24 @@ def _sdp_meta_sanity_checks(
                     errors.append(
                         f"Job task `{task_key}` depends on unknown task(s) "
                         f"{sorted(unknown_dependencies)}"
+                    )
+
+            reported_cycles: set[Tuple[str, ...]] = set()
+            for task_key in task_by_key:
+                _, cycles = _transitive_dependencies(task_key, task_by_key)
+                for cycle in cycles:
+                    cycle_nodes = cycle[:-1]
+                    rotations = [
+                        tuple(cycle_nodes[i:] + cycle_nodes[:i])
+                        for i in range(len(cycle_nodes))
+                    ]
+                    canonical = min(rotations)
+                    if canonical in reported_cycles:
+                        continue
+                    reported_cycles.add(canonical)
+                    errors.append(
+                        "Job `pipelines` contains a dependency cycle: "
+                        + " -> ".join(cycle)
                     )
 
             for key in configured:
@@ -1279,7 +1420,7 @@ def _sdp_meta_sanity_checks(
                     tasks,
                     variables,
                     db_yml_doc,
-                    target,
+                    requested_target,
                 )
             )
 

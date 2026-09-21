@@ -1054,5 +1054,244 @@ class StageBundleInitCleanupTests(unittest.TestCase):
             self.assertTrue((bundle_dir / "fresh.txt").exists())
 
 
+class CustomizedBundleValidationStageTests(unittest.TestCase):
+    """Offline coverage for the customized-bundle validation stage."""
+
+    @classmethod
+    def setUpClass(cls):
+        launcher = REPO_ROOT / "demo" / "launch_dab_template_demo.py"
+        spec = importlib.util.spec_from_file_location(
+            "launch_dab_template_demo_customized_validation",
+            launcher,
+        )
+        cls.module = importlib.util.module_from_spec(spec)
+        sys.modules[
+            "launch_dab_template_demo_customized_validation"
+        ] = cls.module
+        spec.loader.exec_module(cls.module)
+
+    @staticmethod
+    def _pipeline(layer: str, group: str) -> dict:
+        config = {
+            "layer": layer,
+            "sdp_meta_dependency": "${var.sdp_meta_dependency}",
+        }
+        if layer in ("bronze", "bronze_silver"):
+            config.update({
+                "bronze.dataflowspecTable": "cat.meta.bronze_specs",
+                "bronze.group": group,
+            })
+        if layer in ("silver", "bronze_silver"):
+            config.update({
+                "silver.dataflowspecTable": "cat.meta.silver_specs",
+                "silver.group": group,
+            })
+        return {"schema": "cat.target", "configuration": config}
+
+    def _write_bundle(self, root: Path) -> None:
+        import yaml
+
+        (root / "resources").mkdir(parents=True)
+        (root / "conf").mkdir()
+        (root / "databricks.yml").write_text(yaml.safe_dump({
+            "bundle": {"name": "customized_validation_it"},
+            "targets": {
+                "dev": {"default": True, "variables": {}},
+                "prod": {"variables": {}},
+            },
+        }))
+        (root / "resources" / "variables.yml").write_text(
+            yaml.safe_dump({
+                "variables": {
+                    "layer": {"default": "bronze_silver"},
+                    "pipeline_mode": {"default": "split"},
+                    "dataflow_group": {"default": "primary_group"},
+                    "onboarding_file_name": {"default": "onboarding.yml"},
+                    "wheel_source": {"default": "pypi"},
+                    "sdp_meta_dependency": {
+                        "default": "databricks-labs-sdp-meta==0.1.1"
+                    },
+                }
+            })
+        )
+        (root / "conf" / "onboarding.yml").write_text(yaml.safe_dump([
+            {
+                "data_flow_id": "1",
+                "data_flow_group": "primary_group",
+                "bronze_database_dev": "cat.bronze",
+                "bronze_table": "orders_bronze",
+                "silver_database_dev": "cat.silver",
+                "silver_table": "orders",
+            },
+            {
+                "data_flow_id": "2",
+                "data_flow_group": "secondary_group",
+                "bronze_database_dev": "cat.bronze_secondary",
+                "bronze_table": "customers_bronze",
+                "silver_database_dev": "cat.silver_secondary",
+                "silver_table": "customers",
+            },
+        ]))
+        (root / "resources" / "sdp_meta_pipelines.yml").write_text(
+            yaml.safe_dump({
+                "resources": {
+                    "pipelines": {
+                        "bronze": self._pipeline(
+                            "bronze",
+                            "${var.dataflow_group}",
+                        ),
+                        "silver": self._pipeline(
+                            "silver",
+                            "${var.dataflow_group}",
+                        ),
+                        "secondary": self._pipeline(
+                            "bronze_silver",
+                            "secondary_group",
+                        ),
+                    },
+                    "jobs": {
+                        "pipelines": {
+                            "tasks": [
+                                {
+                                    "task_key": "bronze",
+                                    "pipeline_task": {
+                                        "pipeline_id": (
+                                            "${resources.pipelines.bronze.id}"
+                                        )
+                                    },
+                                },
+                                {
+                                    "task_key": "silver",
+                                    "pipeline_task": {
+                                        "pipeline_id": (
+                                            "${resources.pipelines.silver.id}"
+                                        )
+                                    },
+                                    "depends_on": [{"task_key": "bronze"}],
+                                },
+                                {
+                                    "task_key": "secondary",
+                                    "pipeline_task": {
+                                        "pipeline_id": (
+                                            "${resources.pipelines.secondary.id}"
+                                        )
+                                    },
+                                },
+                            ]
+                        }
+                    },
+                }
+            })
+        )
+        (root / "resources" / "sdp_meta_onboarding_job.yml").write_text(
+            yaml.safe_dump({
+                "resources": {
+                    "jobs": {
+                        "onboarding": {
+                            "tasks": [{
+                                "task_key": "onboard_dataflowspecs",
+                                "python_wheel_task": {
+                                    "named_parameters": {
+                                        "onboard_layer": "${var.layer}",
+                                        "bronze_dataflowspec_table": (
+                                            "bronze_specs"
+                                        ),
+                                        "silver_dataflowspec_table": (
+                                            "silver_specs"
+                                        ),
+                                    }
+                                },
+                            }]
+                        }
+                    }
+                }
+            })
+        )
+
+    def test_stage_exercises_target_environment_and_transitive_wiring(self):
+        import os
+        import tempfile
+        import yaml
+        from unittest.mock import patch
+
+        observed_environments = []
+
+        def fake_validate(_command):
+            observed_environments.append((
+                os.environ.get("DATABRICKS_BUNDLE_TARGET"),
+                os.environ.get("DATABRICKS_BUNDLE_ENV"),
+            ))
+            return 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle_dir = Path(tmp) / "bundle"
+            bundle_dir.mkdir()
+            self._write_bundle(bundle_dir)
+            scenario = self.module.SCENARIOS["multi_pipeline_cloudfiles"]
+            with patch.dict(
+                os.environ,
+                {
+                    "DATABRICKS_BUNDLE_TARGET": "original_target",
+                    "DATABRICKS_BUNDLE_ENV": "original_env",
+                },
+                clear=False,
+            ), patch.object(
+                self.module,
+                "bundle_validate",
+                side_effect=fake_validate,
+            ):
+                self.module.stage_assert_customized_bundle_validation(
+                    scenario,
+                    bundle_dir,
+                    profile="fevm",
+                )
+                self.assertEqual(
+                    os.environ["DATABRICKS_BUNDLE_TARGET"],
+                    "original_target",
+                )
+                self.assertEqual(
+                    os.environ["DATABRICKS_BUNDLE_ENV"],
+                    "original_env",
+                )
+
+            self.assertEqual(
+                observed_environments,
+                [
+                    (None, None),
+                    ("prod", None),
+                    (None, "prod"),
+                ],
+            )
+            pipelines_doc = yaml.safe_load(
+                (
+                    bundle_dir
+                    / "resources"
+                    / "sdp_meta_pipelines.yml"
+                ).read_text()
+            )
+            tasks = {
+                task["task_key"]: task
+                for task in pipelines_doc["resources"]["jobs"][
+                    "pipelines"
+                ]["tasks"]
+            }
+            self.assertEqual(
+                tasks["secondary"]["depends_on"],
+                [{"task_key": "bronze"}],
+            )
+            self.assertEqual(
+                tasks["silver"]["depends_on"],
+                [{"task_key": "secondary"}],
+            )
+
+    def test_stage_skips_non_multi_pipeline_scenarios(self):
+        scenario = self.module.SCENARIOS["cloudfiles"]
+        self.module.stage_assert_customized_bundle_validation(
+            scenario,
+            Path("/does/not/exist"),
+            profile=None,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
