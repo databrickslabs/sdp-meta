@@ -8,6 +8,6 @@
 #
 # For development and test dependencies, use requirements-dev.txt instead.
 
-setuptools>=65,<83
+setuptools>=84.0.0,<85
 databricks-sdk>=0.20,<1
 PyYAML>=6.0.3,<7
