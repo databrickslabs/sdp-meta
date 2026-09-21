@@ -81,7 +81,7 @@ DEV_REQUIREMENTS = [
     "delta-spark==3.0.0",
     "pytest>=7.0.0",
     "coverage>=7.0.0",
-    "pyspark==3.5.5"
+    "pyspark==4.2.0"
 ]
 
 IT_REQUIREMENTS = ["typer[all]==0.27.2"]
