@@ -6,7 +6,7 @@ click==8.5.0
 # Databricks SDK — required by demo scripts (launch_*_demo.py) and the
 # sdp-meta CLI (`python -m databricks.labs.sdp_meta.cli`, installed from
 # the wheel built by databricks_app/start.sh).
-databricks-sdk>=0.25
+databricks-sdk>=0.140.0
 
 # Config parsing used by onboarding, demo scripts, and parse-spec endpoint
 PyYAML>=6.0.3
