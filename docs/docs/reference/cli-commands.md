@@ -107,6 +107,9 @@ topology, but duplicate bronze, duplicate silver, and combined/split overlap
 are rejected before files are written. The preflight checks the complete
 merged topology—including every bundle target override—so a pre-existing
 ownership conflict must be repaired before another pipeline can be added.
+Dry-run performs the same preflight checks without writing files; it returns a
+non-zero result when the requested group has no onboarding rows or the merged
+topology would be invalid.
 
 ## `bundle-validate`
 

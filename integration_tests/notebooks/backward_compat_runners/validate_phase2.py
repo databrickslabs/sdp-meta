@@ -14,10 +14,11 @@
 #   (3) Schema compatibility. The dataflowspec persisted by v0.0.10
 #       must read cleanly through v0.1.0's ``BronzeDataflowSpec`` /
 #       ``SilverDataflowSpec`` dataclasses, with new v0.1.0 fields
-#       backfilled to their documented defaults
-#       (``rowFilter``/``quarantineRowFilter``/``cdcApplyChangesFlows``
-#       -> ``None``, ``cdcApplyChangesFlowsSchemas`` -> ``{}``,
-#       ``clusterByAuto`` -> ``False``).
+#       materialized with the exact defaults for the exercised path:
+#       read-time backfills use ``None``; target onboarding persists
+#       ``clusterByAuto=False`` and ``cdcApplyChangesFlowsSchemas={}``;
+#       explicit Phase 2 schema-evolution onboarding persists
+#       ``clusterByAuto=True``.
 #
 # Together (1)+(2)+(3) prove the customer-pipeline-doesn't-break
 # contract end-to-end: same job, same notebook, same dataflowspec --
@@ -58,6 +59,15 @@ target_ref = dbutils.widgets.get("target_ref")
 phase2_append_onboarding = (
     dbutils.widgets.get("phase2_append_onboarding").lower() == "true"
 )
+try:
+    phase2_legacy_entrypoint_onboarding = (
+        dbutils.widgets.get("phase2_legacy_entrypoint_onboarding").lower()
+        == "true"
+    )
+except Exception:
+    # Jobs created before this parameter was introduced did not define the
+    # widget. Defaulting to False preserves their pure read-time contract.
+    phase2_legacy_entrypoint_onboarding = False
 
 log_list = []
 log_list.append(
@@ -267,6 +277,46 @@ except Exception as exc:
     log_list.append(f"  traceback: {tb_text}")
     BronzeDataflowSpec = SilverDataflowSpec = DataflowSpecUtils = None
 
+if phase2_append_onboarding:
+    legacy_defaults_contract = (
+        "path-specific Phase 2 append-onboarding/read defaults"
+    )
+elif phase2_legacy_entrypoint_onboarding:
+    legacy_defaults_contract = (
+        "path-specific target legacy-entrypoint/read defaults"
+    )
+else:
+    legacy_defaults_contract = "read-time None backfills"
+
+
+def expected_legacy_defaults(data_flow_group, *, bronze):
+    """Return exact defaults for rows touched by each Phase 2 path."""
+    reonboarded = data_flow_group == "A1" or (
+        phase2_append_onboarding
+        and data_flow_group == "schema_evolution"
+    )
+    if phase2_append_onboarding and reonboarded:
+        cluster_by_auto = True
+        cdc_schemas = {}
+    elif phase2_legacy_entrypoint_onboarding and reonboarded:
+        cluster_by_auto = False
+        cdc_schemas = {}
+    else:
+        # A2 is written in Phase 1 and is not part of either Phase 2
+        # onboarding input, so schema evolution leaves its values null.
+        cluster_by_auto = None
+        cdc_schemas = None
+
+    expected = {
+        "rowFilter": None,
+        "quarantineRowFilter": None,
+        "cdcApplyChangesFlows": None,
+        "clusterByAuto": cluster_by_auto,
+    }
+    if bronze:
+        expected["cdcApplyChangesFlowsSchemas"] = cdc_schemas
+    return expected
+
 if BronzeDataflowSpec is not None:
     # Bronze: confirm every persisted row materializes into a
     # dataclass without TypeError, with the new v0.1.0 fields
@@ -302,55 +352,30 @@ if BronzeDataflowSpec is not None:
         if source_profile != "legacy":
             bronze_ok += 1
             continue
-        # New v0.1.0 bronze fields must be present on the dataclass
-        # AND backfilled to whatever ``populate_additional_df_cols``
-        # (the read-time helper used by ``get_bronze_dataflow_spec``)
-        # writes when the column is absent from a v0.0.10-shape Delta
-        # row. That helper just sets missing columns to ``None``
-        # unconditionally (see ``dataflow_spec.py:391-396``), so the
-        # backward-compat invariant for THIS code path is "every new
-        # field is None on v0.0.10 rows".
-        #
-        # NOTE on divergence: the unit-test fixture
-        # ``EXPECTED_BRONZE_DEFAULTS_AT_ONBOARDING`` (in
-        # ``tests/test_backward_compat_v0_0_10.py``) expects
-        # ``clusterByAuto=False`` and ``cdcApplyChangesFlowsSchemas={}``
-        # because that test exercises a different code path:
-        # re-running v0.1.0 onboarding against a v0.0.10 JSON file,
-        # which goes through ``__get_cluster_by_auto`` (returns False)
-        # and ``get_cdc_apply_changes_flows_json`` (returns {}). Don't
-        # copy those expectations here -- they're for onboarding-side
-        # defaults, not read-side backfills.
-        new_v011_fields = (
-            "rowFilter",
-            "quarantineRowFilter",
-            "cdcApplyChangesFlows",
-            "cdcApplyChangesFlowsSchemas",
-            "clusterByAuto",
+        expected_defaults = expected_legacy_defaults(
+            spec.dataFlowGroup, bronze=True
         )
-        defaults_ok = phase2_append_onboarding or all(
-            getattr(spec, fname, "MISSING") is None
-            for fname in new_v011_fields
+        defaults_ok = all(
+            getattr(spec, field_name, "MISSING") == expected
+            for field_name, expected in expected_defaults.items()
         )
         if defaults_ok:
             bronze_ok += 1
         else:
             actuals = {
-                fname: getattr(spec, fname, "MISSING") for fname in new_v011_fields
+                field_name: getattr(spec, field_name, "MISSING")
+                for field_name in expected_defaults
             }
             log_list.append(
                 f"BronzeDataflowSpec dataFlowId={spec.dataFlowId} "
-                f"defaults wrong: {actuals}. Failed!"
+                f"defaults wrong for {legacy_defaults_contract}: "
+                f"expected={expected_defaults}, actual={actuals}. Failed!"
             )
     if bronze_ok == len(rows):
         contract = (
-            "current fields persisted by append onboarding"
-            if phase2_append_onboarding
-            else (
-                "legacy fields backfilled to v0.1.0 defaults"
-                if source_profile == "legacy"
-                else "current-shape fields preserved"
-            )
+            legacy_defaults_contract
+            if source_profile == "legacy"
+            else "current-shape fields preserved"
         )
         log_list.append(
             f"BronzeDataflowSpec backward-compat: {bronze_ok}/{len(rows)} rows "
@@ -386,41 +411,32 @@ if BronzeDataflowSpec is not None:
         if source_profile != "legacy":
             silver_ok += 1
             continue
-        # Silver has the same set of new v0.1.0 fields as bronze
-        # MINUS ``cdcApplyChangesFlowsSchemas`` (silver doesn't carry
-        # a per-flow schemas map -- see additional_silver_df_columns
-        # in dataflow_spec.py:307-324). Same read-side backfill
-        # invariant applies: every new field is None on v0.0.10 rows.
-        new_v011_silver_fields = (
-            "rowFilter",
-            "quarantineRowFilter",
-            "cdcApplyChangesFlows",
-            "clusterByAuto",
+        # Silver has the same path-specific defaults as bronze, minus
+        # ``cdcApplyChangesFlowsSchemas`` (silver has no per-flow schemas).
+        expected_defaults = expected_legacy_defaults(
+            spec.dataFlowGroup, bronze=False
         )
-        defaults_ok = phase2_append_onboarding or all(
-            getattr(spec, fname, "MISSING") is None
-            for fname in new_v011_silver_fields
+        defaults_ok = all(
+            getattr(spec, field_name, "MISSING") == expected
+            for field_name, expected in expected_defaults.items()
         )
         if defaults_ok:
             silver_ok += 1
         else:
             actuals = {
-                fname: getattr(spec, fname, "MISSING")
-                for fname in new_v011_silver_fields
+                field_name: getattr(spec, field_name, "MISSING")
+                for field_name in expected_defaults
             }
             log_list.append(
                 f"SilverDataflowSpec dataFlowId={spec.dataFlowId} "
-                f"defaults wrong: {actuals}. Failed!"
+                f"defaults wrong for {legacy_defaults_contract}: "
+                f"expected={expected_defaults}, actual={actuals}. Failed!"
             )
     if silver_ok == len(rows):
         contract = (
-            "current fields persisted by append onboarding"
-            if phase2_append_onboarding
-            else (
-                "legacy fields backfilled to v0.1.0 defaults"
-                if source_profile == "legacy"
-                else "current-shape fields preserved"
-            )
+            legacy_defaults_contract
+            if source_profile == "legacy"
+            else "current-shape fields preserved"
         )
         log_list.append(
             f"SilverDataflowSpec backward-compat: {silver_ok}/{len(rows)} rows "

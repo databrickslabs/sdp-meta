@@ -179,6 +179,18 @@ class DatabricksSdkDependencyMetadataTests(unittest.TestCase):
         self.assertNotIn("databricks-sdk>=0.20,<1", requirements)
 
 
+class SetuptoolsDependencyMetadataTests(unittest.TestCase):
+
+    def test_direct_install_uses_tested_release_within_wheel_compatibility_range(self):
+        setup_text = PRIMARY_SETUP.read_text(encoding="utf-8")
+        requirements = (
+            REPO_ROOT / "requirements.txt"
+        ).read_text(encoding="utf-8").splitlines()
+
+        self.assertIn('"setuptools>=65,<85"', setup_text)
+        self.assertIn("setuptools>=84.0.0,<85", requirements)
+
+
 class VersionSynchronizationTests(unittest.TestCase):
     """The two distributions and ``__about__`` must move in lockstep.
 
@@ -314,13 +326,16 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
 class McpDependencyMetadataTests(unittest.TestCase):
 
-    def test_mcp_sdk_range_matches_development_requirements(self):
+    def test_runtime_extra_preserves_mcp_2_x_compatibility(self):
         expected = "mcp>=2.0.0,<3.0"
         setup_text = PRIMARY_SETUP.read_text(encoding="utf-8")
+        self.assertIn(f'MCP_REQUIREMENTS = ["{expected}"]', setup_text)
+
+    def test_development_environment_uses_mcp_2_2_or_newer(self):
+        expected = "mcp>=2.2.0,<3.0"
         requirements_text = (
             REPO_ROOT / "requirements-dev.txt"
         ).read_text(encoding="utf-8")
-        self.assertIn(f'MCP_REQUIREMENTS = ["{expected}"]', setup_text)
         self.assertIn(expected, requirements_text.splitlines())
 
 

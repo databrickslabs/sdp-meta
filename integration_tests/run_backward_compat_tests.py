@@ -1882,6 +1882,9 @@ class BackwardCompatRunner:
                         "phase2_append_onboarding": str(
                             conf.phase2_append_onboarding
                         ),
+                        "phase2_legacy_entrypoint_onboarding": str(
+                            bool(legacy_dependencies)
+                        ),
                         # None in primary_wheel mode (validate_phase2 only
                         # reads this in compat_wheelhouse mode, where
                         # build_wheels has pinned it); coerce so the SDK

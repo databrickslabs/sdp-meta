@@ -1791,12 +1791,14 @@ def _onboarding_layer_updates(
     )
     changed = False
     silver_tables = []
+    matched_rows = 0
     for row in onboarding_rows:
         if (
             not isinstance(row, dict)
             or row.get("data_flow_group") != pipeline_spec.dataflow_group
         ):
             continue
+        matched_rows += 1
         original_row = dict(row)
         if pipeline_spec.layer in ("bronze", "bronze_silver"):
             bronze_table = (
@@ -1854,6 +1856,12 @@ def _onboarding_layer_updates(
                 row["silver_database_quarantine_dev"] = target
         if row != original_row:
             changed = True
+    if matched_rows == 0:
+        raise ValueError(
+            "Cannot add pipeline for data_flow_group="
+            f"{pipeline_spec.dataflow_group!r}: the onboarding file "
+            f"{onboarding_path.name!r} contains no matching rows"
+        )
     if changed:
         if onboarding_path.suffix.lower() in (".yml", ".yaml"):
             onboarding_text = yaml.safe_dump(onboarding_rows, sort_keys=False)
@@ -2509,6 +2517,19 @@ def bundle_add_flow(
 
     variables = _read_variables_yml(bundle_dir)
     onboarding_path = _resolve_onboarding_path(bundle_dir, cmd.onboarding_file, variables)
+    # The resolved onboarding file is authoritative for companion file
+    # references. This matters when --onboarding-file overrides the bundle
+    # default or variables.yml has drifted: add-flow and add-pipeline must
+    # update the same silver_transformations.{yml,json} file.
+    variables = dict(variables)
+    format_node = variables.get("onboarding_file_format")
+    format_node = dict(format_node) if isinstance(format_node, dict) else {}
+    format_node["default"] = (
+        "yaml"
+        if onboarding_path.suffix.lower() in (".yml", ".yaml")
+        else "json"
+    )
+    variables["onboarding_file_format"] = format_node
     existing = _load_existing_flows(onboarding_path)
 
     pending: List[FlowSpec] = list(cmd.flows)
