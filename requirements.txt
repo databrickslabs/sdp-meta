@@ -1,13 +1,15 @@
 # Runtime dependencies for databricks-labs-sdp-meta.
 #
-# Mirrors INSTALL_REQUIRES in setup.py. Keep this file in sync with setup.py;
-# setup.py is the source of truth when sdp-meta is installed as a wheel.
+# Tracks INSTALL_REQUIRES in setup.py. This direct-install environment selects
+# the tested setuptools 84.x release, while wheel metadata keeps the broader
+# setuptools >=65,<85 compatibility range. setup.py remains the source of truth
+# when sdp-meta is installed as a wheel.
 #
 # Usage:
 #   pip install -r requirements.txt
 #
 # For development and test dependencies, use requirements-dev.txt instead.
 
-setuptools>=65,<83
+setuptools>=84.0.0,<85
 databricks-sdk>=0.138.0,<1
 PyYAML>=6.0.3,<7

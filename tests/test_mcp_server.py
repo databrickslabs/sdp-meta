@@ -118,6 +118,17 @@ class ListToolsTests(unittest.TestCase):
             self.assertEqual(tool.input_schema.get("type"), "object")
             self.assertIsNotNone(tool.annotations)
 
+    def test_every_tool_is_documented(self):
+        async def get_tools():
+            async with Client(mcp_server.build_server(), raise_exceptions=True) as client:
+                return (await client.list_tools()).tools
+
+        docs = (
+            Path(__file__).parents[1] / "docs" / "docs" / "getting-started" / "mcp.md"
+        ).read_text()
+        for tool in asyncio.run(get_tools()):
+            self.assertIn(f"`{tool.name}`", docs)
+
     def test_unknown_tool_raises(self):
         with self.assertRaisesRegex(ValueError, "Unknown tool"):
             mcp_server.call_tool("does_not_exist", {})

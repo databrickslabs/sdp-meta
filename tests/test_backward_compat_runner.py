@@ -122,6 +122,10 @@ class CurrentUpgradeRunnerTests(TestCase):
         self.assertEqual(parameters["source_profile"], "current")
         self.assertEqual(parameters["source_ref"], "v0.1.0")
         self.assertEqual(parameters["target_ref"], "v0.1.1")
+        self.assertEqual(
+            parameters["phase2_legacy_entrypoint_onboarding"],
+            "False",
+        )
 
     def test_v010_source_removes_unsupported_append_flow_metadata(self):
         payload = [
@@ -391,6 +395,12 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
         self.assertEqual(
             tasks["phase2_bronze"].depends_on[0].task_key,
             "phase2_legacy_entrypoint_onboard",
+        )
+        self.assertEqual(
+            tasks["phase2_validate"].notebook_task.base_parameters[
+                "phase2_legacy_entrypoint_onboarding"
+            ],
+            "True",
         )
 
     def test_phase2_primary_surface_keeps_existing_pipeline_only_flow(self):

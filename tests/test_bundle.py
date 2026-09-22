@@ -3219,6 +3219,38 @@ class BundleAddPipelineTests(unittest.TestCase):
             )
             self.assertEqual(_sdp_meta_sanity_checks(tmp), [])
 
+    def test_dry_run_rejects_group_without_onboarding_rows_without_writing(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp)
+            tracked_paths = [
+                tmp / "resources" / "variables.yml",
+                tmp / "resources" / "sdp_meta_onboarding_job.yml",
+                tmp / "resources" / "sdp_meta_pipelines.yml",
+                tmp / "conf" / "onboarding.yml",
+            ]
+            before = {path: path.read_text() for path in tracked_paths}
+            output = StringIO()
+
+            rc = bundle_add_pipeline(
+                BundleAddPipelineCommand(
+                    bundle_dir=str(tmp),
+                    dry_run=True,
+                    pipeline=PipelineSpec(
+                        name="missing",
+                        layer="bronze_silver",
+                        dataflow_group="missing_group",
+                    ),
+                ),
+                output=output,
+            )
+
+            self.assertEqual(rc, 2)
+            self.assertIn("contains no matching rows", output.getvalue())
+            self.assertEqual(
+                {path: path.read_text() for path in tracked_paths},
+                before,
+            )
+
     def test_same_group_different_layers_create_supported_split(self):
         with _tempdir() as tmp:
             self._make_bundle(tmp)
@@ -3915,6 +3947,47 @@ class BundleAddFlowTests(unittest.TestCase):
             self.assertEqual(doc[0]["source_details"]["source_database"], "test_cat.landing")
             self.assertIn(
                 "silver_transformations.json", doc[0]["silver_transformation_json_dev"]
+            )
+
+    def test_onboarding_override_controls_companion_file_format(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp, onboarding_format="yaml", seed_flows=[])
+            override = tmp / "conf" / "onboarding.json"
+            override.write_text("[]")
+
+            rc = bundle_add_flow(
+                BundleAddFlowCommand(
+                    bundle_dir=str(tmp),
+                    onboarding_file="onboarding.json",
+                    flows=[
+                        FlowSpec(
+                            source_format="delta",
+                            bronze_table="orders",
+                            silver_table="orders",
+                        )
+                    ],
+                )
+            )
+
+            self.assertEqual(rc, 0)
+            row = json.loads(override.read_text())[0]
+            self.assertIn(
+                "silver_transformations.json",
+                row["silver_transformation_json_dev"],
+            )
+            transformations = json.loads(
+                (tmp / "conf" / "silver_transformations.json").read_text()
+            )
+            self.assertIn(
+                {"target_table": "orders", "select_exp": ["*"]},
+                transformations,
+            )
+            original_transformations = yaml.safe_load(
+                (tmp / "conf" / "silver_transformations.yml").read_text()
+            )
+            self.assertNotIn(
+                {"target_table": "orders", "select_exp": ["*"]},
+                original_transformations,
             )
 
     def test_auto_id_increments_from_max_existing(self):
