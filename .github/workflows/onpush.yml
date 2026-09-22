@@ -43,7 +43,7 @@ jobs:
       # silently skip on every run. The CLI version follows the pinned action
       # (currently 1.10.0).
       - name: Set up Databricks CLI
-        uses: databricks/setup-cli@cfd9223558b9082c2aabb0c8fa47f1c3db2b7cbd # v1.16.1
+        uses: databricks/setup-cli@d76f84cea9893ce68311a1f33fb0c95af6c963b7 # v1.17.0
 
       - name: Install pip
         run: python -m pip install --upgrade pip
