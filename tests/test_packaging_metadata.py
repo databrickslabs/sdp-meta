@@ -313,14 +313,35 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("import databricks.labs.sdp_meta", workflow)
         self.assertIn("import dlt_meta", workflow)
 
-    def test_obsolete_codeql_workflow_is_removed(self):
-        self.assertFalse(
-            (
-                REPO_ROOT
-                / ".github"
-                / "workflows"
-                / "codeql-analysis.yml"
-            ).exists()
+
+class CodeqlWorkflowTests(unittest.TestCase):
+    """CodeQL must run on the protected runner for supported branches."""
+
+    def test_codeql_workflow_uses_protected_runner_and_expected_triggers(self):
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "codeql-analysis.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertIn("branches: [ main, v0.1.1 ]", workflow)
+        self.assertIn(
+            "group: databrickslabs-protected-runner-group",
+            workflow,
+        )
+        self.assertIn("labels: linux-ubuntu-latest", workflow)
+        self.assertEqual(
+            workflow.count(
+                "github/codeql-action/"
+                "init@cdf488f595d80d6e07e03d4674febd5ab45fa938"
+            ),
+            1,
+        )
+        self.assertEqual(
+            workflow.count(
+                "github/codeql-action/"
+                "analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938"
+            ),
+            1,
         )
 
 
