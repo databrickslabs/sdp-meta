@@ -1602,6 +1602,33 @@ display(
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ### 2.5 DQE Without Quarantine Metadata
+# MAGIC
+# MAGIC The customers and transactions Silver DQE files contain drop rules but
+# MAGIC no `expect_or_quarantine` rules. Their onboarding entries therefore do
+# MAGIC not need quarantine table metadata. SDP-META retains the DQE rules and
+# MAGIC leaves `quarantineTargetDetails` empty.
+
+# COMMAND ----------
+
+display(
+    spark.sql(
+        f"""
+        SELECT
+          dataFlowId,
+          targetDetails['table'] AS silver_table,
+          quarantineTargetDetails,
+          dataQualityExpectations
+        FROM {uc_catalog_name}.{uc_schema_name}.silver_dataflowspec
+        WHERE dataFlowId IN ('100', '101')
+        ORDER BY dataFlowId
+        """
+    )
+)
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ---
 # MAGIC ## Stage 3: Create Lakeflow Spark Declarative Pipeline
 # MAGIC
@@ -4122,7 +4149,57 @@ else:
             f".{domain}_quarantine"
         )
 
-    # 5. Customers / transactions / products / stores — count varies
+    # 5. Silver DQE without quarantine metadata — both flows contain
+    # drop rules but no quarantine rules or targets. Onboarding must
+    # retain the DQE without requiring quarantine metadata.
+    try:
+        optional_rows = {
+            row.dataFlowId: row
+            for row in spark.sql(
+                f"""
+                SELECT dataFlowId, dataQualityExpectations,
+                       quarantineTargetDetails
+                FROM {uc_catalog_name}.{uc_schema_name}.silver_dataflowspec
+                WHERE dataFlowId IN ('100', '101')
+                """
+            ).collect()
+        }
+        if set(optional_rows) != {"100", "101"}:
+            failures.append(
+                "Silver DQE without quarantine: expected DataflowSpecs "
+                "100 and 101"
+            )
+        else:
+            customer_dqe = json.loads(
+                optional_rows["100"].dataQualityExpectations
+            )
+            transaction_dqe = json.loads(
+                optional_rows["101"].dataQualityExpectations
+            )
+            if customer_dqe.get("expect_or_quarantine"):
+                failures.append(
+                    "customers Silver DQE unexpectedly enables quarantine"
+                )
+            if transaction_dqe.get("expect_or_quarantine"):
+                failures.append(
+                    "transactions Silver DQE unexpectedly enables quarantine"
+                )
+            if optional_rows["100"].quarantineTargetDetails:
+                failures.append(
+                    "customers Silver quarantine metadata "
+                    "should remain empty"
+                )
+            if optional_rows["101"].quarantineTargetDetails:
+                failures.append(
+                    "transactions Silver quarantine metadata "
+                    "should remain empty"
+                )
+    except Exception as exc:
+        failures.append(
+            f"Silver DQE without quarantine validation failed: {exc}"
+        )
+
+    # 6. Customers / transactions / products / stores — count varies
     # with ``data_source``: ``github`` uses fixed CSVs from the
     # repo, ``dbdatagen`` uses random synthetic data with no fixed
     # seed. Existence + non-empty is the strongest universal check;
@@ -4137,7 +4214,7 @@ else:
             f"{uc_catalog_name}.{silver_schema}.{domain}"
         )
 
-    # 6. Multi-source AUTO CDC (Stage 11) — every region seeds the
+    # 7. Multi-source AUTO CDC (Stage 11) — every region seeds the
     # SAME shape: 3 INSERTs + 1 UPDATE + 1 DELETE = 5 raw bronze
     # rows. The silver target is SCD-1 with apply_as_deletes, so the
     # final live row count = (3 regions × 3 inserted) − (3 regions ×

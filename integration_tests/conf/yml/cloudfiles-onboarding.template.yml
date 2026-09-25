@@ -157,3 +157,49 @@
   - id
   - customer_id
   silver_quarantine_table_cluster_by_auto: true
+- data_flow_id: '190'
+  data_flow_group: QUARANTINE_COMPAT
+  source_system: MYSQL
+  source_format: cloudFiles
+  source_details:
+    source_database: APP
+    source_table: CUSTOMERS
+    source_path_it: '{uc_volume_path}/integration_tests/resources/data/customers'
+    source_schema_path: '{uc_volume_path}/integration_tests/resources/customers.ddl'
+  bronze_catalog_it: '{uc_catalog_name}'
+  bronze_database_it: '{bronze_schema}'
+  bronze_table: quarantine_compat_customers
+  bronze_reader_options:
+    cloudFiles.format: json
+    cloudFiles.inferColumnTypes: 'true'
+    cloudFiles.rescuedDataColumn: _rescued_data
+  bronze_table_path_it: '{uc_volume_path}/data/bronze/quarantine_compat_customers'
+  bronze_data_quality_expectations_json_it: '{uc_volume_path}/integration_tests/conf/yml/dqe/customers/bronze_data_quality_expectations.yml'
+  silver_catalog_it: '{uc_catalog_name}'
+  silver_database_it: '{silver_schema}'
+  silver_table: customers
+  silver_transformation_json_it: '{uc_volume_path}/integration_tests/conf/yml/silver_transformations.yml'
+  silver_data_quality_expectations_json_it: '{uc_volume_path}/integration_tests/conf/yml/dqe/customers/silver_data_quality_expectations.yml'
+- data_flow_id: '191'
+  data_flow_group: DQE_NO_QUARANTINE
+  source_system: MYSQL
+  source_format: cloudFiles
+  source_details:
+    source_database: APP
+    source_table: CUSTOMERS
+    source_path_it: '{uc_volume_path}/integration_tests/resources/data/customers'
+    source_schema_path: '{uc_volume_path}/integration_tests/resources/customers.ddl'
+  bronze_catalog_it: '{uc_catalog_name}'
+  bronze_database_it: '{bronze_schema}'
+  bronze_table: dqe_no_quarantine_customers
+  bronze_reader_options:
+    cloudFiles.format: json
+    cloudFiles.inferColumnTypes: 'true'
+    cloudFiles.rescuedDataColumn: _rescued_data
+  bronze_table_path_it: '{uc_volume_path}/data/bronze/dqe_no_quarantine_customers'
+  bronze_data_quality_expectations_json_it: '{uc_volume_path}/integration_tests/conf/yml/dqe/customers/no_quarantine_rules.yml'
+  silver_catalog_it: '{uc_catalog_name}'
+  silver_database_it: '{silver_schema}'
+  silver_table: customers
+  silver_transformation_json_it: '{uc_volume_path}/integration_tests/conf/yml/silver_transformations.yml'
+  silver_data_quality_expectations_json_it: '{uc_volume_path}/integration_tests/conf/yml/dqe/customers/no_quarantine_rules.yml'

@@ -98,6 +98,118 @@ class IntegrationRunnerYamlTests(unittest.TestCase):
         finally:
             os.unlink(tmp.name)
 
+    def test_cloudfiles_quarantine_compat_flow_matches_json_and_yaml(self):
+        json_path = os.path.join(
+            _PROJECT_ROOT,
+            "integration_tests/conf/json/cloudfiles-onboarding.template",
+        )
+        yaml_path = os.path.join(
+            _PROJECT_ROOT,
+            "integration_tests/conf/yml/cloudfiles-onboarding.template.yml",
+        )
+        with open(json_path) as fh:
+            json_payload = json.load(fh)
+        with open(yaml_path) as fh:
+            yaml_payload = yaml.safe_load(fh)
+
+        json_flow = next(
+            row for row in json_payload if row["data_flow_id"] == "190"
+        )
+        yaml_flow = next(
+            row for row in yaml_payload if row["data_flow_id"] == "190"
+        )
+        for flow in (json_flow, yaml_flow):
+            self.assertEqual(
+                flow["data_flow_group"], "QUARANTINE_COMPAT"
+            )
+            self.assertFalse(
+                any("quarantine" in key for key in flow)
+            )
+            self.assertIn(
+                "bronze_data_quality_expectations_json_it", flow
+            )
+            self.assertIn(
+                "silver_data_quality_expectations_json_it", flow
+            )
+
+        self.assertEqual(
+            json_flow["bronze_table"], yaml_flow["bronze_table"]
+        )
+        self.assertEqual(
+            json_flow["silver_table"], yaml_flow["silver_table"]
+        )
+
+        json_dqe_only = next(
+            row for row in json_payload if row["data_flow_id"] == "191"
+        )
+        yaml_dqe_only = next(
+            row for row in yaml_payload if row["data_flow_id"] == "191"
+        )
+        for flow in (json_dqe_only, yaml_dqe_only):
+            self.assertEqual(
+                flow["data_flow_group"], "DQE_NO_QUARANTINE"
+            )
+            self.assertFalse(
+                any("quarantine" in key for key in flow)
+            )
+            self.assertIn(
+                "no_quarantine_rules",
+                flow["bronze_data_quality_expectations_json_it"],
+            )
+            self.assertIn(
+                "no_quarantine_rules",
+                flow["silver_data_quality_expectations_json_it"],
+            )
+
+        dqe_json_path = os.path.join(
+            _PROJECT_ROOT,
+            "integration_tests/conf/json/dqe/customers/"
+            "no_quarantine_rules.json",
+        )
+        dqe_yaml_path = os.path.join(
+            _PROJECT_ROOT,
+            "integration_tests/conf/yml/dqe/customers/"
+            "no_quarantine_rules.yml",
+        )
+        with open(dqe_json_path) as fh:
+            json_dqe = json.load(fh)
+        with open(dqe_yaml_path) as fh:
+            yaml_dqe = yaml.safe_load(fh)
+        self.assertEqual(json_dqe, yaml_dqe)
+        self.assertIn("expect_or_drop", json_dqe)
+        self.assertNotIn("expect_or_quarantine", json_dqe)
+
+    def test_interactive_demo_dqe_without_quarantine_metadata_parity(self):
+        json_path = os.path.join(
+            _PROJECT_ROOT, "demo/conf/json/sample_onboarding.json"
+        )
+        yaml_path = os.path.join(
+            _PROJECT_ROOT, "demo/conf/yml/sample_onboarding.yml"
+        )
+        with open(json_path) as fh:
+            json_payload = json.load(fh)
+        with open(yaml_path) as fh:
+            yaml_payload = yaml.safe_load(fh)
+
+        for payload in (json_payload, yaml_payload):
+            customers = next(
+                row for row in payload if row["data_flow_id"] == "100"
+            )
+            transactions = next(
+                row for row in payload if row["data_flow_id"] == "101"
+            )
+            for flow in (customers, transactions):
+                self.assertIn(
+                    "silver_data_quality_expectations_json_prod", flow
+                )
+                self.assertFalse(
+                    any(
+                        key.startswith("silver_")
+                        and "quarantine" in key
+                        for key in flow
+                    )
+                )
+
 
 class SilverDqeYamlPathRewriteTests(unittest.TestCase):
     """Verify silver/DQ path rewriting in YAML mode against dedicated .yml siblings.

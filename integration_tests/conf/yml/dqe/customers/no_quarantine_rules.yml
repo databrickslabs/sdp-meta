@@ -1,0 +1,3 @@
+expect_or_drop:
+  valid_id: id IS NOT NULL
+  valid_operation: operation IN ('APPEND', 'DELETE', 'UPDATE')

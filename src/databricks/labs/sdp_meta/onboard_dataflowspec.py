@@ -1529,6 +1529,7 @@ class OnboardDataflowspec:
             data_quality_expectations = None
             quarantine_target_details = {}
             quarantine_table_properties = {}
+            has_quarantine_expectations = False
             if f"bronze_data_quality_expectations_json_{env}" in onboarding_row:
                 bronze_data_quality_expectations_json = onboarding_row[
                     f"bronze_data_quality_expectations_json_{env}"
@@ -1537,10 +1538,36 @@ class OnboardDataflowspec:
                     data_quality_expectations = self.__get_data_quality_expecations(
                         bronze_data_quality_expectations_json
                     )
-                    if onboarding_row["bronze_quarantine_table"]:
-                        quarantine_target_details, quarantine_table_properties = self.__get_quarantine_details(
-                            env, "bronze", onboarding_row
+                    has_quarantine_expectations = (
+                        self.__has_quarantine_expectations(
+                            data_quality_expectations
                         )
+                    )
+            quarantine_target_configured = (
+                "bronze_quarantine_table" in onboarding_row
+                and bool(onboarding_row["bronze_quarantine_table"])
+            )
+            quarantine_database_configured = (
+                f"bronze_database_quarantine_{env}" in onboarding_row
+                and bool(onboarding_row[f"bronze_database_quarantine_{env}"])
+            )
+            if has_quarantine_expectations and not (
+                quarantine_target_configured and quarantine_database_configured
+            ):
+                logger.warning(
+                    "Bronze DQE contains non-empty expect_or_quarantine rules "
+                    "but its quarantine target is incomplete. No quarantine "
+                    "table will be created; if these are the only DQE rules, "
+                    "the pipeline will not declare a main output table. Add "
+                    "bronze_quarantine_table and "
+                    "bronze_database_quarantine_%s. Missing targets remain "
+                    "allowed for backward compatibility.",
+                    env,
+                )
+            if has_quarantine_expectations or quarantine_target_configured:
+                quarantine_target_details, quarantine_table_properties = self.__get_quarantine_details(
+                    env, "bronze", onboarding_row
+                )
 
             append_flows, append_flows_schemas = self.get_append_flows_json(
                 onboarding_row, "bronze", env
@@ -2269,6 +2296,16 @@ class OnboardDataflowspec:
             return None
         return json.dumps(parsed)
 
+    @staticmethod
+    def __has_quarantine_expectations(data_quality_expectations):
+        """Return whether serialized DQE contains quarantine rules."""
+        if not data_quality_expectations:
+            return False
+        parsed = json.loads(data_quality_expectations)
+        if not isinstance(parsed, dict):
+            return False
+        return bool(parsed.get("expect_or_quarantine"))
+
     def __get_silver_dataflow_spec_dataframe(self, onboarding_df, env):
         """Get silver_dataflow_spec method transform onboarding dataframe to silver dataflowSpec dataframe.
 
@@ -2539,6 +2576,7 @@ class OnboardDataflowspec:
             silver_quarantine_target_details = None
             silver_quarantine_table_properties = None
             silver_quarantine_cluster_by = None
+            has_quarantine_expectations = False
             if f"silver_data_quality_expectations_json_{env}" in onboarding_row:
                 silver_data_quality_expectations_json = onboarding_row[
                     f"silver_data_quality_expectations_json_{env}"
@@ -2547,13 +2585,45 @@ class OnboardDataflowspec:
                     data_quality_expectations = self.__get_data_quality_expecations(
                         silver_data_quality_expectations_json
                     )
-                silver_quarantine_target_details, silver_quarantine_table_properties = self.__get_quarantine_details(
+                    has_quarantine_expectations = (
+                        self.__has_quarantine_expectations(
+                            data_quality_expectations
+                        )
+                    )
+            quarantine_target_configured = (
+                "silver_quarantine_table" in onboarding_row
+                and bool(onboarding_row["silver_quarantine_table"])
+            )
+            quarantine_database_configured = (
+                f"silver_database_quarantine_{env}" in onboarding_row
+                and bool(onboarding_row[f"silver_database_quarantine_{env}"])
+            )
+            if has_quarantine_expectations and not (
+                quarantine_target_configured and quarantine_database_configured
+            ):
+                logger.warning(
+                    "Silver DQE contains non-empty expect_or_quarantine rules "
+                    "but its quarantine target is incomplete. No quarantine "
+                    "table will be created; if these are the only DQE rules, "
+                    "the pipeline will not declare a main output table. Add "
+                    "silver_quarantine_table and "
+                    "silver_database_quarantine_%s. Missing targets remain "
+                    "allowed for backward compatibility.",
+                    env,
+                )
+            if has_quarantine_expectations or quarantine_target_configured:
+                (
+                    silver_quarantine_target_details,
+                    silver_quarantine_table_properties,
+                ) = self.__get_quarantine_details(
                     env, "silver", onboarding_row
                 )
-                silver_quarantine_cluster_by = self.__get_cluster_by_properties(
-                    onboarding_row,
-                    silver_quarantine_table_properties,
-                    "silver_quarantine_cluster_by"
+                silver_quarantine_cluster_by = (
+                    self.__get_cluster_by_properties(
+                        onboarding_row,
+                        silver_quarantine_table_properties,
+                        "silver_quarantine_cluster_by",
+                    )
                 )
             append_flows, append_flow_schemas = self.get_append_flows_json(
                 onboarding_row, layer="silver", env=env
