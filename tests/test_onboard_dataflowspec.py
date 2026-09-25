@@ -665,6 +665,47 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
                 "tests/resources/schema.ddl"
             )
 
+    def test_has_quarantine_expectations_rejects_empty_and_non_mapping_values(self):
+        has_quarantine_expectations = (
+            OnboardDataflowspec._OnboardDataflowspec__has_quarantine_expectations
+        )
+
+        self.assertFalse(has_quarantine_expectations(None))
+        self.assertFalse(has_quarantine_expectations(json.dumps([])))
+
+    def test_empty_dqe_paths_do_not_require_quarantine_fields(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with open(self.onboarding_json_file, "r") as source:
+                onboarding_row = copy.deepcopy(json.load(source)[0])
+            for field_name in list(onboarding_row):
+                if "quarantine" in field_name:
+                    del onboarding_row[field_name]
+            onboarding_row["bronze_data_quality_expectations_json_dev"] = ""
+            onboarding_row["silver_data_quality_expectations_json_dev"] = ""
+
+            onboarding_path = os.path.join(tmp_dir, "onboarding.json")
+            with open(onboarding_path, "w") as target:
+                json.dump([onboarding_row], target)
+
+            params = copy.deepcopy(self.onboarding_bronze_silver_params_map)
+            params["onboarding_file_path"] = onboarding_path
+            onboarder = OnboardDataflowspec(self.spark, params)
+            onboarding_df = onboarder._OnboardDataflowspec__get_onboarding_file_dataframe(
+                onboarding_path
+            )
+
+            bronze_row = onboarder._OnboardDataflowspec__get_bronze_dataflow_spec_dataframe(
+                onboarding_df, "dev"
+            ).collect()[0]
+            silver_row = onboarder._OnboardDataflowspec__get_silver_dataflow_spec_dataframe(
+                onboarding_df, "dev"
+            ).collect()[0]
+
+            self.assertIsNone(bronze_row.dataQualityExpectations)
+            self.assertEqual(bronze_row.quarantineTargetDetails, {})
+            self.assertIsNone(silver_row.dataQualityExpectations)
+            self.assertIsNone(silver_row.quarantineTargetDetails)
+
     def _stage_onboarding_with_dqe_without_quarantine(
         self, tmp_dir, extension, dqe_payload
     ):
