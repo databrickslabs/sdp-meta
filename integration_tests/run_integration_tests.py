@@ -558,6 +558,7 @@ class SDPMETARunner:
                     base_parameters={
                         "uc_enabled": "True",
                         "uc_catalog_name": f"{runner_conf.uc_catalog_name}",
+                        "sdp_meta_schema": f"{runner_conf.sdp_meta_schema}",
                         "bronze_schema": f"{runner_conf.bronze_schema}",
                         "silver_schema": (
                             f"{runner_conf.silver_schema}"

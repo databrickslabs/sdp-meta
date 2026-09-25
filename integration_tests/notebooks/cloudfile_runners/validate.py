@@ -1,9 +1,11 @@
 # Databricks notebook source
 import pandas as pd
+import json
 
 run_id = dbutils.widgets.get("run_id")
 uc_enabled = dbutils.widgets.get("uc_enabled").strip().lower() == "true"
 uc_catalog_name = dbutils.widgets.get("uc_catalog_name")
+sdp_meta_schema = dbutils.widgets.get("sdp_meta_schema")
 bronze_schema = dbutils.widgets.get("bronze_schema")
 silver_schema = dbutils.widgets.get("silver_schema")
 output_file_path = dbutils.widgets.get("output_file_path")
@@ -43,6 +45,76 @@ for table, counts in tables.items():
         log_list.append(f"Expected: {counts} Actual: {cnt}. Passed!")
     except AssertionError:
         log_list.append(f"Expected: {counts} Actual: {cnt}. Failed!")
+
+# Backward-compatibility coverage for optional quarantine targets. Flow 190
+# carries non-empty quarantine rules but intentionally omits every quarantine
+# target field. Onboarding must retain the DQE and persist an empty target for
+# both layers rather than failing an existing customer configuration.
+log_list.append(
+    "Validating legacy quarantine rules without target metadata."
+)
+for layer in ("bronze", "silver"):
+    spec_table = (
+        f"{uc_catalog_name}.{sdp_meta_schema}."
+        f"{layer}_dataflowspec_cdc"
+    )
+    rows = spark.sql(
+        f"""
+        SELECT dataQualityExpectations, quarantineTargetDetails
+        FROM {spec_table}
+        WHERE dataFlowId = '190'
+          AND dataFlowGroup = 'QUARANTINE_COMPAT'
+        """
+    ).collect()
+    try:
+        assert len(rows) == 1
+        dqe = json.loads(rows[0].dataQualityExpectations)
+        assert dqe.get("expect_or_quarantine")
+        assert not rows[0].quarantineTargetDetails
+        log_list.append(
+            f"{layer.title()} compatibility DataflowSpec retained DQE "
+            "with an empty quarantine target. Passed!"
+        )
+    except (AssertionError, TypeError, ValueError) as exc:
+        log_list.append(
+            f"{layer.title()} compatibility DataflowSpec validation "
+            f"failed: {exc}. Failed!"
+        )
+
+# Exact optional-metadata scenario: flow 191 has DQE rules, but no
+# expect_or_quarantine block and no quarantine fields. Both layers must retain
+# the drop rules without synthesizing or requiring a quarantine target.
+log_list.append(
+    "Validating DQE without quarantine rules or target metadata."
+)
+for layer in ("bronze", "silver"):
+    spec_table = (
+        f"{uc_catalog_name}.{sdp_meta_schema}."
+        f"{layer}_dataflowspec_cdc"
+    )
+    rows = spark.sql(
+        f"""
+        SELECT dataQualityExpectations, quarantineTargetDetails
+        FROM {spec_table}
+        WHERE dataFlowId = '191'
+          AND dataFlowGroup = 'DQE_NO_QUARANTINE'
+        """
+    ).collect()
+    try:
+        assert len(rows) == 1
+        dqe = json.loads(rows[0].dataQualityExpectations)
+        assert dqe.get("expect_or_drop")
+        assert not dqe.get("expect_or_quarantine")
+        assert not rows[0].quarantineTargetDetails
+        log_list.append(
+            f"{layer.title()} DQE-only DataflowSpec retained drop "
+            "rules with an empty quarantine target. Passed!"
+        )
+    except (AssertionError, TypeError, ValueError) as exc:
+        log_list.append(
+            f"{layer.title()} DQE-only DataflowSpec validation "
+            f"failed: {exc}. Failed!"
+        )
 
 # Regression coverage for issue #444: source_metadata nested under a bronze
 # append flow must be serialized like top-level source metadata. Every

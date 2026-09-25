@@ -18,7 +18,7 @@ Data quality rules are defined in a separate JSON or YAML file and referenced fr
 | `expect_or_fail` | Halt the entire pipeline update | A violated rule indicates a critical upstream data problem |
 
 :::tip
-Prefer `expect_or_quarantine` over `expect_or_drop` when you want to inspect failed rows later. The quarantine table has the same schema as the target table plus an `_error` column.
+Prefer `expect_or_quarantine` over `expect_or_drop` when you want to inspect failed rows later.
 :::
 
 :::warning
@@ -84,7 +84,30 @@ For silver:
 
 ## Quarantine behavior
 
-When `expect_or_drop` rules are configured and a quarantine table is defined (`bronze_quarantine_table`, `bronze_database_quarantine_{env}`), rows that fail are written to the quarantine table rather than discarded. The quarantine table has the same schema as the main bronze table plus a `_error` column.
+Quarantine target fields remain optional during onboarding for backward
+compatibility. A DQE file containing only `expect`, `expect_or_drop`, or
+`expect_or_fail` does not use any quarantine fields.
+
+To create an output for Bronze quarantine rules, configure
+`bronze_quarantine_table` and
+`bronze_database_quarantine_{env}`. For Silver, configure
+`silver_quarantine_table` and `silver_database_quarantine_{env}`. These fields
+identify the quarantine target persisted in the DataflowSpec. Non-Unity
+Catalog targets also use the corresponding
+`bronze_quarantine_table_path_{env}` or
+`silver_quarantine_table_path_{env}`.
+
+Legacy onboarding files with non-empty `expect_or_quarantine` rules but no
+target continue to onboard successfully. They do not produce a quarantine
+table until target metadata is supplied, and onboarding emits a warning. If
+`expect_or_quarantine` is the only non-empty constraint block, the pipeline
+also does not declare the main output table. Add the quarantine table and
+database fields to avoid a pipeline with no declared output. Missing targets
+remain accepted only for backward compatibility.
+
+Existing onboarding files may include optional quarantine metadata before
+quarantine rules are added. SDP-META preserves that metadata, but no
+quarantine output is created until `expect_or_quarantine` is non-empty.
 
 :::tip
 Use the quarantine table to inspect and reprocess failed rows.

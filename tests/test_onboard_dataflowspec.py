@@ -665,6 +665,214 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
                 "tests/resources/schema.ddl"
             )
 
+    def test_has_quarantine_expectations_rejects_empty_and_non_mapping_values(self):
+        has_quarantine_expectations = (
+            OnboardDataflowspec._OnboardDataflowspec__has_quarantine_expectations
+        )
+
+        self.assertFalse(has_quarantine_expectations(None))
+        self.assertFalse(has_quarantine_expectations(json.dumps([])))
+
+    def test_empty_dqe_paths_do_not_require_quarantine_fields(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with open(self.onboarding_json_file, "r") as source:
+                onboarding_row = copy.deepcopy(json.load(source)[0])
+            for field_name in list(onboarding_row):
+                if "quarantine" in field_name:
+                    del onboarding_row[field_name]
+            onboarding_row["bronze_data_quality_expectations_json_dev"] = ""
+            onboarding_row["silver_data_quality_expectations_json_dev"] = ""
+
+            onboarding_path = os.path.join(tmp_dir, "onboarding.json")
+            with open(onboarding_path, "w") as target:
+                json.dump([onboarding_row], target)
+
+            params = copy.deepcopy(self.onboarding_bronze_silver_params_map)
+            params["onboarding_file_path"] = onboarding_path
+            onboarder = OnboardDataflowspec(self.spark, params)
+            onboarding_df = onboarder._OnboardDataflowspec__get_onboarding_file_dataframe(
+                onboarding_path
+            )
+
+            bronze_row = onboarder._OnboardDataflowspec__get_bronze_dataflow_spec_dataframe(
+                onboarding_df, "dev"
+            ).collect()[0]
+            silver_row = onboarder._OnboardDataflowspec__get_silver_dataflow_spec_dataframe(
+                onboarding_df, "dev"
+            ).collect()[0]
+
+            self.assertIsNone(bronze_row.dataQualityExpectations)
+            self.assertEqual(bronze_row.quarantineTargetDetails, {})
+            self.assertIsNone(silver_row.dataQualityExpectations)
+            self.assertIsNone(silver_row.quarantineTargetDetails)
+
+    def _stage_onboarding_with_dqe_without_quarantine(
+        self, tmp_dir, extension, dqe_payload
+    ):
+        with open(self.onboarding_json_file, "r") as source:
+            onboarding_row = copy.deepcopy(json.load(source)[0])
+        for field_name in list(onboarding_row):
+            if "quarantine" in field_name:
+                del onboarding_row[field_name]
+
+        dqe_path = os.path.join(tmp_dir, f"expectations.{extension}")
+        onboarding_path = os.path.join(tmp_dir, f"onboarding.{extension}")
+        with open(dqe_path, "w") as target:
+            if extension == "json":
+                json.dump(dqe_payload, target)
+            else:
+                yaml.safe_dump(dqe_payload, target, sort_keys=False)
+
+        onboarding_row["bronze_data_quality_expectations_json_dev"] = dqe_path
+        onboarding_row["silver_data_quality_expectations_json_dev"] = dqe_path
+        with open(onboarding_path, "w") as target:
+            if extension == "json":
+                json.dump([onboarding_row], target)
+            else:
+                yaml.safe_dump([onboarding_row], target, sort_keys=False)
+        return onboarding_path
+
+    def test_dqe_without_quarantine_rules_does_not_require_quarantine_fields(self):
+        dqe_payloads = {
+            "expect": {"expect": {"observed_id": "id IS NOT NULL"}},
+            "expect_or_drop": {
+                "expect_or_drop": {"valid_id": "id IS NOT NULL"}
+            },
+            "expect_or_fail": {
+                "expect_or_fail": {"required_id": "id IS NOT NULL"}
+            },
+            "empty_expect_or_quarantine": {"expect_or_quarantine": {}},
+        }
+        for extension in ("json", "yml"):
+            for case_name, dqe_payload in dqe_payloads.items():
+                with self.subTest(extension=extension, case=case_name):
+                    with tempfile.TemporaryDirectory() as tmp_dir:
+                        onboarding_path = (
+                            self._stage_onboarding_with_dqe_without_quarantine(
+                                tmp_dir,
+                                extension,
+                                dqe_payload,
+                            )
+                        )
+                        params = copy.deepcopy(
+                            self.onboarding_bronze_silver_params_map
+                        )
+                        params["onboarding_file_path"] = onboarding_path
+                        onboarder = OnboardDataflowspec(self.spark, params)
+                        onboarding_df = onboarder._OnboardDataflowspec__get_onboarding_file_dataframe(
+                            onboarding_path
+                        )
+
+                        bronze_row = onboarder._OnboardDataflowspec__get_bronze_dataflow_spec_dataframe(
+                            onboarding_df, "dev"
+                        ).collect()[0]
+                        silver_row = onboarder._OnboardDataflowspec__get_silver_dataflow_spec_dataframe(
+                            onboarding_df, "dev"
+                        ).collect()[0]
+
+                        self.assertEqual(
+                            json.loads(bronze_row.dataQualityExpectations),
+                            dqe_payload,
+                        )
+                        self.assertEqual(
+                            json.loads(silver_row.dataQualityExpectations),
+                            dqe_payload,
+                        )
+                        self.assertEqual(
+                            bronze_row.quarantineTargetDetails, {}
+                        )
+                        self.assertIsNone(
+                            silver_row.quarantineTargetDetails
+                        )
+
+    def test_legacy_quarantine_rules_without_targets_remain_compatible(self):
+        dqe_payload = {
+            "expect_or_quarantine": {"valid_id": "id IS NOT NULL"}
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            onboarding_path = (
+                self._stage_onboarding_with_dqe_without_quarantine(
+                    tmp_dir, "json", dqe_payload
+                )
+            )
+            params = copy.deepcopy(self.onboarding_bronze_silver_params_map)
+            params["onboarding_file_path"] = onboarding_path
+            onboarder = OnboardDataflowspec(self.spark, params)
+            onboarding_df = onboarder._OnboardDataflowspec__get_onboarding_file_dataframe(
+                onboarding_path
+            )
+
+            with self.assertLogs(
+                "databricks.labs.sdp_meta", level="WARNING"
+            ) as captured:
+                bronze_row = onboarder._OnboardDataflowspec__get_bronze_dataflow_spec_dataframe(
+                    onboarding_df, "dev"
+                ).collect()[0]
+                silver_row = onboarder._OnboardDataflowspec__get_silver_dataflow_spec_dataframe(
+                    onboarding_df, "dev"
+                ).collect()[0]
+
+            self.assertEqual(
+                json.loads(bronze_row.dataQualityExpectations),
+                dqe_payload,
+            )
+            self.assertEqual(
+                json.loads(silver_row.dataQualityExpectations),
+                dqe_payload,
+            )
+            self.assertEqual(bronze_row.quarantineTargetDetails, {})
+            self.assertEqual(silver_row.quarantineTargetDetails, {})
+            warning_output = "\n".join(captured.output)
+            self.assertIn(
+                "Bronze DQE contains non-empty expect_or_quarantine rules",
+                warning_output,
+            )
+            self.assertIn(
+                "Silver DQE contains non-empty expect_or_quarantine rules",
+                warning_output,
+            )
+            self.assertIn(
+                "Missing targets remain allowed for backward compatibility",
+                warning_output,
+            )
+
+    def test_optional_quarantine_metadata_is_preserved_without_dqe(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with open(self.onboarding_json_file, "r") as source:
+                onboarding_row = copy.deepcopy(json.load(source)[0])
+            onboarding_row.pop(
+                "bronze_data_quality_expectations_json_dev", None
+            )
+            onboarding_row.pop(
+                "silver_data_quality_expectations_json_dev", None
+            )
+            onboarding_path = os.path.join(tmp_dir, "onboarding.json")
+            with open(onboarding_path, "w") as target:
+                json.dump([onboarding_row], target)
+
+            params = copy.deepcopy(self.onboarding_bronze_silver_params_map)
+            params["onboarding_file_path"] = onboarding_path
+            onboarder = OnboardDataflowspec(self.spark, params)
+            onboarding_df = onboarder._OnboardDataflowspec__get_onboarding_file_dataframe(
+                onboarding_path
+            )
+
+            bronze_row = onboarder._OnboardDataflowspec__get_bronze_dataflow_spec_dataframe(
+                onboarding_df, "dev"
+            ).collect()[0]
+            silver_row = onboarder._OnboardDataflowspec__get_silver_dataflow_spec_dataframe(
+                onboarding_df, "dev"
+            ).collect()[0]
+
+            self.assertEqual(
+                bronze_row.quarantineTargetDetails["table"],
+                onboarding_row["bronze_quarantine_table"],
+            )
+            self.assertEqual(
+                silver_row.quarantineTargetDetails["table"],
+                onboarding_row["silver_quarantine_table"],
+            )
+
     def test_validate_params_for_onboardBronzeDataflowSpec(self):
         """Test for onboardDataflowspec parameters."""
         onboarding_params_map = copy.deepcopy(self.onboarding_bronze_silver_params_map)
