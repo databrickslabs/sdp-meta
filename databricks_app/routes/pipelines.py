@@ -15,6 +15,8 @@ import logging
 
 from flask import Blueprint, jsonify
 
+from _errors import exception_response
+
 logger = logging.getLogger(__name__)
 
 bp = Blueprint('pipelines', __name__)
@@ -170,7 +172,7 @@ def list_pipelines():
         return jsonify(pipelines)
     except Exception as exc:
         logger.exception("list_pipelines failed")
-        return jsonify({'error': str(exc)}), 500
+        return exception_response(exc, 'load pipelines')
 
 
 @bp.route('/api/pipelines/<pipeline_id>/events', methods=['GET'])
@@ -193,7 +195,7 @@ def pipeline_events(pipeline_id):
         return jsonify(events)
     except Exception as exc:
         logger.exception("pipeline_events failed for %s", pipeline_id)
-        return jsonify({'error': str(exc)}), 500
+        return exception_response(exc, 'load pipeline events')
 
 
 @bp.route('/api/pipelines/<pipeline_id>/start', methods=['POST'])
@@ -206,7 +208,7 @@ def start_pipeline(pipeline_id):
         return jsonify({'status': 'started', 'pipeline_id': pipeline_id})
     except Exception as exc:
         logger.exception("start_pipeline failed for %s", pipeline_id)
-        return jsonify({'error': str(exc)}), 500
+        return exception_response(exc, 'start the pipeline')
 
 
 @bp.route('/api/pipelines/<pipeline_id>/stop', methods=['POST'])
@@ -219,4 +221,4 @@ def stop_pipeline(pipeline_id):
         return jsonify({'status': 'stopped', 'pipeline_id': pipeline_id})
     except Exception as exc:
         logger.exception("stop_pipeline failed for %s", pipeline_id)
-        return jsonify({'error': str(exc)}), 500
+        return exception_response(exc, 'stop the pipeline')

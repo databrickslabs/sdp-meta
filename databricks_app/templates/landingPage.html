@@ -1003,6 +1003,9 @@
             white-space: pre-wrap; word-break: break-all;
             color: var(--ink-60); line-height: 1.6;
         }
+        .error-details { margin-top: 16px; }
+        .error-details summary { cursor: pointer; color: var(--ink-60); font-weight: 600; }
+        .error-details pre { margin-top: 10px; max-height: 280px; overflow: auto; }
         .job-chip {
             display: inline-flex; align-items: center; gap: 6px;
             background: var(--ink-05);
@@ -2093,7 +2096,29 @@
     }
     function handleError(err, title) {
         hideLoading();
-        showModal('<p style="color:var(--brand);font-weight:500">' + escapeHtml(err.message || String(err)) + '</p>', title);
+        showErrorModal({error: err.message || String(err)}, title);
+    }
+
+    function showErrorModal(data, title) {
+        var summary = data.error || 'The operation failed.';
+        var details = [data.details, data.stderr, data.stdout].filter(function(v) {
+            return typeof v === 'string' && v.trim();
+        }).join('\n\n');
+        var html = '<p style="color:var(--brand);font-weight:500;white-space:pre-wrap">' +
+            escapeHtml(summary) + '</p>';
+        if (details) {
+            html += '<details class="error-details"><summary>Details</summary><pre>' +
+                escapeHtml(details) + '</pre></details>';
+        }
+        showModal(html, title);
+    }
+
+    function commandFailureMessage(data) {
+        var detail = (data.stderr || '') + '\n' + (data.stdout || '') + '\n' + (data.error || '');
+        if (/permission.denied|forbidden|unauthorized|insufficient.privileges|\b403\b/i.test(detail)) {
+            return 'Access was denied. Ask a workspace admin to grant the App service principal the required permissions, then try again.';
+        }
+        return 'The command failed. Open Details for the technical error, then try again or contact an administrator.';
     }
 
     /* Safe JSON parser — checks Content-Type before calling .json() so an
@@ -2127,26 +2152,20 @@
         hideLoading();
         /* Explicit error field (validation, 4xx, etc.) */
         if (data.error) {
-            showModal(
-                '<p style="color:var(--brand);font-weight:500;white-space:pre-wrap">' +
-                escapeHtml(data.error) + '</p>',
-                defaultTitle
-            );
+            if (data.returncode !== undefined && data.returncode !== 0) {
+                showErrorModal({error: commandFailureMessage(data),
+                    details: data.details || data.error,
+                    stderr: data.stderr, stdout: data.stdout}, defaultTitle + ' — Failed');
+            } else {
+                showErrorModal(data, defaultTitle);
+            }
             return;
         }
         /* CLI subprocess failed */
         if (data.returncode !== undefined && data.returncode !== 0) {
-            var body = '';
-            if (data.stderr && data.stderr.trim()) {
-                body += '<pre style="color:var(--brand);white-space:pre-wrap;font-size:.82rem;max-height:320px;overflow:auto">'
-                     + escapeHtml(data.stderr.trim()) + '</pre>';
-            }
-            if (data.stdout && data.stdout.trim()) {
-                body += '<pre style="white-space:pre-wrap;font-size:.82rem;max-height:200px;overflow:auto">'
-                     + escapeHtml(data.stdout.trim()) + '</pre>';
-            }
-            if (!body) body = '<p>Command exited with code ' + data.returncode + '.</p>';
-            showModal(body, defaultTitle + ' — Failed');
+            showErrorModal({error: commandFailureMessage(data),
+                details: 'Exit code: ' + data.returncode,
+                stderr: data.stderr, stdout: data.stdout}, defaultTitle + ' — Failed');
             return;
         }
         /* Success with job details */
@@ -2257,11 +2276,7 @@
                     _finishProgressModal(false, 'Validation failed');
                     setTimeout(function() {
                         closeProgressModal();
-                        showModal(
-                            '<p style="color:var(--brand);font-weight:500;white-space:pre-wrap">' +
-                            escapeHtml(d.error) + '</p>',
-                            'Onboarding Error'
-                        );
+                        showErrorModal(d, 'Onboarding Error');
                     }, 400);
                     return;
                 }
@@ -2283,7 +2298,12 @@
                         _finishProgressModal(success, label);
                         setTimeout(function() {
                             closeProgressModal();
-                            renderApiResponse(jobData.result || {returncode: jobData.returncode}, 'Onboarding Result');
+                            renderApiResponse(jobData.result || {
+                                returncode: jobData.returncode,
+                                error: jobData.error,
+                                stderr: jobData.stderr,
+                                stdout: jobData.stdout
+                            }, 'Onboarding Result');
                             if (success) _appendViewSpecsCta();
                         }, success ? 800 : 1200);
                     });
@@ -2592,11 +2612,7 @@
                 })
                 .then(function(res) {
                     if (!res.ok || res.body.error) {
-                        showModal(
-                            '<p style="color:var(--brand);font-weight:500;white-space:pre-wrap">' +
-                            escapeHtml(res.body.error || 'Preview failed.') + '</p>',
-                            'Preview Error'
-                        );
+                        showErrorModal(res.body, 'Preview Error');
                         return;
                     }
                     var b = res.body;
@@ -2856,11 +2872,7 @@
                     _finishProgressModal(false, 'Validation failed');
                     setTimeout(function() {
                         closeProgressModal();
-                        showModal(
-                            '<p style="color:var(--brand);font-weight:500;white-space:pre-wrap">' +
-                            escapeHtml(d.error) + '</p>',
-                            'Deploy Error'
-                        );
+                        showErrorModal(d, 'Deploy Error');
                     }, 400);
                     return;
                 }
@@ -2880,7 +2892,12 @@
                         _finishProgressModal(success, label);
                         setTimeout(function() {
                             closeProgressModal();
-                            renderApiResponse(jobData.result || {returncode: jobData.returncode}, 'Deploy Result');
+                            renderApiResponse(jobData.result || {
+                                returncode: jobData.returncode,
+                                error: jobData.error,
+                                stderr: jobData.stderr,
+                                stdout: jobData.stdout
+                            }, 'Deploy Result');
                         }, success ? 800 : 1200);
                     });
                 }
@@ -3006,6 +3023,9 @@
         var html = '';
         html += '<div class="grant-panel">';
         html += '<div class="grant-warning"><strong>Grant required.</strong> ' + escapeHtml(d.error || 'The App service principal is missing required privileges on the catalog.') + '</div>';
+        if (d.details) {
+            html += '<details class="error-details"><summary>Details</summary><pre>' + escapeHtml(d.details) + '</pre></details>';
+        }
         html += '<dl class="grant-dl">';
         html += '<dt>App identity</dt><dd>' + escapeHtml(d.sp_display_name || '') + ' <code>' + escapeHtml(d.sp_principal || '') + '</code></dd>';
         html += '<dt>Catalog</dt><dd><code>' + escapeHtml(d.uc_name || '') + '</code></dd>';

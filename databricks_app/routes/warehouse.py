@@ -16,6 +16,7 @@ import logging
 from flask import Blueprint, jsonify, request
 
 from _config import _get_warehouse_id, _set_runtime_warehouse_id
+from _errors import exception_response, friendly_message
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,9 @@ def warehouse_status():
         logger.exception("warehouse_status failed for id=%s", wh_id)
         return jsonify({
             'configured': True, 'warehouse_id': wh_id,
-            'name': None, 'state': None, 'error': str(exc),
+            'name': None, 'state': None,
+            'error': friendly_message(exc, 'load the SQL warehouse'),
+            'details': f'{type(exc).__name__}: {exc}',
         })
 
 
@@ -67,7 +70,7 @@ def list_warehouses():
         return jsonify(warehouses)
     except Exception as exc:
         logger.exception("list_warehouses failed")
-        return jsonify({'error': str(exc)}), 500
+        return exception_response(exc, 'list SQL warehouses')
 
 
 @bp.route('/api/warehouse/configure', methods=['POST'])
@@ -103,7 +106,7 @@ def configure_warehouse():
             })
         except Exception as exc:
             logger.exception("configure_warehouse (existing) failed for id=%s", wh_id)
-            return jsonify({'error': str(exc)}), 400
+            return exception_response(exc, 'select the SQL warehouse', 400)
 
     elif mode == 'create':
         name = (body.get('name') or 'sdp-meta-app-warehouse').strip()
@@ -133,7 +136,7 @@ def configure_warehouse():
             })
         except Exception as exc:
             logger.exception("configure_warehouse (create) failed")
-            return jsonify({'error': str(exc)}), 500
+            return exception_response(exc, 'create the SQL warehouse')
 
     else:
         return jsonify({'error': f'Unknown mode: {mode}. Use "existing" or "create".'}), 400
