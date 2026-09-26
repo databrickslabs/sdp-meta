@@ -18,6 +18,8 @@ import logging
 
 from flask import Blueprint, jsonify, request
 
+from _errors import exception_response
+
 logger = logging.getLogger(__name__)
 
 bp = Blueprint('spec_editor', __name__)
@@ -42,7 +44,7 @@ def workspace_ls():
         return jsonify(entries)
     except Exception as exc:
         logger.exception("workspace_ls failed for path=%s", path)
-        return jsonify({'error': str(exc)}), 500
+        return exception_response(exc, 'list workspace files')
 
 
 @bp.route('/api/metadata/workspace-file', methods=['GET'])
@@ -59,7 +61,7 @@ def get_workspace_file():
         return jsonify({'path': path, 'content': content_bytes.decode('utf-8'), 'format': fmt})
     except Exception as exc:
         logger.exception("get_workspace_file failed for path=%s", path)
-        return jsonify({'error': str(exc)}), 500
+        return exception_response(exc, 'read the workspace file')
 
 
 @bp.route('/api/metadata/workspace-file', methods=['POST'])
@@ -95,7 +97,7 @@ def save_workspace_file():
         return jsonify({'path': path, 'bytes_written': len(content_bytes)})
     except Exception as exc:
         logger.exception("save_workspace_file failed for path=%s", path)
-        return jsonify({'error': str(exc)}), 500
+        return exception_response(exc, 'save the workspace file')
 
 
 @bp.route('/api/metadata/parse-spec', methods=['POST'])

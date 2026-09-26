@@ -13,6 +13,7 @@ import time
 from flask import Blueprint, jsonify, request
 
 from _config import _get_warehouse_id
+from _errors import exception_response, friendly_message
 
 try:
     from databricks.labs.sdp_meta.identifiers import (
@@ -50,7 +51,7 @@ def list_catalogs():
         return jsonify(sorted(catalogs))
     except Exception as exc:
         logger.exception("list_catalogs failed")
-        return jsonify({'error': str(exc)}), 500
+        return exception_response(exc, 'list Unity Catalog catalogs')
 
 
 @bp.route('/api/metadata/schemas', methods=['GET'])
@@ -66,7 +67,7 @@ def list_schemas():
         return jsonify(sorted(schemas))
     except Exception as exc:
         logger.exception("list_schemas failed for catalog=%s", catalog)
-        return jsonify({'error': str(exc)}), 500
+        return exception_response(exc, 'list Unity Catalog schemas')
 
 
 @bp.route('/api/metadata/tables', methods=['GET'])
@@ -97,7 +98,7 @@ def list_tables():
         return jsonify(tables)
     except Exception as exc:
         logger.exception("list_tables failed for %s.%s", catalog, schema)
-        return jsonify({'error': str(exc)}), 500
+        return exception_response(exc, 'list Unity Catalog tables')
 
 
 @bp.route('/api/metadata/table-data', methods=['POST'])
@@ -189,7 +190,11 @@ def table_data():
         if state_val != 'SUCCEEDED':
             err = getattr(result.status, 'error', None)
             msg = getattr(err, 'message', None) if err else 'Query failed'
-            return jsonify({'error': msg or 'Query failed', 'state': state_val}), 400
+            detail = msg or f'Query returned {state_val}'
+            return jsonify({
+                'error': friendly_message(RuntimeError(detail), 'preview table data'),
+                'details': detail, 'state': state_val,
+            }), 400
 
         schema_obj = result.manifest.schema if result.manifest else None
         columns = [c.name for c in (schema_obj.columns if schema_obj else [])]
@@ -198,4 +203,4 @@ def table_data():
         return jsonify({'columns': columns, 'rows': rows})
     except Exception as exc:
         logger.exception("table_data query failed: %s", sql)
-        return jsonify({'error': str(exc)}), 500
+        return exception_response(exc, 'preview table data')

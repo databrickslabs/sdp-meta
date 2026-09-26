@@ -13,6 +13,7 @@ import time
 from flask import Blueprint, jsonify, request
 
 from _config import _get_warehouse_id
+from _errors import friendly_message
 
 try:
     from databricks.labs.sdp_meta.identifiers import validate_uc_identifier
@@ -105,7 +106,11 @@ def get_dataflowspecs():
                         f"Run onboarding first to create the DataflowSpec tables."
                     )
                     return {'columns': [], 'rows': [], 'groups': [], 'error': friendly, 'not_found': True}
-                return {'columns': [], 'rows': [], 'groups': [], 'error': msg}
+                return {
+                    'columns': [], 'rows': [], 'groups': [],
+                    'error': friendly_message(RuntimeError(msg), 'load DataflowSpec rows'),
+                    'details': msg,
+                }
 
             schema_obj = result.manifest.schema if result.manifest else None
             columns = [c.name for c in (schema_obj.columns if schema_obj else [])]
@@ -128,7 +133,11 @@ def get_dataflowspecs():
             return {'columns': columns, 'rows': rows, 'groups': groups, 'error': None}
         except Exception as exc:
             logger.exception("DataflowSpec query failed for %s.%s.%s", catalog, schema, table_name)
-            return {'columns': [], 'rows': [], 'groups': [], 'error': str(exc)}
+            return {
+                'columns': [], 'rows': [], 'groups': [],
+                'error': friendly_message(exc, 'load DataflowSpec rows'),
+                'details': f'{type(exc).__name__}: {exc}',
+            }
 
     bronze_result = _run_query(bronze_table)
     silver_result = _run_query(silver_table)

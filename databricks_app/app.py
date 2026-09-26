@@ -35,6 +35,8 @@ import subprocess  # noqa: F401 \u2014 re-exported below so tests can mock subpr
 from flask import Flask, jsonify
 from werkzeug.exceptions import HTTPException
 
+from _errors import exception_response
+
 # ── Logging ──────────────────────────────────────────────────────────────────
 # Always log to stdout/stderr (captured by the Apps runtime). Add a
 # file handler only if the target path is writable \u2014 the App
@@ -71,13 +73,7 @@ def handle_exception(exc):
     if isinstance(exc, HTTPException):
         return jsonify({'error': exc.description or str(exc)}), exc.code
     logger.exception("Unhandled exception in route: %s", exc)
-    return jsonify({
-        'error': str(exc),
-        'stdout': '',
-        'stderr': '',
-        'returncode': -1,
-        'modal_content': None,
-    }), 500
+    return exception_response(exc, 'complete this request')
 
 
 @app.errorhandler(404)

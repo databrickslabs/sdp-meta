@@ -89,6 +89,9 @@ class PreflightResult:
     SP can't see the catalog at all, SDK error, etc.). When set, ``ok`` is
     always False and ``missing`` is the full required set."""
 
+    details: Optional[str] = None
+    """SDK exception, shown only when the user expands technical details."""
+
 
 def _build_grant_sql(uc_name: str, sp_principal: str) -> str:
     """Render the SQL the catalog owner should paste into a SQL editor.
@@ -176,7 +179,8 @@ def check_app_sp_grants_on_catalog(
             sp_principal="",
             sp_display_name="",
             missing=sorted(REQUIRED_CATALOG_PRIVILEGES),
-            error=f"could not resolve App SP identity: {exc}",
+            error="Could not identify the App service principal. Check the App's workspace credentials and try again.",
+            details=f'{type(exc).__name__}: {exc}',
         )
 
     grant_sql = _build_grant_sql(uc_name, sp_principal)
@@ -201,10 +205,8 @@ def check_app_sp_grants_on_catalog(
         #     anywhere) -> PermissionDenied.
         #   - Network blip / SDK auth misconfiguration.
         #
-        # All three are equivalent from the operator's perspective:
-        # "you need to grant the App SP something". Surface the raw
-        # error message for diagnosis but always return the GRANT SQL
-        # so they can act on it without further round-trips.
+        # Preserve SDK diagnostics in Details while keeping the action
+        # and GRANT SQL visible to the catalog owner.
         return PreflightResult(
             ok=False,
             uc_name=uc_name,
@@ -213,12 +215,10 @@ def check_app_sp_grants_on_catalog(
             missing=sorted(REQUIRED_CATALOG_PRIVILEGES),
             grant_sql=grant_sql,
             error=(
-                f"Could not read effective privileges on catalog "
-                f"'{uc_name}' for App SP '{sp_principal}': {exc}. "
-                f"This usually means the catalog does not exist, OR the "
-                f"App SP has zero privileges on it. Run the GRANT SQL "
-                f"above as the catalog owner and retry."
+                f"Could not check access to catalog '{uc_name}'. Confirm it exists, "
+                "then have the catalog owner run the GRANT SQL below and retry."
             ),
+            details=f'{type(exc).__name__}: {exc}',
         )
 
     have: set[str] = set()
