@@ -271,6 +271,8 @@ dbutils.library.restartPython()
 # MAGIC | **9** | **Apply Changes From Snapshot** — SCD Type 1 & 2 |
 # MAGIC | **10** | **DLT Sink** — write to external delta table |
 # MAGIC | **11** | **Multi-Source AUTO CDC** — N regional CDC sources merged into 1 silver target |
+# MAGIC | **12** | **Row-Level Filtering** — UC row filters on Bronze and Silver |
+# MAGIC | **13** | **Auto Loader Schema Inference & Evolution** — no source DDL |
 # MAGIC
 # MAGIC ### Features Demonstrated
 # MAGIC - Metadata-driven onboarding (JSON or YAML → DataflowSpec tables, controlled by the `Onboarding File Format` widget)
@@ -287,6 +289,7 @@ dbutils.library.restartPython()
 # MAGIC - **Apply Changes From Snapshot** — snapshot-based SCD Type 1 & 2
 # MAGIC - **Pipeline Sink** — `dp.create_sink` to write to external delta
 # MAGIC - **Multi-Source AUTO CDC** — N `dp.create_auto_cdc_flow` calls fan in to one silver target ([#294](https://github.com/databrickslabs/sdp-meta/issues/294))
+# MAGIC - **Auto Loader Schema Inference & Evolution** — `schemaHints`, additive columns, and rescued incompatible values without `source_schema_path`
 
 # COMMAND ----------
 
@@ -363,9 +366,12 @@ validate_uc_identifier(uc_schema_name, kind="uc_schema_name widget")
 w = WorkspaceClient()
 
 
-def run_pipeline_and_wait(w, pipeline_id, label=""):
+def run_pipeline_and_wait(w, pipeline_id, label="", full_refresh=False):
     """Start a pipeline update and block until it completes."""
-    resp = w.pipelines.start_update(pipeline_id=pipeline_id)
+    resp = w.pipelines.start_update(
+        pipeline_id=pipeline_id,
+        full_refresh=full_refresh,
+    )
     update_id = resp.update_id
     host = w.config.host.rstrip("/")
     pipeline_url = f"{host}/pipelines/{pipeline_id}/updates/{update_id}"
@@ -536,11 +542,15 @@ onboarding_file_path = f"{uc_volume_path}/onboarding.{onboarding_format}"
 af_data_path = f"{data_path}/append_flow"
 snapshot_data_path = f"{data_path}/snapshots"
 sink_path = f"{uc_volume_path}/data/sink"
+inferred_schema_data_path = (
+    f"{data_path}/autoloader_schema_demo/landing"
+)
 
 for path in [
     demo_path, resources_path, data_path, ddl_path,
     incremental_data_path, conf_path, dqe_path,
     af_data_path, snapshot_data_path, sink_path,
+    inferred_schema_data_path,
 ]:
     os.makedirs(path, exist_ok=True)
 
@@ -551,6 +561,7 @@ print(f"DQE path          : {dqe_path}")
 print(f"Append Flow path  : {af_data_path}")
 print(f"Snapshot path     : {snapshot_data_path}")
 print(f"Sink path         : {sink_path}")
+print(f"Inferred data path: {inferred_schema_data_path}")
 print(f"Onboarding file   : {onboarding_file_path}")
 
 # COMMAND ----------
@@ -3819,90 +3830,6 @@ display(
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ---
-# MAGIC ## Final Data Flow Summary
-# MAGIC
-# MAGIC Complete view across all features demonstrated.
-
-# COMMAND ----------
-
-# DBTITLE 1,Complete Pipeline Data Flow Summary
-all_tables_final = [
-    ("customers", "cloudFiles + CDC", bronze_schema,
-     silver_schema),
-    ("transactions", "cloudFiles + CDC", bronze_schema,
-     silver_schema),
-    ("products", "cloudFiles + CDC", bronze_schema,
-     silver_schema),
-    ("stores", "cloudFiles + CDC", bronze_schema,
-     silver_schema),
-    ("orders", "Append Flow + CDC", bronze_schema,
-     silver_schema),
-    ("snap_products", "Snapshot SCD2", bronze_schema,
-     silver_schema),
-    ("snap_stores", "Snapshot SCD1", bronze_schema,
-     silver_schema),
-    ("iot_events", "CloudFiles + Sink", bronze_schema,
-     None),
-    ("customers_us_cdc", "Multi-source CDC (bronze, US)",
-     bronze_schema, None),
-    ("customers_eu_cdc", "Multi-source CDC (bronze, EU)",
-     bronze_schema, None),
-    ("customers_apac_cdc", "Multi-source CDC (bronze, APAC)",
-     bronze_schema, None),
-    ("customers_regional",
-     "Multi-source AUTO CDC (silver, unified)",
-     None, silver_schema),
-]
-
-summary_rows = []
-for table, feature, b_schema, s_schema in all_tables_final:
-    bronze_fqn = (
-        f"{uc_catalog_name}.{b_schema}.{table}"
-    )
-    try:
-        bronze_count = spark.sql(
-            f"SELECT count(*) FROM {bronze_fqn}"
-        ).first()[0]
-    except Exception:
-        bronze_count = 0
-
-    quarantine_fqn = (
-        f"{uc_catalog_name}.{b_schema}"
-        f".{table}_quarantine"
-    )
-    try:
-        quarantine_count = spark.sql(
-            f"SELECT count(*) FROM {quarantine_fqn}"
-        ).first()[0]
-    except Exception:
-        quarantine_count = 0
-
-    silver_count = 0
-    if s_schema:
-        silver_fqn = (
-            f"{uc_catalog_name}.{s_schema}.{table}"
-        )
-        try:
-            silver_count = spark.sql(
-                f"SELECT count(*) FROM {silver_fqn}"
-            ).first()[0]
-        except Exception:
-            silver_count = 0
-
-    summary_rows.append(Row(
-        Table=table,
-        Feature=feature,
-        Bronze_Rows=bronze_count,
-        Quarantine_Rows=quarantine_count,
-        Silver_Rows=silver_count,
-    ))
-
-display(spark.createDataFrame(summary_rows))
-
-# COMMAND ----------
-
-# MAGIC %md
 # MAGIC ## Stage 12: Row-Level Filtering (UC Row Filter)
 # MAGIC
 # MAGIC The `customers` flow in the onboarding spec has both
@@ -3987,6 +3914,468 @@ else:
 
 # MAGIC %md
 # MAGIC ---
+# MAGIC ## Stage 13: Auto Loader Schema Inference & Evolution
+# MAGIC
+# MAGIC This stage exercises the schema-less Auto Loader path.
+# MAGIC Unlike the other CloudFiles examples, this Bronze-only flow deliberately
+# MAGIC omits `source_schema_path`. Auto Loader owns the source schema and uses:
+# MAGIC
+# MAGIC - `cloudFiles.inferColumnTypes = true`
+# MAGIC - `cloudFiles.schemaHints` for stable physical types
+# MAGIC - `cloudFiles.schemaEvolutionMode = addNewColumns`
+# MAGIC - `cloudFiles.rescuedDataColumn = _rescued_data`
+# MAGIC
+# MAGIC The flow uses an isolated `SCHEMA_EVOLUTION` data-flow group and a dedicated
+# MAGIC serverless pipeline so schema discovery and restart behavior cannot
+# MAGIC affect any earlier demo stage.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### 13.1 Phase 1 — Seed Deterministic JSON
+# MAGIC
+# MAGIC Three records establish the initial schema. The `event_id`, `amount`,
+# MAGIC and `event_ts` hints below are validated after the first pipeline run.
+
+# COMMAND ----------
+
+inferred_phase_1_file = (
+    f"{inferred_schema_data_path}/phase_1.json"
+)
+inferred_phase_2_file = (
+    f"{inferred_schema_data_path}/phase_2.json"
+)
+
+# Keep Phase 1 deterministic if this section is re-run before Phase 2.
+for stale_file in (inferred_phase_1_file, inferred_phase_2_file):
+    if os.path.exists(stale_file):
+        os.remove(stale_file)
+
+inferred_phase_1_rows = [
+    {
+        "event_id": 1,
+        "amount": 12.50,
+        "event_ts": "2026-09-26T08:00:00Z",
+        "region": "US",
+    },
+    {
+        "event_id": 2,
+        "amount": 7.25,
+        "event_ts": "2026-09-26T08:01:00Z",
+        "region": "UK",
+    },
+    {
+        "event_id": 3,
+        "amount": 19.99,
+        "event_ts": "2026-09-26T08:02:00Z",
+        "region": "DE",
+    },
+]
+
+with open(inferred_phase_1_file, "w") as fh:
+    for record in inferred_phase_1_rows:
+        fh.write(json.dumps(record, sort_keys=True) + "\n")
+
+print(
+    f"Wrote {len(inferred_phase_1_rows)} deterministic records: "
+    f"{inferred_phase_1_file}"
+)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### 13.2 Onboard a Bronze-Only Flow Without `source_schema_path`
+# MAGIC
+# MAGIC `cloudFiles.schemaHints` influences Auto Loader's inferred physical
+# MAGIC types; it does not supply a full source schema. Any incompatible value
+# MAGIC is retained in `_rescued_data` rather than silently discarded.
+
+# COMMAND ----------
+
+inferred_schema_feed = {
+    "data_flow_id": "schema-evolution-events",
+    "data_flow_group": "SCHEMA_EVOLUTION",
+    "source_system": "AUTOLOADER_SCHEMA_DEMO",
+    "source_format": "cloudFiles",
+    "source_details": {
+        "source_path_prod": inferred_schema_data_path,
+    },
+    "bronze_catalog_prod": uc_catalog_name,
+    "bronze_database_prod": bronze_schema,
+    "bronze_table": "events_inferred",
+    "bronze_table_comment": (
+        "Auto Loader schema inference and evolution demo"
+    ),
+    "bronze_reader_options": {
+        "cloudFiles.format": "json",
+        "cloudFiles.inferColumnTypes": "true",
+        "cloudFiles.schemaHints": (
+            "event_id BIGINT, event_ts TIMESTAMP, "
+            "amount DECIMAL(10,2)"
+        ),
+        "cloudFiles.schemaEvolutionMode": "addNewColumns",
+        "cloudFiles.rescuedDataColumn": "_rescued_data",
+    },
+    "bronze_table_properties": {
+        "pipelines.reset.allowed": "true",
+    },
+    "bronze_cluster_by_auto": True,
+}
+
+onboarding_json = [
+    entry
+    for entry in _read_onboarding(onboarding_file_path)
+    if entry.get("data_flow_id") != "schema-evolution-events"
+]
+onboarding_json.append(inferred_schema_feed)
+_write_onboarding(onboarding_json, onboarding_file_path)
+
+onboarding_params["overwrite"] = "True"
+OnboardDataflowspec(
+    spark=spark, dict_obj=onboarding_params, uc_enabled=True
+).onboard_bronze_dataflow_spec()
+
+inferred_spec = spark.sql(f"""
+    SELECT `schema`, sourceDetails, readerConfigOptions
+    FROM {uc_catalog_name}.{uc_schema_name}.bronze_dataflowspec
+    WHERE dataFlowId = 'schema-evolution-events'
+""").first()
+assert inferred_spec is not None, (
+    "SCHEMA_EVOLUTION Bronze DataflowSpec was not created"
+)
+assert inferred_spec["schema"] is None, (
+    "Stage 13 must not persist an explicit source schema"
+)
+assert "source_schema_path" not in inferred_spec.sourceDetails, (
+    "Stage 13 must exercise Auto Loader without source_schema_path"
+)
+print(
+    "Onboarded Bronze-only SCHEMA_EVOLUTION flow without "
+    "source_schema_path."
+)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### 13.3 Create & Run the Dedicated Serverless Pipeline
+
+# COMMAND ----------
+
+inferred_pipeline_name = (
+    f"sdp_meta_demo_schema_evolution_{uc_schema_name}"
+)
+inferred_pipeline_id_file = (
+    f"{uc_volume_path}/schema_evolution_pipeline_id.txt"
+)
+inferred_pipeline_config = {
+    "layer": "bronze",
+    "bronze.group": "SCHEMA_EVOLUTION",
+    "bronze.dataflowspecTable": (
+        f"{uc_catalog_name}.{uc_schema_name}.bronze_dataflowspec"
+    ),
+    "sdp_meta_whl": git_url_for_pip,
+}
+
+existing_inferred = [
+    p for p in w.pipelines.list_pipelines()
+    if p.name == inferred_pipeline_name
+]
+if existing_inferred:
+    inferred_pipeline_id = existing_inferred[0].pipeline_id
+    print(
+        "Reusing existing schema-inference pipeline: "
+        f"{inferred_pipeline_id}"
+    )
+else:
+    created_inferred = create_pipeline(
+        w,
+        name=inferred_pipeline_name,
+        catalog=uc_catalog_name,
+        schema=bronze_schema,
+        libraries=[
+            PipelineLibrary(
+                notebook=NotebookLibrary(
+                    path=runner_notebook_path
+                )
+            )
+        ],
+        configuration=inferred_pipeline_config,
+        development=True,
+        serverless=True,
+    )
+    inferred_pipeline_id = created_inferred.pipeline_id
+    print(
+        "Schema-inference pipeline created: "
+        f"{inferred_pipeline_id}"
+    )
+
+with open(inferred_pipeline_id_file, "w") as fh:
+    fh.write(inferred_pipeline_id)
+print(
+    "Schema-inference pipeline ID saved to: "
+    f"{inferred_pipeline_id_file}"
+)
+
+# A full refresh clears the target and Auto Loader checkpoint/schema state.
+# Without it, rerunning this section would reuse the evolved five-row table
+# and skip the recreated phase_1.json because its path was already processed.
+run_pipeline_and_wait(
+    w,
+    inferred_pipeline_id,
+    label="schema inference phase 1",
+    full_refresh=True,
+)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### 13.4 Validate Phase 1 Hinted Physical Types
+
+# COMMAND ----------
+
+inferred_table_fqn = (
+    f"{uc_catalog_name}.{bronze_schema}.events_inferred"
+)
+inferred_schema = spark.table(inferred_table_fqn).schema
+inferred_physical_types = {
+    field.name: field.dataType.simpleString()
+    for field in inferred_schema.fields
+}
+
+expected_hinted_types = {
+    "event_id": "bigint",
+    "amount": "decimal(10,2)",
+    "event_ts": "timestamp",
+    "region": "string",
+    "_rescued_data": "string",
+}
+for column_name, expected_type in expected_hinted_types.items():
+    actual_type = inferred_physical_types.get(column_name)
+    assert actual_type == expected_type, (
+        f"{column_name}: expected hinted type {expected_type}, "
+        f"got {actual_type}"
+    )
+
+phase_1_count = spark.sql(
+    f"SELECT count(*) AS c FROM {inferred_table_fqn}"
+).first().c
+assert phase_1_count == 3, (
+    f"Phase 1 expected 3 rows, got {phase_1_count}"
+)
+print(f"Validated hinted physical types: {expected_hinted_types}")
+display(spark.table(inferred_table_fqn).orderBy("event_id"))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### 13.5 Phase 2 — Add a Column and Rescue an Incompatible Value
+# MAGIC
+# MAGIC The second file introduces `device_type`, which Auto Loader adds to
+# MAGIC the target under `addNewColumns`. It also sends `amount =
+# MAGIC "not-a-decimal"` for one row. Because `amount` was hinted as
+# MAGIC `DECIMAL(10,2)`, that value is captured in `_rescued_data`.
+# MAGIC
+# MAGIC Auto Loader commonly records an additive schema on the first update
+# MAGIC and asks the stream to restart. The retry loop below treats that first
+# MAGIC failure as schema discovery and runs one clean restart; an unrelated or
+# MAGIC repeated failure still surfaces from the final attempt.
+
+# COMMAND ----------
+
+inferred_phase_2_rows = [
+    {
+        "event_id": 4,
+        "amount": 25.75,
+        "device_type": "mobile",
+        "event_ts": "2026-09-27T08:00:00Z",
+        "region": "US",
+    },
+    {
+        "event_id": 5,
+        "amount": "not-a-decimal",
+        "device_type": "web",
+        "event_ts": "2026-09-27T08:01:00Z",
+        "region": "UK",
+    },
+]
+
+with open(inferred_phase_2_file, "w") as fh:
+    for record in inferred_phase_2_rows:
+        fh.write(json.dumps(record, sort_keys=True) + "\n")
+
+print(
+    f"Wrote {len(inferred_phase_2_rows)} evolution records: "
+    f"{inferred_phase_2_file}"
+)
+
+for attempt in range(1, 3):
+    try:
+        run_pipeline_and_wait(
+            w,
+            inferred_pipeline_id,
+            label=f"schema evolution phase 2 (attempt {attempt})",
+        )
+        break
+    except RuntimeError:
+        if attempt == 2:
+            raise
+        print(
+            "Phase 2 first update requested a restart after additive "
+            "schema discovery; retrying once with the evolved schema."
+        )
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### 13.6 Validate the Evolved Column and Rescued Data
+
+# COMMAND ----------
+
+evolved_schema = spark.table(inferred_table_fqn).schema
+evolved_types = {
+    field.name: field.dataType.simpleString()
+    for field in evolved_schema.fields
+}
+assert evolved_types.get("device_type") == "string", (
+    "Auto Loader did not add device_type as a STRING column"
+)
+
+evolution_result = spark.sql(f"""
+    SELECT
+        count(*) AS total_rows,
+        count_if(device_type IS NOT NULL) AS evolved_column_rows,
+        count_if(_rescued_data IS NOT NULL) AS rescued_rows
+    FROM {inferred_table_fqn}
+""").first()
+assert evolution_result.total_rows == 5, (
+    f"Phase 2 expected 5 total rows, got {evolution_result.total_rows}"
+)
+assert evolution_result.evolved_column_rows == 2, (
+    "Expected device_type on both Phase 2 rows, got "
+    f"{evolution_result.evolved_column_rows}"
+)
+assert evolution_result.rescued_rows == 1, (
+    "Expected exactly one non-null _rescued_data value, got "
+    f"{evolution_result.rescued_rows}"
+)
+rescued_payload = spark.sql(f"""
+    SELECT _rescued_data
+    FROM {inferred_table_fqn}
+    WHERE _rescued_data IS NOT NULL
+""").first()._rescued_data
+assert "not-a-decimal" in rescued_payload, (
+    "Rescued payload did not preserve the incompatible amount"
+)
+
+print(
+    "Schema evolution validated: "
+    f"device_type={evolved_types['device_type']}, "
+    f"rescued_rows={evolution_result.rescued_rows}"
+)
+display(
+    spark.sql(f"""
+        SELECT event_id, event_ts, amount, region, device_type,
+               _rescued_data
+        FROM {inferred_table_fqn}
+        ORDER BY event_id
+    """)
+)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ---
+# MAGIC ## Final Data Flow Summary
+# MAGIC
+# MAGIC Complete view across all features demonstrated.
+
+# COMMAND ----------
+
+# DBTITLE 1,Complete Pipeline Data Flow Summary
+all_tables_final = [
+    ("customers", "cloudFiles + CDC", bronze_schema,
+     silver_schema),
+    ("transactions", "cloudFiles + CDC", bronze_schema,
+     silver_schema),
+    ("products", "cloudFiles + CDC", bronze_schema,
+     silver_schema),
+    ("stores", "cloudFiles + CDC", bronze_schema,
+     silver_schema),
+    ("orders", "Append Flow + CDC", bronze_schema,
+     silver_schema),
+    ("snap_products", "Snapshot SCD2", bronze_schema,
+     silver_schema),
+    ("snap_stores", "Snapshot SCD1", bronze_schema,
+     silver_schema),
+    ("iot_events", "CloudFiles + Sink", bronze_schema,
+     None),
+    ("customers_us_cdc", "Multi-source CDC (bronze, US)",
+     bronze_schema, None),
+    ("customers_eu_cdc", "Multi-source CDC (bronze, EU)",
+     bronze_schema, None),
+    ("customers_apac_cdc", "Multi-source CDC (bronze, APAC)",
+     bronze_schema, None),
+    ("customers_regional",
+     "Multi-source AUTO CDC (silver, unified)",
+     None, silver_schema),
+    ("events_inferred",
+     "Auto Loader schema inference + evolution",
+     bronze_schema, None),
+]
+
+summary_rows = []
+for table, feature, b_schema, s_schema in all_tables_final:
+    bronze_count = 0
+    if b_schema:
+        bronze_fqn = (
+            f"{uc_catalog_name}.{b_schema}.{table}"
+        )
+        try:
+            bronze_count = spark.sql(
+                f"SELECT count(*) FROM {bronze_fqn}"
+            ).first()[0]
+        except Exception:
+            bronze_count = 0
+
+    quarantine_count = 0
+    if b_schema:
+        quarantine_fqn = (
+            f"{uc_catalog_name}.{b_schema}"
+            f".{table}_quarantine"
+        )
+        try:
+            quarantine_count = spark.sql(
+                f"SELECT count(*) FROM {quarantine_fqn}"
+            ).first()[0]
+        except Exception:
+            quarantine_count = 0
+
+    silver_count = 0
+    if s_schema:
+        silver_fqn = (
+            f"{uc_catalog_name}.{s_schema}.{table}"
+        )
+        try:
+            silver_count = spark.sql(
+                f"SELECT count(*) FROM {silver_fqn}"
+            ).first()[0]
+        except Exception:
+            silver_count = 0
+
+    summary_rows.append(Row(
+        Table=table,
+        Feature=feature,
+        Bronze_Rows=bronze_count,
+        Quarantine_Rows=quarantine_count,
+        Silver_Rows=silver_count,
+    ))
+
+display(spark.createDataFrame(summary_rows))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ---
 # MAGIC ## Summary
 # MAGIC
 # MAGIC | Feature | How It Was Used |
@@ -4006,6 +4395,7 @@ else:
 # MAGIC | **Pipeline Sink** | Write to external delta table via `dp.create_sink` |
 # MAGIC | **Multi-Source AUTO CDC** | N `dp.create_auto_cdc_flow` calls → one unified silver streaming table ([#294](https://github.com/databrickslabs/sdp-meta/issues/294)) |
 # MAGIC | **Row-level filtering** | `bronze_row_filter` / `silver_row_filter` → UC `ROW FILTER` ([#303](https://github.com/databrickslabs/sdp-meta/issues/303)) |
+# MAGIC | **Auto Loader schema inference & evolution** | No `source_schema_path`; hinted types, additive columns, and rescued incompatible values |
 # MAGIC
 # MAGIC ### Learn More
 # MAGIC - [Full Documentation](https://databrickslabs.github.io/sdp-meta/)
@@ -4234,6 +4624,52 @@ else:
         6,
     )
 
+    # 8. Auto Loader inference/evolution (Stage 13) — deterministic
+    # Phase 1 (3 rows) + Phase 2 (2 rows) yields exactly 5 rows. The
+    # evolved column must be present on both Phase 2 rows, and the
+    # incompatible hinted decimal must produce rescued data.
+    inferred_smoke_fqn = (
+        f"{uc_catalog_name}.{bronze_schema}.events_inferred"
+    )
+    _expect_exact(inferred_smoke_fqn, 5)
+    try:
+        inferred_smoke = spark.sql(f"""
+            SELECT
+                count_if(device_type IS NOT NULL)
+                    AS evolved_column_rows,
+                count_if(_rescued_data IS NOT NULL)
+                    AS rescued_rows
+            FROM {inferred_smoke_fqn}
+        """).first()
+        if inferred_smoke.evolved_column_rows != 2:
+            failures.append(
+                f"{inferred_smoke_fqn}: expected device_type on "
+                "exactly 2 rows, got "
+                f"{inferred_smoke.evolved_column_rows}"
+            )
+        if inferred_smoke.rescued_rows != 1:
+            failures.append(
+                f"{inferred_smoke_fqn}: expected exactly one "
+                "non-null _rescued_data value, got "
+                f"{inferred_smoke.rescued_rows}"
+            )
+        else:
+            rescued_smoke_payload = spark.sql(f"""
+                SELECT _rescued_data
+                FROM {inferred_smoke_fqn}
+                WHERE _rescued_data IS NOT NULL
+            """).first()._rescued_data
+            if "not-a-decimal" not in rescued_smoke_payload:
+                failures.append(
+                    f"{inferred_smoke_fqn}: rescued payload did not "
+                    "preserve not-a-decimal"
+                )
+    except Exception as exc:
+        failures.append(
+            f"{inferred_smoke_fqn}: schema evolution validation "
+            f"failed: {exc}"
+        )
+
     if failures:
         raise AssertionError(
             "Demo final validation failed "
@@ -4272,8 +4708,9 @@ def _cleanup_demo_resources():
        the pid file is missing (e.g. cleanup re-run after the volume
        was already dropped).
     2. Runner notebooks -- ``runner_notebook_path`` and
-       ``snapshot_runner_path``. The sink pipeline reuses
-       ``runner_notebook_path``, so it's covered by the same delete.
+       ``snapshot_runner_path``. The sink, multi-source CDC, and
+       schema-inference pipelines reuse ``runner_notebook_path``, so
+       they are covered by the same delete.
     3. Per-run schemas -- ``bronze_schema``, ``silver_schema``,
        ``pipeline_target_schema``, ``uc_schema_name``. Each ``DROP
        SCHEMA ... CASCADE`` removes every table, view, and (for
@@ -4302,6 +4739,11 @@ def _cleanup_demo_resources():
             "multi-source CDC",
             msc_pipeline_id_file,
             msc_pipeline_name,
+        ),
+        (
+            "Auto Loader schema inference",
+            inferred_pipeline_id_file,
+            inferred_pipeline_name,
         ),
     ]
     for label, pid_file, name in pipeline_specs:

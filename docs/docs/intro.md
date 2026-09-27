@@ -22,6 +22,12 @@ Teams describe sources, targets, data quality rules, CDC behavior, transformatio
 
 Its primary value is reducing per-table pipeline code while giving teams consistent patterns, controls, and deployment options.
 
+:::tip See the metadata model at scale
+The [At-Scale Auto Loader Demo](https://github.com/databrickslabs/sdp-meta/tree/main/demo#at-scale-auto-loader-demo) creates 100 Bronze and 100 Silver tables from one generated onboarding model. It validates schema inference, schema hints, explicit DDLs, additive evolution, rescued data, quarantine, table-specific Silver logic, and the handoff to Gold.
+
+This is the clearest runnable example of SDP-META's main advantage: adding standardized data flows through metadata instead of maintaining one pipeline implementation per table.
+:::
+
 ## Who is it for?
 
 Use SDP-META when:

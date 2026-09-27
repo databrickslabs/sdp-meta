@@ -28,6 +28,8 @@
 
 **When it's not the best fit:** one or two simple pipelines, Gold-layer business modeling, tables that each need unique application logic, a managed connector and downstream logic that already satisfy the complete Bronze/Silver requirement, or a need for a formal support SLA (SDP-META is a Databricks Labs project). See the [Introduction](https://databrickslabs.github.io/sdp-meta/docs/intro) for the full positioning.
 
+> **See the core value at scale:** the [At-Scale Auto Loader Demo](demo/README.md#at-scale-auto-loader-demo) generates 100 metadata-driven Bronze and Silver flows from one onboarding model. It compares inferred, hinted, and explicit schemas and validates evolution, rescued data, DQ quarantine, table-specific Silver logic, and the handoff to Gold—without writing 100 pipelines.
+
 ### Components
 
 #### Metadata Interface

@@ -41,6 +41,34 @@ Set `source_format` to `cloudFiles` and populate `source_details`:
 Provide an explicit `source_schema_path` to avoid schema inference instability in production. See [Troubleshooting — Autoloader schema inference issues](../operations/troubleshooting#autoloader-schema-inference-issues).
 :::
 
+## Inference without a DDL
+
+`source_schema_path` is optional. When it is omitted, SDP-META persists no
+explicit Bronze schema and lets Auto Loader infer it:
+
+```yaml
+source_format: cloudFiles
+source_details:
+  source_path_prod: /Volumes/main/landing/events
+bronze_reader_options:
+  cloudFiles.format: json
+  cloudFiles.inferColumnTypes: "true"
+  cloudFiles.schemaHints: >-
+    event_id BIGINT, event_ts TIMESTAMP, amount DECIMAL(10,2)
+  cloudFiles.schemaEvolutionMode: addNewColumns
+  cloudFiles.rescuedDataColumn: _rescued_data
+```
+
+Schema hints constrain selected inferred columns without defining the complete
+schema. With `addNewColumns`, Auto Loader adds newly discovered columns to its
+tracked schema; discovery can request a stream restart, so production jobs
+should allow the pipeline update to retry. Values that cannot be parsed using
+the inferred or hinted type are retained in `_rescued_data`.
+
+For production feeds, prefer explicit schemas when contracts must remain
+stable. Inference and evolution are most useful for exploratory or
+intentionally flexible feeds.
+
 ## File metadata columns
 
 Attach file-level metadata (file name, path, modification time) via `source_metadata` in `source_details`:
@@ -74,6 +102,7 @@ Attach file-level metadata (file name, path, modification time) via `source_meta
 | `cloudFiles.inferColumnTypes` | Infer column types. Set to `false` in production for schema stability. |
 | `cloudFiles.rescuedDataColumn` | Column name for rescued (malformed) data |
 | `cloudFiles.schemaHints` | Override inferred types for specific columns |
+| `cloudFiles.schemaEvolutionMode` | Evolution behavior such as `addNewColumns` or `rescue` |
 | `header` | For CSV: whether the first row is a header |
 | `multiLine` | For JSON: whether records span multiple lines |
 
@@ -82,6 +111,41 @@ Attach file-level metadata (file name, path, modification time) via `source_meta
 ![Autoloader demo result](/img/af_am_demo.png)
 
 ## Running the demo
+
+### At-Scale Auto Loader demo
+
+The featured scale demo generates 100 metadata-driven Bronze and Silver
+flows. Its 80/10/10 cohorts compare schema inference, schema hints, and
+explicit DDLs in the same workload. The workflow then validates additive
+evolution, rescued data, DQ quarantine, a table-specific Silver window/join
+callback, and a separate Gold aggregation.
+
+```bash
+python demo/launch_at_scale_autoloader_demo.py \
+  --uc_catalog_name=<your_catalog> \
+  --profile=<your_profile>
+```
+
+The launcher validates the result and removes its per-run resources by
+default. Use `--keep-resources` when you want to inspect the generated
+pipelines and tables. Use `--table_count=12` for a lower-cost smoke run.
+
+See the [complete demo walkthrough](https://github.com/databrickslabs/sdp-meta/tree/main/demo#at-scale-auto-loader-demo)
+for the workflow stages, assertions, JSON/YAML mode, and cost guidance.
+
+### Focused schema-evolution demo
+
+Focused inference, hints, and evolution demo:
+
+```bash
+python demo/launch_autoloader_schema_demo.py \
+  --uc_catalog_name=<your_catalog> \
+  --profile=<your_profile>
+```
+
+### Append-flow and file-metadata demo
+
+Append-flow and file-metadata demo:
 
 ```bash
 python demo/launch_af_cloudfiles_demo.py \
