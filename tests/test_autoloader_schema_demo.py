@@ -124,6 +124,8 @@ class AutoLoaderSchemaDemoConfigTests(TestCase):
             "Schema evolution validated:",
             "inferred_smoke_fqn",
             'label="schema inference phase 1",\n    full_refresh=True,',
+            "def find_successor_update(",
+            "following it instead of starting",
         )
         for marker in expected_markers:
             with self.subTest(marker=marker):

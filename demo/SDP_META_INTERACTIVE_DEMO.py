@@ -366,17 +366,25 @@ validate_uc_identifier(uc_schema_name, kind="uc_schema_name widget")
 w = WorkspaceClient()
 
 
-def run_pipeline_and_wait(w, pipeline_id, label="", full_refresh=False):
-    """Start a pipeline update and block until it completes."""
-    resp = w.pipelines.start_update(
-        pipeline_id=pipeline_id,
-        full_refresh=full_refresh,
-    )
-    update_id = resp.update_id
+class PipelineUpdateError(RuntimeError):
+    """Pipeline terminal failure with the update ID retained for recovery."""
+
+    def __init__(self, pipeline_id, update_id, state, pipeline_url):
+        self.pipeline_id = pipeline_id
+        self.update_id = update_id
+        self.state = state
+        super().__init__(
+            f"Pipeline ended with state: {state}. "
+            f"Check the pipeline UI for details: {pipeline_url}"
+        )
+
+
+def wait_for_pipeline_update(w, pipeline_id, update_id, label=""):
+    """Block until an already-started pipeline update completes."""
     host = w.config.host.rstrip("/")
     pipeline_url = f"{host}/pipelines/{pipeline_id}/updates/{update_id}"
     tag = f" ({label})" if label else ""
-    print(f"Pipeline started{tag} — update_id: {update_id}")
+    print(f"Waiting for pipeline update{tag} — update_id: {update_id}")
     print(f"  URL: {pipeline_url}")
     while True:
         info = w.pipelines.get_update(
@@ -388,11 +396,42 @@ def run_pipeline_and_wait(w, pipeline_id, label="", full_refresh=False):
             break
         time.sleep(20)
     if state != "COMPLETED":
-        raise RuntimeError(
-            f"Pipeline ended with state: {state}. "
-            f"Check the pipeline UI for details: {pipeline_url}"
+        raise PipelineUpdateError(
+            pipeline_id, update_id, state, pipeline_url
         )
     print("Pipeline completed successfully.")
+
+
+def run_pipeline_and_wait(w, pipeline_id, label="", full_refresh=False):
+    """Start a pipeline update and block until it completes."""
+    resp = w.pipelines.start_update(
+        pipeline_id=pipeline_id,
+        full_refresh=full_refresh,
+    )
+    update_id = resp.update_id
+    tag = f" ({label})" if label else ""
+    print(f"Pipeline started{tag} — update_id: {update_id}")
+    wait_for_pipeline_update(w, pipeline_id, update_id, label=label)
+
+
+def find_successor_update(
+    w, pipeline_id, canceled_update_id, timeout_seconds=120
+):
+    """Find the newer update Lakeflow may start after schema discovery."""
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        updates = list(
+            w.pipelines.get(pipeline_id).latest_updates or []
+        )
+        update_ids = [update.update_id for update in updates]
+        if canceled_update_id in update_ids:
+            canceled_index = update_ids.index(canceled_update_id)
+            if canceled_index > 0:
+                # latest_updates is ordered newest first. Any entry before the
+                # canceled update was created as its automatic successor.
+                return updates[0].update_id
+        time.sleep(5)
+    return None
 
 
 def create_pipeline(ws, **kwargs):
@@ -4176,9 +4215,10 @@ display(spark.table(inferred_table_fqn).orderBy("event_id"))
 # MAGIC `DECIMAL(10,2)`, that value is captured in `_rescued_data`.
 # MAGIC
 # MAGIC Auto Loader commonly records an additive schema on the first update
-# MAGIC and asks the stream to restart. The retry loop below treats that first
-# MAGIC failure as schema discovery and runs one clean restart; an unrelated or
-# MAGIC repeated failure still surfaces from the final attempt.
+# MAGIC and asks the stream to restart. Lakeflow may start that successor update
+# MAGIC automatically, so the recovery logic follows it instead of starting a
+# MAGIC conflicting update. If no successor appears, it retries once manually;
+# MAGIC an unrelated or repeated failure still surfaces.
 
 # COMMAND ----------
 
@@ -4216,12 +4256,30 @@ for attempt in range(1, 3):
             label=f"schema evolution phase 2 (attempt {attempt})",
         )
         break
-    except RuntimeError:
+    except PipelineUpdateError as update_error:
         if attempt == 2:
             raise
+        successor_update_id = find_successor_update(
+            w,
+            inferred_pipeline_id,
+            update_error.update_id,
+        )
+        if successor_update_id:
+            print(
+                "Phase 2 schema discovery started successor update "
+                f"{successor_update_id}; following it instead of starting "
+                "a conflicting update."
+            )
+            wait_for_pipeline_update(
+                w,
+                inferred_pipeline_id,
+                successor_update_id,
+                label="schema evolution phase 2 automatic restart",
+            )
+            break
         print(
-            "Phase 2 first update requested a restart after additive "
-            "schema discovery; retrying once with the evolved schema."
+            "No automatic schema-evolution restart appeared; retrying "
+            "once after the pipeline became idle."
         )
 
 # COMMAND ----------
