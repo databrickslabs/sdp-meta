@@ -1,0 +1,19 @@
+- data_flow_id: schema-evolution-events
+  data_flow_group: SCHEMA_EVOLUTION
+  source_system: AUTOLOADER_SCHEMA_DEMO
+  source_format: cloudFiles
+  source_details:
+    source_path_demo: '{uc_volume_path}data/autoloader_schema_demo/landing'
+  bronze_catalog_demo: '{uc_catalog_name}'
+  bronze_database_demo: '{bronze_schema}'
+  bronze_table: events_inferred
+  bronze_table_comment: Auto Loader inference, schema hints, evolution, and rescued-data demo
+  bronze_reader_options:
+    cloudFiles.format: json
+    cloudFiles.inferColumnTypes: 'true'
+    cloudFiles.schemaHints: event_id BIGINT, event_ts TIMESTAMP, amount DECIMAL(10,2)
+    cloudFiles.schemaEvolutionMode: addNewColumns
+    cloudFiles.rescuedDataColumn: _rescued_data
+  bronze_table_properties:
+    pipelines.reset.allowed: 'true'
+  bronze_cluster_by_auto: true

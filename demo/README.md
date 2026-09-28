@@ -1,15 +1,58 @@
-# [SDP-META](https://github.com/databrickslabs/sdp-meta) DEMOs
- 1. [Interactive Demo (Notebook)](#interactive-demo-notebook): **Start here.** A fully self-contained Databricks notebook covering all SDP-META features end-to-end — no CLI required.
- 2. [DAIS 2023 DEMO](#dais-2023-demo): Showcases SDP-META's capabilities of creating Bronze and Silver pipelines with initial and incremental mode automatically.
- 3. [Databricks Techsummit Demo](#databricks-tech-summit-fy2024-demo): 100s of data sources ingestion in bronze and silver pipelines automatically.
- 4. [Append FLOW Autoloader Demo](#append-flow-autoloader-file-metadata-demo): Write to same target from multiple sources using [dp.append_flow](https://docs.databricks.com/aws/en/ldp/developer/ldp-python-ref-append-flow) and adding [File metadata column](https://docs.databricks.com/aws/en/ingestion/file-metadata-column)
- 5. [Append FLOW Eventhub Demo](#append-flow-eventhub-demo): Write to same target from multiple sources using [dp.append_flow](https://docs.databricks.com/aws/en/ldp/developer/ldp-python-ref-append-flow) and adding [File metadata column](https://docs.databricks.com/aws/en/ingestion/file-metadata-column)
- 6. [Silver Fanout Demo](#silver-fanout-demo): This demo showcases the implementation of fanout architecture in the silver layer.
- 7. [Apply Changes From Snapshot Demo](#apply-changes-from-snapshot-demo): This demo showcases the implementation of ingesting from snapshots in bronze layer
-8. [Lakeflow Spark Declarative Pipelines Sink Demo](#lakeflow-declarative-pipelines-sink-demo): This demo showcases the implementation of write to external sinks like delta and kafka
-9. [Multi-Source AUTO CDC Demo](#multi-source-auto-cdc-demo): Merge N regional CDC sources into ONE silver target table using [`dp.create_auto_cdc_flow`](https://docs.databricks.com/aws/en/dlt-ref/dlt-python-ref-apply-changes) called N times against the same streaming table, with per-flow `select_exp` normalization.
-10. [Row Filter Demo](#row-filter-demo): UC Row-Level Security via `bronze_row_filter` / `silver_row_filter` — single-flow standalone demo that creates the row-filter UDF, runs one combined Bronze+Silver pipeline (`layer=bronze_silver`), and asserts the filter is enforced.
-11. [DAB Demo](#dab-demo): End-to-end walkthrough of the `databricks labs sdp-meta bundle-*` CLI — scaffold a Declarative Automation Bundle, append flows, validate, deploy, and run onboarding + Lakeflow Spark Declarative Pipelines from one driver script. See [`DAB_README.md`](../DAB_README.md) for the full CLI / template / recipe reference.
+# [SDP-META](https://github.com/databrickslabs/sdp-meta) demos
+
+Choose a broad walkthrough first, then use a focused demo when you need an
+isolated, CI-friendly example of one feature. Several focused demos are also
+covered by the Interactive Demo; their standalone versions are useful for
+shorter runs, debugging, and feature validation.
+
+## Start here
+
+- **[Interactive Demo (Notebook)](#interactive-demo-notebook)** — recommended
+  first experience. It covers the SDP-META feature set end-to-end without
+  requiring the CLI.
+- **[DAB Demo](#dab-demo)** — use this to learn the
+  `databricks labs sdp-meta bundle-*` workflow and deploy a generated bundle.
+- **[At-Scale Auto Loader Demo](#at-scale-auto-loader-demo)** — use this to
+  demonstrate 100 metadata-driven Bronze and Silver flows, schema strategies,
+  evolution, quarantine, custom Silver logic, and Gold aggregation.
+
+## Focused feature demos
+
+### Ingestion and schema
+
+- **[Auto Loader Schema Evolution](#auto-loader-schema-evolution-demo)** —
+  inference, schema hints, additive evolution, and rescued data in one feed.
+- **[Append Flow with Auto Loader](#append-flow-autoloader-file-metadata-demo)**
+  — combine file sources into one target and retain file metadata.
+- **[Append Flow with Event Hubs](#append-flow-eventhub-demo)** — combine
+  multiple Event Hubs topics into the same target.
+
+### Transformations and CDC
+
+- **[Multi-Source AUTO CDC](#multi-source-auto-cdc-demo)** — normalize and
+  merge regional CDC sources into one Silver target.
+- **[Apply Changes From Snapshot](#apply-changes-from-snapshot-demo)** —
+  process CSV and Delta snapshots with SCD Type 1 and Type 2 behavior.
+- **[Silver Fanout](#silver-fanout-demo)** — produce multiple filtered Silver
+  tables from one Bronze table.
+
+### Governance and destinations
+
+- **[Row Filter](#row-filter-demo)** — apply and validate Unity Catalog
+  row-level security on Bronze and Silver tables.
+- **[Lakeflow Spark Declarative Pipelines Sink](#lakeflow-spark-declarative-pipelines-sink-demo)**
+  — write pipeline output to Delta and Kafka destinations.
+
+## Historical demos
+
+These demos are retained for their original conference material. For new work,
+prefer the modern demos above.
+
+- **[DAIS 2023](#dais-2023-demo)** — original initial-load, incremental CDC,
+  and metadata-driven onboarding presentation.
+- **[Databricks Tech Summit FY2024](#databricks-tech-summit-fy2024-demo)** —
+  original hundreds-of-sources demonstration, superseded by the
+  [At-Scale Auto Loader Demo](#at-scale-auto-loader-demo).
 
 
 # Interactive Demo (Notebook)
@@ -36,11 +79,13 @@ end-to-end with no CLI setup required.
 | 10 | DLT Sink — write Bronze output to an external Delta table |
 | 11 | **Multi-Source AUTO CDC** — three regional CDC sources (US / EU / APAC with distinct column shapes) merged into one unified `customers_regional` silver target via `silver_cdc_apply_changes_flows` |
 | 12 | Row-Level Filtering — verify UC `ROW FILTER` is enforced on Bronze + Silver `customers` |
+| 13 | Auto Loader Schema Inference & Evolution — infer without DDL, apply schema hints, add a new column, and preserve an incompatible value in rescued data |
 
 ## Features Demonstrated
 
 - Metadata-driven onboarding (JSON or YAML → DataflowSpec → generic pipeline)
-- CloudFiles (Autoloader) ingestion with schema enforcement
+- CloudFiles (Auto Loader) ingestion with schema enforcement
+- Auto Loader schema inference, hints, additive evolution, and rescued data
 - Data quality rules: `expect_or_drop` and `expect_or_quarantine`
 - Quarantine tables for bad records
 - CDC with `apply_changes` (SCD Type 2)
@@ -73,8 +118,8 @@ The notebook is fully driven by widgets at the top — same ones the headless la
 | `onboarding_format` | dropdown `json` (default) / `yml` | Whether the rendered onboarding spec + silver-transformations files are written as JSON or YAML. The demo reads back the matching `demo/conf/<format>/sample_onboarding.<ext>` template. |
 | `install_source` | dropdown `git_branch` (default) / `whl_file` | Where to install SDP-META from. `git_branch` runs `pip install git+https://github.com/databrickslabs/sdp-meta.git@<git_branch>`; `whl_file` runs `pip install <whl_file_path>` against a Volume / Workspace path. Use `whl_file` when validating local changes that aren't pushed yet. |
 | `whl_file_path` | text, default empty | Path to the wheel when `install_source=whl_file`, e.g. `/Volumes/<catalog>/<schema>/<volume>/databricks_labs_sdp_meta-<version>-py3-none-any.whl`. Required when `install_source=whl_file`; ignored otherwise. |
-| `validate_counts` | dropdown `false` (default) / `true` | When `true`, the final cell turns the demo into a smoke test: it asserts deterministic row counts (`bronze.orders == 7`, `bronze.iot_events == 5`, snapshot tables `>= LOAD_2 size`, multi-source CDC bronze `customers_{us,eu,apac}_cdc == 5` each, silver `customers_regional == 6`) and non-empty for every demo-produced bronze / silver / quarantine table, raising a single `AssertionError` listing every failure. Use in CI / pre-release smoke runs. |
-| `cleanup` | dropdown `false` (default) / `true` | When `true`, the cleanup cell at the bottom drops every per-run resource the demo created: pipelines (main / snapshot / sink / multi-source CDC), runner notebooks (`runner_notebook_path`, `snapshot_runner_path`), and per-run schemas (`<schema>_bronze`, `<schema>_silver`, `<schema>_pipeline_default`, `<schema>` itself — including its config volume). The user-supplied UC catalog is **intentionally preserved** because it's shared across runs. |
+| `validate_counts` | dropdown `false` (default) / `true` | When `true`, the final cell turns the demo into a smoke test: it asserts deterministic row counts (`bronze.orders == 7`, `bronze.iot_events == 5`, `bronze.events_inferred == 5`, snapshot tables `>= LOAD_2 size`, multi-source CDC bronze `customers_{us,eu,apac}_cdc == 5` each, silver `customers_regional == 6`) and non-empty for every demo-produced bronze / silver / quarantine table, raising a single `AssertionError` listing every failure. Use in CI / pre-release smoke runs. |
+| `cleanup` | dropdown `false` (default) / `true` | When `true`, the cleanup cell at the bottom drops every per-run resource the demo created: pipelines (main / snapshot / sink / multi-source CDC / schema inference), runner notebooks (`runner_notebook_path`, `snapshot_runner_path`), and per-run schemas (`<schema>_bronze`, `<schema>_silver`, `<schema>_pipeline_default`, `<schema>` itself — including its config volume). The user-supplied UC catalog is **intentionally preserved** because it's shared across runs. |
 
 ## Option A — Run interactively in the workspace
 
@@ -135,7 +180,7 @@ Run `python demo/launch_interactive_demo.py --help` for the full flag surface. S
 | `--onboarding-format` | `onboarding_format` | `json` (default) or `yml`. |
 | `--validate-counts` | `validate_counts` | `true` (default for the launcher) or `false`. When `true`, the job FAILS on row-count regression. |
 | `--cleanup` | `cleanup` | `false` (default) or `true`. Set `true` for CI runs that need to leave the workspace clean. |
-| `--timeout-minutes` | n/a (driver) | Max wall-clock for the launcher to wait on the job. Default 90; for cold workspaces with all 4 pipelines, 20-25 is comfortable. |
+| `--timeout-minutes` | n/a (driver) | Max wall-clock for the launcher to wait on the job. Default 90; for cold workspaces with all 5 pipelines, 25-35 is comfortable. |
 
 Each launch gets a unique, scannable name in the workspace **Job Runs** UI of the form `sdp-meta-demo-<UTC-timestamp>-<catalog>-<run-id>`, e.g. `sdp-meta-demo-20260427T201235Z-ravi_dlt_meta_uc-57f84fe925a1`. The same `<run-id>` flows through the per-run workspace path (`/Users/<me>/sdp_meta_demo_runs/<run-id>/demo/...`) and the per-run schema (`sdp_meta_demo_<run-id>`) so concurrent runs never collide on bronze / silver tables.
 
@@ -147,7 +192,7 @@ Each launch gets a unique, scannable name in the workspace **Job Runs** UI of th
 
 ---
 
-# DAIS 2023 DEMO
+# DAIS 2023 Demo
 ## [DAIS 2023 Session Recording](https://www.youtube.com/watch?v=WYv5haxLlfA)
 This Demo launches Bronze and Silver pipelines with following activities:
 - Customer and Transactions feeds for initial load
@@ -189,9 +234,7 @@ This Demo launches Bronze and Silver pipelines with following activities:
     - uc_catalog_name : Unity catalog name
     - you can provide `--profile=databricks_profile name` in case you already have databricks cli otherwise command prompt will ask host and token.
 
-    ![dais_demo.png](../docs/static/img/dais_demo.png)
-
-# Databricks Tech Summit FY2024 DEMO:
+# Databricks Tech Summit FY2024 Demo
 This demo will launch auto generated tables(100s) inside single bronze and silver pipeline using sdp-meta.
 
 1. Launch Command Prompt
@@ -227,10 +270,9 @@ This demo will launch auto generated tables(100s) inside single bronze and silve
     - uc_catalog_name : Unity catalog name
     - you can provide `--profile=databricks_profile name` in case you already have databricks cli otherwise command prompt will ask host and token
 
-    ![tech_summit_demo.png](../docs/static/img/tech_summit_demo.png)
+<a id="append-flow-autoloader-file-metadata-demo"></a>
 
-
-# Append Flow Autoloader file metadata demo:
+# Append Flow with Auto Loader and File Metadata
 This demo will perform following tasks:
 - Read from different source paths using autoloader and write to same target using append_flow API
 - Read from different delta tables and write to same silver table using append_flow API
@@ -269,10 +311,10 @@ This demo will perform following tasks:
     - uc_catalog_name : Unity Catalog name
     - you can provide `--profile=databricks_profile name` in case you already have databricks cli otherwise command prompt will ask host and token
 
-![af_am_demo.png](../docs/static/img/af_am_demo.png)
+<a id="append-flow-eventhub-demo"></a>
 
-# Append Flow Eventhub demo:
-- Read from different eventhub topics and write to same target tables using append_flow API
+# Append Flow with Event Hubs
+- Read from different Event Hubs topics and write to the same target tables using the `append_flow` API.
 
 ### Steps:
 1. Launch Command Prompt
@@ -299,10 +341,10 @@ This demo will perform following tasks:
     ```commandline
     export PYTHONPATH=$sdp_meta_home
     ```
-6. Eventhub
-- Needs eventhub instance running
-- Need two eventhub topics first for main feed (eventhub_name) and second for append flow feed (eventhub_name_append_flow)
-- Create databricks secrets scope for eventhub keys
+6. Event Hubs
+- Requires an Event Hubs namespace.
+- Create two Event Hubs topics: one for the main feed (`eventhub_name`) and one for the append flow feed (`eventhub_name_append_flow`).
+- Create a Databricks secret scope for the Event Hubs keys.
     - ```
             commandline databricks secrets create-scope eventhubs_sdp_meta_creds
         ```
@@ -317,20 +359,17 @@ This demo will perform following tasks:
 
 - Following are the mandatory arguments for running EventHubs demo
     - uc_catalog_name : unity catalog name e.g. ravi_sdp_meta_uc
-    - eventhub_namespace: Eventhub namespace e.g. sdp_meta
-    - eventhub_name : Primary Eventhubname e.g. sdp_meta_demo
-    - eventhub_name_append_flow: Secondary eventhub name for appendflow feed e.g. sdp_meta_demo_af
-    - eventhub_producer_accesskey_name: Producer databricks access keyname e.g. RootManageSharedAccessKey
-    - eventhub_consumer_accesskey_name: Consumer databricks access keyname e.g. RootManageSharedAccessKey
-    - eventhub_secrets_scope_name: Databricks secret scope name e.g. eventhubs_sdp_meta_creds
-    - eventhub_port: Eventhub port
+    - `eventhub_namespace`: Event Hubs namespace, for example `sdp_meta`
+    - `eventhub_name`: primary Event Hub name, for example `sdp_meta_demo`
+    - `eventhub_name_append_flow`: secondary Event Hub name for the append flow, for example `sdp_meta_demo_af`
+    - `eventhub_producer_accesskey_name`: producer access-key name, for example `RootManageSharedAccessKey`
+    - `eventhub_consumer_accesskey_name`: consumer access-key name, for example `RootManageSharedAccessKey`
+    - `eventhub_secrets_scope_name`: Databricks secret-scope name, for example `eventhubs_sdp_meta_creds`
+    - `eventhub_port`: Event Hubs port
 
 7. ```commandline
     python3 demo/launch_af_eventhub_demo.py --uc_catalog_name=<<uc catalog name>> --eventhub_name=sdp_meta_demo --eventhub_name_append_flow=sdp_meta_demo_af --eventhub_secrets_scope_name=sdp_meta_eventhub_creds --eventhub_namespace=sdp_meta --eventhub_port=9093 --eventhub_producer_accesskey_name=RootManageSharedAccessKey --eventhub_consumer_accesskey_name=RootManageSharedAccessKey --eventhub_accesskey_secret_name=RootManageSharedAccessKey --profile=<<DEFAULT>>
     ```
-
-  ![af_eh_demo.png](../docs/static/img/af_eh_demo.png)
-
 
 # Silver Fanout Demo
 - This demo will showcase the onboarding process for the silver fanout pattern.
@@ -388,10 +427,6 @@ This demo will perform following tasks:
 
         - Paste to command prompt
 
-    ![silver_fanout_workflow.png](../docs/static/img/silver_fanout_workflow.png)
-    
-    ![silver_fanout_dlt.png](../docs/static/img/silver_fanout_dlt.png)
-
 # Apply Changes From Snapshot Demo
   - This demo will perform following steps
     - Showcase onboarding process for apply changes from snapshot pattern([snapshot-onboarding.template](https://github.com/databrickslabs/sdp-meta/blob/main/demo/conf/snapshot-onboarding.template))
@@ -434,8 +469,6 @@ This demo will perform following tasks:
     ```commandline
     python demo/launch_acfs_demo.py --uc_catalog_name=<<uc catalog name>> --profile=<<DEFAULT>>
     ```
-    ![acfs.png](../docs/static/img/acfs.png)
-
 # Lakeflow Spark Declarative Pipelines Sink Demo
   - This demo will perform following steps
     - Showcase onboarding process for dlt writing to external sink pattern
@@ -488,15 +521,14 @@ This demo will perform following tasks:
     ```commandline
     python demo/launch_dlt_sink_demo.py --uc_catalog_name=<<uc_catalog_name>> --source=kafka --kafka_source_topic=<<kafka source topic name>>>> --kafka_sink_topic=<<kafka sink topic name>> --kafka_source_servers_secrets_scope_name=<<kafka source servers secret name>> --kafka_source_servers_secrets_scope_key=<<kafka source server secret scope key name>> --kafka_sink_servers_secret_scope_name=<<kafka sink server secret scope key name>> --kafka_sink_servers_secret_scope_key=<<kafka sink servers secret scope key name>> --profile=<<DEFAULT>>
     ```
-    ![dlt_demo_sink.png](../docs/static/img/dlt_demo_sink.png)
-    ![dlt_delta_sink.png](../docs/static/img/dlt_delta_sink.png)
-    ![dlt_kafka_sink.png](../docs/static/img/dlt_kafka_sink.png)
-
-
 # Multi-Source AUTO CDC Demo
 
 - Merge **N regional CDC sources** into **ONE** unified silver target table by calling [`dp.create_auto_cdc_flow`](https://docs.databricks.com/aws/en/dlt-ref/dlt-python-ref-apply-changes) N times against the same streaming table, with **per-flow `select_exp` normalization** so each source can have its own native column shape.
-- This implements [issue #294](https://github.com/databrickslabs/sdp-meta/issues/294). See [`DESIGN_MULTI_SOURCE_AUTO_CDC.md`](../DESIGN_MULTI_SOURCE_AUTO_CDC.md) for the full spec, including mutual-exclusion rules vs the single-source `cdcApplyChanges` block and the per-flow `cdcApplyChangesFlowsSchemas` map for bronze.
+- This implements [issue #294](https://github.com/databrickslabs/sdp-meta/issues/294).
+  See the [multi-source CDC guide](../docs/docs/guides/multi-source-cdc.md)
+  for the full configuration, including mutual-exclusion rules versus the
+  single-source `cdcApplyChanges` block and the per-flow
+  `cdcApplyChangesFlowsSchemas` map for Bronze.
 - The demo provisions:
     - **Three regional bronze CDC tables** (`customers_us_cdc`, `customers_eu_cdc`, `customers_apac_cdc`), each landing raw customer CDC events from its own folder under [`demo/resources/data/multi_source_cdc/`](https://github.com/databrickslabs/sdp-meta/blob/main/demo/resources/data/multi_source_cdc/). Each region uses a **different column shape on purpose** (US: `id`/`firstname`/`lastname`/`operation`; EU: `customer_id`/`given_name`/`family_name`/`change_type`; APAC: `cust_id`/`fname`/`lname`/`op`) so the per-flow `select_exp` normalization is actually doing real work the user can see.
     - **One unified silver `customers` SCD-1 table** that pulls from all three bronze tables via `silver_cdc_apply_changes_flows`. Each flow rewrites its source columns into the canonical `(customer_id, firstname, lastname, email, address, region)` shape, with a per-flow constant `region` literal, before the merge.
@@ -533,11 +565,6 @@ This demo will perform following tasks:
     * Silver total live row count = 6 (3 regions × 3 customers each, minus 1 delete per region).
     * Per-region breakdown (proves the per-flow `select_exp` ran — each flow tags its rows with a constant `region` literal).
     * The exact set of surviving `customer_id` values matches the seed data.
-
-    ![multi-source-cdc-silver-demo.png](../docs/static/img/multi-source-cdc-silver-demo.png)
-
-    ![multi-source-cdc-silver.png](../docs/static/img/multi-source-cdc-silver.png)
-
 
 # Row Filter Demo
 
@@ -632,6 +659,113 @@ the workflow run page.
   interactive demo if you want row filter as part of a broader end-to-end
   walkthrough; pick this standalone demo if you want a focused,
   CI-friendly artifact for the row-filter feature alone.
+
+
+# Auto Loader Schema Evolution Demo
+
+This focused demo deliberately omits `source_schema_path` so the persisted Bronze
+DataflowSpec has no explicit schema. Auto Loader infers the source and uses:
+
+- `cloudFiles.schemaHints` to make `event_id` a `BIGINT`, `event_ts` a
+  `TIMESTAMP`, and `amount` a `DECIMAL(10,2)`.
+- `cloudFiles.schemaEvolutionMode: addNewColumns` to add `device_type` when
+  phase 2 lands.
+- `cloudFiles.rescuedDataColumn: _rescued_data` to preserve a phase-2
+  `amount` value that cannot be parsed as a decimal.
+
+The workflow is fully automated:
+
+| Stage | Task | Assertion |
+|---|---|---|
+| 1 | `stage_phase_1` → `onboarding_job` → `pipeline_phase_1` | No explicit schema is persisted; hints produce the expected physical types. |
+| 2 | `stage_phase_2` → `pipeline_phase_2` | Auto Loader discovers `device_type`; the task retries if discovery requests a restart. |
+| 3 | `validate_phase_2` | Five rows exist, `device_type` is a string, and exactly one incompatible amount is present in `_rescued_data`. |
+
+Run it from the repository root:
+
+```commandline
+python demo/launch_autoloader_schema_demo.py \
+    --uc_catalog_name=<<uc_catalog_name>> \
+    --profile=<<DEFAULT>>
+```
+
+Append `--onboarding_file_format yaml` to use the YAML onboarding template.
+The launcher leaves its uniquely named schemas, pipeline, and workflow in
+place for inspection. Remove the three schemas shown in the run output with
+`DROP SCHEMA ... CASCADE`, then delete the corresponding pipeline and job
+when finished.
+
+
+# At-Scale Auto Loader Demo
+
+This is the modern successor to the FY2024 Tech Summit scale demo. It keeps
+the legacy launcher unchanged while showing how to make schema and
+transformation decisions for 100 daily file feeds:
+
+- **80 inferred tables** omit `source_schema_path`.
+- **10 hinted tables** use `cloudFiles.schemaHints`.
+- **10 explicit tables** load checked/generated DDL definitions.
+- A second file evolves `device_type`, while an incompatible decimal is
+  retained in `_rescued_data`.
+- An invalid order is written to a configured quarantine table.
+- A table-specific Silver callback uses a window over a static customer
+  dimension and performs a streaming-static join.
+- A separate batch task performs the business aggregation in Gold. SDP-META
+  remains responsible for Bronze and Silver.
+
+The table count is configurable. Counts other than 100 retain the same
+approximate 80/10/10 split and always include every schema strategy.
+
+## Run
+
+```commandline
+python demo/launch_at_scale_autoloader_demo.py \
+    --uc_catalog_name=<<uc_catalog_name>> \
+    --profile=<<DEFAULT>>
+```
+
+Use YAML onboarding:
+
+```commandline
+python demo/launch_at_scale_autoloader_demo.py \
+    --uc_catalog_name=<<uc_catalog_name>> \
+    --profile=<<DEFAULT>> \
+    --onboarding_file_format=yaml
+```
+
+For a faster, lower-cost smoke run:
+
+```commandline
+python demo/launch_at_scale_autoloader_demo.py \
+    --uc_catalog_name=<<uc_catalog_name>> \
+    --profile=<<DEFAULT>> \
+    --table_count=12
+```
+
+The full 100-table run creates two serverless pipelines and performs two
+updates of each pipeline. Runtime and serverless DBU consumption are
+materially higher than the focused one-table schema-evolution demo.
+
+## Validation and cleanup
+
+The workflow validates:
+
+1. Every expected Bronze and Silver table exists.
+2. The DataflowSpecs contain the expected inferred/hinted/explicit split.
+3. Hints and DDLs produce the requested physical types.
+4. The evolved column and rescued payload appear after phase 2.
+5. DQ quarantine, the custom Silver join/window logic, and Gold totals are
+   correct.
+
+By default, the launcher waits for validation and then removes its job,
+pipelines, per-run schemas, volume, notebooks, and generated local onboarding
+file—even after a failed run. Pass `--keep-resources` to retain remote
+resources for inspection. The target catalog itself is never deleted.
+
+Use the focused [Auto Loader Schema Evolution Demo](#auto-loader-schema-evolution-demo)
+when you only need to explain inference, hints, and additive evolution. Use
+this demo when you need the architecture and operational behavior of many
+feeds.
 
 
 # DAB Demo

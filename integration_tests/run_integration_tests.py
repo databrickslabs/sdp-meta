@@ -1095,6 +1095,8 @@ class SDPMETARunner:
 
         for notebook in os.listdir(runner_conf.runners_full_local_path):
             local_path = os.path.join(runner_conf.runners_full_local_path, notebook)
+            if not os.path.isfile(local_path):
+                continue
             with open(local_path, "rb") as nb_file:
                 self.ws.workspace.upload(
                     path=f"{runner_conf.runners_nb_path}/runners/{notebook}",

@@ -1,0 +1,2 @@
+{"event_id": 4, "event_ts": "2026-09-27T08:00:00Z", "amount": 25.75, "region": "US", "device_type": "mobile"}
+{"event_id": 5, "event_ts": "2026-09-27T08:01:00Z", "amount": "not-a-decimal", "region": "UK", "device_type": "web"}
