@@ -14,15 +14,15 @@ from __future__ import annotations
 
 import logging
 import os
-import subprocess
 import sys
 from dataclasses import asdict
 
 from flask import Blueprint, jsonify, request
 
 import _jobs as _jobs_module
-from _command_output import _parse_command_result, extract_command_output
+from _command_output import _parse_command_result
 from _config import _repo_root
+from _subprocess_runner import _run_command_in_background
 
 # UC catalog pre-flight (Apps-SP grants). Lives next to app.py so the
 # probe + GRANT SQL builder ship in the same source tree and can be
@@ -92,6 +92,14 @@ def check_uc_grants():
 #     to the App's service principal in this workspace. Run via the
 #     CLI launcher with ``--profile`` instead.
 _DEMO_REGISTRY = {
+    "demo_at_scale_autoloader": {
+        "file": "demo/launch_at_scale_autoloader_demo.py",
+        "uc_arg": "--uc_catalog_name",
+        # App users launch demos for inspection. Preserve the job, pipelines,
+        # schemas, volume, and output tables instead of deleting them as soon
+        # as validation succeeds. The standalone CLI keeps its cleanup default.
+        "extra_args": ["--keep-resources"],
+    },
     "demo_cloudfiles": {
         "file": "demo/launch_af_cloudfiles_demo.py",
         "uc_arg": "--uc_catalog_name",
@@ -111,13 +119,11 @@ _DEMO_REGISTRY = {
     "demo_interactive": {
         "file": "demo/launch_interactive_demo.py",
         "uc_arg": "--uc-catalog-name",
-        # The interactive launcher submits a serverless job, prints
-        # the run URL EARLY (before polling), and then blocks on
-        # ``waiter.result(timeout=timedelta(minutes=N))``. We pass a
-        # 1-minute timeout so the Flask request unblocks shortly
-        # after submission with the run URL captured in stdout; the
-        # actual demo job continues running in the workspace and the
-        # user clicks through via the surfaced URL.
+        # Stream upload/submission output and the early run URL through the
+        # same background progress UI as the 100-table featured demo. Keep
+        # the launcher's normal completion wait so the UI reports the real
+        # final state instead of turning a one-minute timeout into a false
+        # failure while the remote run continues.
         #
         # ``--install-source pypi`` makes the spawned job
         # ``pip install databricks-labs-sdp-meta`` from PyPI on
@@ -130,7 +136,6 @@ _DEMO_REGISTRY = {
         # e.g. ``"--pypi-version", "0.1.0"`` to the list below.
         "extra_args": [
             "--install-source", "pypi",
-            "--timeout-minutes", "1",
         ],
     },
 }
@@ -212,28 +217,59 @@ def run_demo():
         pypath_entries.append(existing_pypath)
     demo_env['PYTHONPATH'] = ':'.join(pypath_entries)
 
-    result = subprocess.run(
-        [
-            sys.executable,
-            os.path.join(current_directory, demo_file),
-            demo_uc_arg,
-            uc_name,
-            *demo_extra_args,
-        ],
-        shell=False,
-        capture_output=True,
-        text=True,
+    demo_command = [
+        sys.executable,
+        os.path.join(current_directory, demo_file),
+        demo_uc_arg,
+        uc_name,
+        *demo_extra_args,
+    ]
+    # Deployed Apps already have DATABRICKS_APP_PORT, which makes launchers
+    # use ambient service-principal auth and enables the notebook-path shim
+    # needed for workspace-synced sources. A local Flask run must NOT fake
+    # that marker: locally uploaded notebooks retain their ``.py`` suffix.
+    # Instead, forward the selected CLI profile explicitly so the child stays
+    # non-interactive while preserving local notebook paths.
+    if not demo_env.get('DATABRICKS_APP_PORT'):
+        local_profile = demo_env.get('DATABRICKS_CONFIG_PROFILE')
+        if local_profile:
+            demo_command.extend(['--profile', local_profile])
+
+    # Every demo launcher can wait many minutes for remote jobs or pipelines.
+    # Always return immediately and stream progress through the shared polling
+    # UI instead of holding the browser request behind a blocking spinner.
+    try:
+        token = _jobs_module._new_job_token(
+            kind='demo',
+            max_active_for_kind=_jobs_module._MAX_ACTIVE_DEMO_JOBS,
+        )
+    except _jobs_module.JobCapacityError as exc:
+        response = jsonify({
+            'error': (
+                f"{exc}. Wait for an existing demo to finish before "
+                "launching another."
+            ),
+        })
+        response.status_code = 429
+        response.headers['Retry-After'] = '30'
+        return response
+    _run_command_in_background(
+        token=token,
+        command=demo_command,
         cwd=current_directory,
         env=demo_env,
+        # Interactive waits up to 90 minutes and may be silent while the
+        # remote job runs. Keep the orphan-protection timeout above that.
+        idle_timeout_seconds=2 * 60 * 60,
     )
-    return extract_command_output(result)
+    return jsonify({'token': token}), 202
 
 
 @bp.route('/api/job/<token>/logs', methods=['GET'])
 def get_job_logs(token):
     """Polling endpoint: returns buffered log lines + done/returncode
     for the progress UI."""
-    job = _jobs_module._get_job(token)
+    job = _jobs_module._get_job_snapshot(token)
     if job is None:
         return jsonify({'error': 'Job not found'}), 404
 
@@ -254,9 +290,12 @@ def get_job_logs(token):
         return jsonify({
             'error': f"offset must be non-negative (got {offset})"
         }), 400
-    new_logs = job['logs'][offset:]
+    base_offset = job.get('log_base_offset', 0)
+    relative_offset = max(0, offset - base_offset)
+    new_logs = job['logs'][relative_offset:]
     payload: dict = {
         'logs': new_logs,
+        'next_offset': base_offset + len(job['logs']),
         'done': job['done'],
         'returncode': job.get('returncode'),
         'error': job.get('error'),

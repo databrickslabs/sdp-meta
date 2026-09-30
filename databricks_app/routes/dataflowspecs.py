@@ -128,7 +128,19 @@ def get_dataflowspecs():
             return {'columns': columns, 'rows': rows, 'groups': groups, 'error': None}
         except Exception as exc:
             logger.exception("DataflowSpec query failed for %s.%s.%s", catalog, schema, table_name)
-            return {'columns': [], 'rows': [], 'groups': [], 'error': str(exc)}
+            return {
+                'columns': [],
+                'rows': [],
+                'groups': [],
+                'error': (
+                    'The app could not read this DataflowSpec table. Verify '
+                    'the table name, SQL warehouse, and App service principal permissions.'
+                ),
+                'details': {
+                    'exception_type': type(exc).__name__,
+                    'message': str(exc),
+                },
+            }
 
     bronze_result = _run_query(bronze_table)
     silver_result = _run_query(silver_table)

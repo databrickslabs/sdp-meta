@@ -3,9 +3,12 @@
 ## [v0.1.1]
 ### Added
 - **Multiple pipeline topologies per DAB bundle**: `bundle-add-pipeline` adds independently configured bronze, silver, split, or combined pipelines with their own data-flow groups and target schemas. `bundle-validate` validates each pipeline and its job wiring independently. [Issue #446](https://github.com/databrickslabs/sdp-meta/issues/446)
+- **Auto Loader schema-evolution demos**: focused and at-scale demos exercise additive schema evolution, strict-mode failure behavior, and multi-table onboarding from Unity Catalog Volumes. [PR #490](https://github.com/databrickslabs/sdp-meta/pull/490)
 
 ### Fixed
 - **Databricks SDK compatibility floor**: the minimum supported SDK is now `databricks-sdk>=0.138.0,<1` across wheel, runtime, and Databricks App dependencies. CI installs exactly 0.138.0 and exercises the serverless `jobs.JobEnvironment` and `compute.Environment` models used by onboarding jobs. [Issue #457](https://github.com/databrickslabs/sdp-meta/issues/457)
+- **[Databricks App] Make demo launches asynchronous and feature the 100-table Auto Loader demo**. [Issue #491](https://github.com/databrickslabs/sdp-meta/issues/491)
+- **Data-quality expectations without quarantine targets**: bronze and silver flows can apply DQ expectations when no quarantine table is configured, without referencing a missing quarantine target. [PR #487](https://github.com/databrickslabs/sdp-meta/pull/487)
 - **Databricks App deployment packaging**: macOS/Linux and Windows deployment staging now includes `examples/`, allowing the App container to build the SDP-META wheel after packaged MCP examples became a required wheel input.
 - **DAB pipeline group ownership**: `bundle-add-pipeline` now rejects duplicate ownership of the same data-flow group and layer before writing files, while preserving supported bronze/silver split ownership and wiring its job dependency. Its fail-safe preflight checks the complete merged topology and every target override. `bundle-validate` also detects ownership conflicts introduced through manual YAML edits, including conflicts that exist only under a target override. [Issue #458](https://github.com/databrickslabs/sdp-meta/issues/458)
 - **Customized DAB validation**: `bundle-validate` now honors default and environment-selected targets, accepts transitive bronze-to-silver task dependencies, and reports malformed targets or dependency cycles cleanly. [Issue #459](https://github.com/databrickslabs/sdp-meta/issues/459)

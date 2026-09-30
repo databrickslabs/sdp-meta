@@ -860,6 +860,48 @@
             opacity: 0; transition: opacity .18s;
         }
         .demo-card:hover .demo-cta { opacity: 1; }
+        .featured-demo-picker {
+            display: grid;
+            grid-template-columns: minmax(220px, 320px) 1fr auto;
+            gap: 18px;
+            align-items: end;
+            padding: 22px;
+            background: var(--surface);
+            border: 1.5px solid var(--border);
+            border-radius: var(--radius);
+        }
+        .featured-demo-field {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .featured-demo-field label {
+            font-size: .74rem;
+            font-weight: 700;
+            color: var(--ink-60);
+            text-transform: uppercase;
+            letter-spacing: .07em;
+        }
+        .featured-demo-details {
+            display: grid;
+            grid-template-columns: 42px 1fr;
+            gap: 4px 12px;
+            align-items: center;
+            min-height: 58px;
+        }
+        .featured-demo-details .demo-icon {
+            grid-row: 1 / 3;
+        }
+        .featured-demo-details h4 {
+            font-size: .9rem;
+            font-weight: 700;
+            color: var(--ink);
+        }
+        .featured-demo-details p {
+            font-size: .79rem;
+            color: var(--ink-40);
+            line-height: 1.5;
+        }
 
         /* ── Loading overlay ─────────────────────────────────────────── */
         #loadingOverlay {
@@ -939,6 +981,7 @@
         .progress-log .log-stdout { color: #9cdcfe; }
         .progress-log .log-stderr { color: #f4bf4f; }
         .progress-log .log-info   { color: #4ec94e; font-style: italic; }
+        .progress-log .progress-link { color: inherit; text-decoration: underline; }
         .progress-foot {
             padding: 12px 20px;
             display: flex;
@@ -1043,6 +1086,7 @@
             .form-grid-2 { grid-template-columns: 1fr; }
             .demo-grid { grid-template-columns: 1fr 1fr; }
             .uc-callout { flex-direction: column; align-items: flex-start; }
+            .featured-demo-picker { grid-template-columns: 1fr; align-items: stretch; }
             .form-card { padding: 20px; }
         }
     </style>
@@ -1433,7 +1477,7 @@
                 </div>
 
                 <div class="btn-row">
-                    <button class="btn-primary" type="submit">&#9654; Run Onboarding</button>
+                    <button class="btn-primary" type="submit" id="onboardingSubmitBtn">&#9654; Run Onboarding</button>
                     <button class="btn-secondary" type="button" id="onboardingPreviewBtn"
                             title="Preview the onboarding template with your form values substituted — no side effects, no UC volume created, no job launched.">
                         &#128270; Preview rendered template
@@ -1690,37 +1734,26 @@
             </div>
             <div id="ucAccessStatus" class="uc-access-status info" hidden></div>
 
-            <div class="demo-grid">
-                <div class="demo-card" data-command="demo_cloudfiles" role="button" tabindex="0">
-                    <div class="demo-icon">&#9729;&#65039;</div>
-                    <h4>Cloud Files</h4>
-                    <p>Ingest streaming data using Auto Loader with cloud file sources</p>
-                    <span class="demo-cta">Run demo &#8594;</span>
+            <div class="featured-demo-picker">
+                <div class="featured-demo-field">
+                    <label for="featured_demo_select">Featured demo</label>
+                    <select class="form-input" id="featured_demo_select">
+                        <option value="demo_at_scale_autoloader" selected>At-scale Auto Loader (100 tables)</option>
+                        <option value="demo_interactive">Interactive Notebook</option>
+                        <option value="demo_cloudfiles">Cloud Files</option>
+                        <option value="demo_acf">Apply Changes Snapshot</option>
+                        <option value="demo_silverfanout">Silver Fanout</option>
+                        <option value="demo_dias">DAIS Demo</option>
+                    </select>
                 </div>
-                <div class="demo-card" data-command="demo_acf" role="button" tabindex="0">
-                    <div class="demo-icon">&#128247;</div>
-                    <h4>Apply Changes Snapshot</h4>
-                    <p>CDC with SCD Type 1 apply changes from full data snapshots</p>
-                    <span class="demo-cta">Run demo &#8594;</span>
+                <div class="featured-demo-details" id="featuredDemoDetails" aria-live="polite">
+                    <div class="demo-icon" id="featuredDemoIcon">&#128202;</div>
+                    <h4 id="featuredDemoTitle">At-scale Auto Loader (100 tables)</h4>
+                    <p id="featuredDemoDescription">Generate, onboard, run, and validate 100 metadata-driven Auto Loader tables.</p>
                 </div>
-                <div class="demo-card" data-command="demo_silverfanout" role="button" tabindex="0">
-                    <div class="demo-icon">&#128256;</div>
-                    <h4>Silver Fanout</h4>
-                    <p>Fan-out bronze data into multiple silver tables in one pipeline</p>
-                    <span class="demo-cta">Run demo &#8594;</span>
-                </div>
-                <div class="demo-card" data-command="demo_dias" role="button" tabindex="0">
-                    <div class="demo-icon">&#129504;</div>
-                    <h4>DAIS Demo</h4>
-                    <p>Databricks AI Summit end-to-end pipeline walkthrough</p>
-                    <span class="demo-cta">Run demo &#8594;</span>
-                </div>
-                <div class="demo-card" data-command="demo_interactive" role="button" tabindex="0">
-                    <div class="demo-icon">&#128214;</div>
-                    <h4>Interactive Notebook</h4>
-                    <p>End-to-end notebook walkthrough &mdash; submits the SDP-META Interactive Demo as a serverless job (Option B headless launcher)</p>
-                    <span class="demo-cta">Run demo &#8594;</span>
-                </div>
+                <button type="button" class="btn-primary" id="runFeaturedDemo">
+                    Run featured demo &#8594;
+                </button>
             </div>
 
             <div class="content-footer">
@@ -1938,7 +1971,7 @@
         <div class="progress-log" id="progressLog"></div>
         <div class="progress-foot">
             <span class="progress-status" id="progressStatus">Starting&hellip;</span>
-            <button class="btn-secondary" id="progressClose" disabled onclick="closeProgressModal()">Close</button>
+            <button class="btn-secondary" id="progressClose" onclick="closeProgressModal()">Close</button>
         </div>
     </div>
 </div>
@@ -1989,14 +2022,33 @@
     }
 
     /* ── Progress log modal (onboarding) ───────────────────── */
-    var _progressPoll = null;
-    var _dotsTimer    = null;
+    var _progressSession = null;
+    var _progressSessionCounter = 0;
+    var _progressPending = false;
+    var _dotsTimer = null;
+
+    function _claimProgressOperation() {
+        if (_progressPending || (_progressSession && !_progressSession.finished)) {
+            /* Keep one recoverable progress stream per browser tab. Reopen the
+               existing dialog instead of launching an operation whose token
+               would replace—and make unreachable—the current one. */
+            document.getElementById('progressModal').classList.add('visible');
+            _startDots();
+            return false;
+        }
+        _progressPending = true;
+        return true;
+    }
+
+    function _releaseProgressClaim() {
+        _progressPending = false;
+    }
 
     function showProgressModal(title) {
         document.getElementById('progressTitle').textContent = title || 'Running…';
         document.getElementById('progressLog').innerHTML = '';
         document.getElementById('progressStatus').textContent = 'Starting…';
-        document.getElementById('progressClose').disabled = true;
+        document.getElementById('progressClose').disabled = false;
         document.getElementById('progressDots').textContent = '●';
         document.getElementById('progressDots').style.color = '';
         document.getElementById('progressModal').classList.add('visible');
@@ -2005,7 +2057,8 @@
 
     function closeProgressModal() {
         document.getElementById('progressModal').classList.remove('visible');
-        if (_progressPoll) { clearInterval(_progressPoll); _progressPoll = null; }
+        /* Hiding progress must not stop tracking. Long-running demos continue
+           in the background and still surface their completion result later. */
         if (_dotsTimer)    { clearInterval(_dotsTimer);    _dotsTimer    = null; }
     }
 
@@ -2023,42 +2076,148 @@
         span.className = stream === 'stderr' ? 'log-stderr'
                        : stream === 'info'   ? 'log-info'
                        :                       'log-stdout';
-        span.textContent = line + '\n';
+        var urlPattern = /https:\/\/[^\s<>"']+/g;
+        var cursor = 0;
+        var match;
+        while ((match = urlPattern.exec(line)) !== null) {
+            span.appendChild(document.createTextNode(line.slice(cursor, match.index)));
+            var link = document.createElement('a');
+            link.href = match[0];
+            link.textContent = match[0];
+            link.target = '_blank';
+            link.rel = 'noopener noreferrer';
+            link.className = 'progress-link';
+            span.appendChild(link);
+            cursor = match.index + match[0].length;
+        }
+        span.appendChild(document.createTextNode(line.slice(cursor) + '\n'));
         log.appendChild(span);
         log.scrollTop = log.scrollHeight;
     }
 
     function _finishProgressModal(success, statusText) {
+        _releaseProgressClaim();
         var dotsEl = document.getElementById('progressDots');
         dotsEl.textContent = success ? '✓' : '✗';
         dotsEl.style.color = success ? '#4ec94e' : '#f47c7c';
         document.getElementById('progressStatus').textContent = statusText || (success ? 'Done' : 'Failed');
         document.getElementById('progressClose').disabled = false;
         if (_dotsTimer)    { clearInterval(_dotsTimer);    _dotsTimer    = null; }
-        if (_progressPoll) { clearInterval(_progressPoll); _progressPoll = null; }
     }
 
     function _pollJob(token, onDone) {
+        _releaseProgressClaim();
         var offset = 0;
-        _progressPoll = setInterval(function() {
-            fetch('/api/job/' + token + '/logs?offset=' + offset)
-                .then(function(r) { return r.json(); })
+        var maxRetries = 4;
+        var session = {
+            id: ++_progressSessionCounter,
+            token: token,
+            timer: null,
+            controller: null,
+            retryCount: 0,
+            finished: false
+        };
+        _progressSession = session;
+
+        function ownsProgressSurface() {
+            return _progressSession === session;
+        }
+
+        function finishOnce(data) {
+            if (!ownsProgressSurface() || session.finished) return;
+            session.finished = true;
+            if (session.timer) clearTimeout(session.timer);
+            session.controller = null;
+            _progressSession = null;
+            onDone(data);
+        }
+
+        function schedulePoll(delay) {
+            if (!ownsProgressSurface() || session.finished) return;
+            session.timer = setTimeout(poll, delay);
+        }
+
+        function failPolling(err) {
+            if (!ownsProgressSurface()) return;
+            var message = err.message || String(err);
+            var userMessage = err.status === 404
+                ? 'Progress tracking expired. Start the operation again.'
+                : 'The app could not check progress after repeated attempts.';
+            _appendProgressLine('stderr', message);
+            _finishProgressModal(false, 'Unable to check progress');
+            finishOnce({
+                done: true,
+                returncode: -1,
+                error: userMessage,
+                result: {
+                    error: userMessage,
+                    returncode: -1,
+                    details: {
+                        message: message,
+                        status: err.status || null,
+                        retries: session.retryCount
+                    }
+                }
+            });
+        }
+
+        function poll() {
+            if (!ownsProgressSurface() || session.finished) return;
+            session.controller = new AbortController();
+            fetch(
+                '/api/job/' + token + '/logs?offset=' + offset,
+                { signal: session.controller.signal }
+            )
+                .then(function(r) {
+                    return r.json().catch(function() { return {}; }).then(function(data) {
+                        if (!r.ok) {
+                            var err = new Error(
+                                data.error || ('Progress request failed (HTTP ' + r.status + ')')
+                            );
+                            err.status = r.status;
+                            throw err;
+                        }
+                        return data;
+                    });
+                })
                 .then(function(d) {
+                    if (!ownsProgressSurface()) return;
+                    session.controller = null;
+                    session.retryCount = 0;
                     (d.logs || []).forEach(function(entry) {
                         _appendProgressLine(entry.stream, entry.line);
                     });
-                    offset += (d.logs || []).length;
+                    offset = Number.isInteger(d.next_offset)
+                        ? d.next_offset
+                        : offset + (d.logs || []).length;
                     if (offset > 0) {
                         document.getElementById('progressStatus').textContent = 'Running… (' + offset + ' lines)';
                     }
                     if (d.done) {
-                        clearInterval(_progressPoll);
-                        _progressPoll = null;
-                        onDone(d);
+                        finishOnce(d);
+                    } else {
+                        schedulePoll(1500);
                     }
                 })
-                .catch(function(err) { console.warn('Progress poll error:', err); });
-        }, 1500);
+                .catch(function(err) {
+                    if (!ownsProgressSurface() || err.name === 'AbortError') return;
+                    session.controller = null;
+                    console.warn('Progress poll error:', err);
+                    var transientFailure = !err.status || err.status >= 500;
+                    if (transientFailure && session.retryCount < maxRetries) {
+                        session.retryCount += 1;
+                        var retryDelay = Math.pow(2, session.retryCount - 1) * 1000;
+                        document.getElementById('progressStatus').textContent =
+                            'Connection interrupted — retrying (' +
+                            session.retryCount + '/' + maxRetries + ')…';
+                        schedulePoll(retryDelay);
+                        return;
+                    }
+                    failPolling(err);
+                });
+        }
+
+        schedulePoll(0);
     }
 
     /* ── Modal ──────────────────────────────────────────────── */
@@ -2091,9 +2250,36 @@
             showModal('<pre>' + escapeHtml(JSON.stringify(data, null, 2)) + '</pre>', defaultTitle);
         }
     }
+    function _technicalDetailsHtml(details) {
+        if (!details) return '';
+        var text;
+        try {
+            text = typeof details === 'string' ? details : JSON.stringify(details, null, 2);
+        } catch (e) {
+            text = String(details);
+        }
+        if (!text.trim()) return '';
+        return '<details style="margin-top:14px">' +
+            '<summary style="cursor:pointer;font-weight:500">Technical details</summary>' +
+            '<pre style="white-space:pre-wrap;font-size:.78rem;max-height:320px;overflow:auto;margin-top:8px">' +
+            escapeHtml(text) + '</pre></details>';
+    }
+    function showErrorResponse(data, title) {
+        data = data || {};
+        var message = data.error || 'The app could not complete this request.';
+        showModal(
+            '<p style="color:var(--brand);font-weight:500;white-space:pre-wrap">' +
+            escapeHtml(message) + '</p>' + _technicalDetailsHtml(data.details),
+            title
+        );
+    }
     function handleError(err, title) {
         hideLoading();
-        showModal('<p style="color:var(--brand);font-weight:500">' + escapeHtml(err.message || String(err)) + '</p>', title);
+        var payload = err && err.payload ? err.payload : {
+            error: err && err.message ? err.message : String(err),
+            details: err && err.details ? err.details : null
+        };
+        showErrorResponse(payload, title);
     }
 
     /* Safe JSON parser — checks Content-Type before calling .json() so an
@@ -2127,26 +2313,19 @@
         hideLoading();
         /* Explicit error field (validation, 4xx, etc.) */
         if (data.error) {
-            showModal(
-                '<p style="color:var(--brand);font-weight:500;white-space:pre-wrap">' +
-                escapeHtml(data.error) + '</p>',
-                defaultTitle
-            );
+            showErrorResponse(data, defaultTitle);
             return;
         }
         /* CLI subprocess failed */
         if (data.returncode !== undefined && data.returncode !== 0) {
-            var body = '';
-            if (data.stderr && data.stderr.trim()) {
-                body += '<pre style="color:var(--brand);white-space:pre-wrap;font-size:.82rem;max-height:320px;overflow:auto">'
-                     + escapeHtml(data.stderr.trim()) + '</pre>';
-            }
-            if (data.stdout && data.stdout.trim()) {
-                body += '<pre style="white-space:pre-wrap;font-size:.82rem;max-height:200px;overflow:auto">'
-                     + escapeHtml(data.stdout.trim()) + '</pre>';
-            }
-            if (!body) body = '<p>Command exited with code ' + data.returncode + '.</p>';
-            showModal(body, defaultTitle + ' — Failed');
+            showErrorResponse({
+                error: 'The operation failed before it could complete.',
+                details: {
+                    returncode: data.returncode,
+                    stderr: data.stderr || '',
+                    stdout: data.stdout || ''
+                }
+            }, defaultTitle + ' — Failed');
             return;
         }
         /* Success with job details */
@@ -2238,6 +2417,21 @@
     document.getElementById('onboardingForm').addEventListener('submit', function(e) {
         e.preventDefault();
         var form = this;
+        var bundledPicker = document.getElementById('bundled_spec_id');
+        var sourceMode = (document.querySelector('input[name="source_mode"]:checked') || {}).value;
+        if (sourceMode === 'bundled' && bundledPicker &&
+                bundledPicker.value === '__featured_at_scale_autoloader__') {
+            var onboardingCatalog = document.getElementById('unity_catalog_name');
+            var catalogName = (onboardingCatalog.value || '').trim();
+            if (!catalogName) {
+                _flashUcInputInvalid('unity_catalog_name');
+                return;
+            }
+            document.getElementById('demo_uc_name').value = catalogName;
+            runDemo('demo_at_scale_autoloader');
+            return;
+        }
+        if (!_claimProgressOperation()) return;
         showProgressModal('Running Onboarding…');
         _appendProgressLine('info', '→ Submitting onboarding request…');
 
@@ -2257,11 +2451,7 @@
                     _finishProgressModal(false, 'Validation failed');
                     setTimeout(function() {
                         closeProgressModal();
-                        showModal(
-                            '<p style="color:var(--brand);font-weight:500;white-space:pre-wrap">' +
-                            escapeHtml(d.error) + '</p>',
-                            'Onboarding Error'
-                        );
+                        showErrorResponse(d, 'Onboarding Error');
                     }, 400);
                     return;
                 }
@@ -2290,6 +2480,7 @@
                 }
             })
             .catch(function(err) {
+                _finishProgressModal(false, 'Request failed');
                 closeProgressModal();
                 handleError(err, 'Onboarding Error');
             });
@@ -2388,6 +2579,19 @@
                 noteHtml;
         }
 
+        function _setOnboardingActionForEntry(entry) {
+            var submitBtn = document.getElementById('onboardingSubmitBtn');
+            var previewBtn = document.getElementById('onboardingPreviewBtn');
+            var isLauncher = Boolean(entry && entry.launcher);
+            submitBtn.innerHTML = isLauncher
+                ? '&#9654; Run Featured Demo'
+                : '&#9654; Run Onboarding';
+            previewBtn.disabled = isLauncher;
+            previewBtn.title = isLauncher
+                ? 'The featured demo is an orchestrated launcher and has no single onboarding template to preview.'
+                : 'Preview the onboarding template with your form values substituted — no side effects, no UC volume created, no job launched.';
+        }
+
         /* Canonical schema names that every shipped bundled demo
            expects via the ``{bronze_schema}`` / ``{silver_schema}``
            placeholder substitution. Matches the DAB template defaults
@@ -2427,6 +2631,17 @@
         function _syncBundledToHidden() {
             var entry = _bundledSpecById(bundledSelect.value);
             if (!entry) return;
+            /* The featured at-scale demo is an orchestrated launcher, not a
+               static onboarding spec. Keep it discoverable here, but route
+               it to the Demos workflow instead of writing invalid paths
+               into this form. */
+            if (entry.launcher) {
+                featuredDemoSelect.value = entry.launcher;
+                renderFeaturedDemo();
+                _renderBundledMeta(entry);
+                _setOnboardingActionForEntry(entry);
+                return;
+            }
             var fmt = _currentBundledFormat();
             /* Prefer the user's chosen format, but fall back to whichever
                this spec actually ships if the chosen format is missing. */
@@ -2443,6 +2658,7 @@
             }
             _fillBundledSchemaDefaultsIfBlank();
             _renderBundledMeta(entry);
+            _setOnboardingActionForEntry(entry);
         }
 
         /* Push the UC-Volume inputs into the hidden inputs. UC mode
@@ -2484,8 +2700,10 @@
                 _fillBundledSchemaDefaultsIfBlank();
                 _syncBundledToHidden();
             } else if (mode === 'uc_volume') {
+                _setOnboardingActionForEntry(null);
                 _syncUcToHidden();
             } else {
+                _setOnboardingActionForEntry(null);
                 _syncManualToHidden();
             }
         }
@@ -2496,7 +2714,12 @@
             fetch('/onboarding/bundled-specs')
                 .then(function(r) { return r.json(); })
                 .then(function(body) {
-                    bundledData = body.specs || [];
+                    bundledData = [{
+                        id: '__featured_at_scale_autoloader__',
+                        label: '\u2605 Featured \u2014 At-scale Auto Loader (100 tables) \u2192',
+                        launcher: 'demo_at_scale_autoloader',
+                        description: 'Featured demo: generate, onboard, run, and validate 100 metadata-driven Auto Loader tables. Enter a catalog above, then click Run Featured Demo.'
+                    }].concat(body.specs || []);
                     if (!bundledData.length) {
                         bundledSelect.innerHTML = '<option value="">(no bundled demos found)</option>';
                         bundledMeta.innerHTML = '<em>The App container has no bundled demos. Switch to "Unity Catalog Volume" or "Manual paths" mode.</em>';
@@ -2506,29 +2729,15 @@
                         return '<option value="' + escapeHtml(s.id) + '">' +
                                escapeHtml(s.label) + '</option>';
                     }).join('');
-                    /* Default-pick priority: the flagship ``onboarding``
-                       (DAIS end-to-end demo) leads the picker because
-                       it's the demo the App is most often shown with
-                       \u2014 it exercises CDC + DQE + silver transforms
-                       in a single pass and surfaces the most surface
-                       area of SDP-META. Fall back to the simpler
-                       ``onboarding_cars`` if DAIS is missing from the
-                       container, then to the first entry. */
-                    var defaultIdx = 0;
-                    var preferenceOrder = ['onboarding', 'onboarding_cars'];
-                    for (var p = 0; p < preferenceOrder.length; p++) {
-                        var found = false;
-                        for (var i = 0; i < bundledData.length; i++) {
-                            if (bundledData[i].id === preferenceOrder[p]) {
-                                defaultIdx = i;
-                                found = true;
-                                break;
-                            }
-                        }
-                        if (found) break;
-                    }
-                    bundledSelect.selectedIndex = defaultIdx;
-                    _syncBundledToHidden();
+                    /* Keep the featured 100-table demo selected by default.
+                       Do not call ``_syncBundledToHidden`` here: launcher
+                       entries intentionally navigate to the Demos panel,
+                       and page initialization must not redirect the user.
+                       Choosing any option explicitly still uses the normal
+                       change handler below. */
+                    bundledSelect.selectedIndex = 0;
+                    _renderBundledMeta(bundledData[0]);
+                    _setOnboardingActionForEntry(bundledData[0]);
                 })
                 .catch(function(err) {
                     bundledSelect.innerHTML = '<option value="">(failed to load bundled demos)</option>';
@@ -2838,6 +3047,7 @@
             return;
         }
 
+        if (!_claimProgressOperation()) return;
         showProgressModal('Deploying Pipeline…');
         _appendProgressLine('info', '→ Submitting deploy request…');
 
@@ -2856,11 +3066,7 @@
                     _finishProgressModal(false, 'Validation failed');
                     setTimeout(function() {
                         closeProgressModal();
-                        showModal(
-                            '<p style="color:var(--brand);font-weight:500;white-space:pre-wrap">' +
-                            escapeHtml(d.error) + '</p>',
-                            'Deploy Error'
-                        );
+                        showErrorResponse(d, 'Deploy Error');
                     }, 400);
                     return;
                 }
@@ -2886,6 +3092,7 @@
                 }
             })
             .catch(function(err) {
+                _finishProgressModal(false, 'Request failed');
                 closeProgressModal();
                 handleError(err, 'Deploy Error');
             });
@@ -3098,6 +3305,7 @@
     function runDemo(command) {
         var ucInput = document.getElementById('demo_uc_name');
         if (!ucInput.value.trim()) { _flashUcInputInvalid('demo_uc_name'); return; }
+        if (!_claimProgressOperation()) return;
         /* Restore the Demo-panel ucContext so the grant-required modal
            opened by /rundemo (if any) targets the Demo-panel status
            container, not whichever input the user last tested. */
@@ -3117,22 +3325,89 @@
                lacks privileges on the user's catalog. Surface the panel
                instead of dumping the raw JSON into a generic modal. */
             if (resp.status === 400 && resp.body && resp.body.grant_required) {
+                _releaseProgressClaim();
                 _setUcStatus('warn',
                     '<strong>Grant required.</strong> ' + escapeHtml(resp.body.error || ''));
                 showGrantRequiredModal(resp.body);
                 return;
             }
+            if (resp.status === 202 && resp.body && resp.body.token) {
+                var selectedDemo = featuredDemoCatalog[command];
+                var demoTitle = selectedDemo ? selectedDemo.title : 'Demo';
+                showProgressModal('Running ' + demoTitle);
+                _appendProgressLine(
+                    'info',
+                    '\u2192 Launcher started. Progress and the Databricks run URL will appear here.'
+                );
+                _pollJob(resp.body.token, function(jobData) {
+                    var success = jobData.returncode === 0;
+                    _finishProgressModal(
+                        success,
+                        success ? 'Completed successfully' : 'Failed'
+                    );
+                    if (jobData.result) {
+                        renderApiResponse(jobData.result, 'Demo Result');
+                    }
+                });
+                return;
+            }
+            _releaseProgressClaim();
             renderApiResponse(resp.body, 'Demo Result');
         })
-        .catch(function(e) { hideLoading(); handleError(e, 'Demo Error'); });
+        .catch(function(e) {
+            _releaseProgressClaim();
+            hideLoading();
+            handleError(e, 'Demo Error');
+        });
     }
 
-    document.querySelectorAll('.demo-card').forEach(function(card) {
-        card.addEventListener('click', function() { runDemo(this.dataset.command); });
-        card.addEventListener('keydown', function(e) {
-            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); runDemo(this.dataset.command); }
-        });
+    var featuredDemoSelect = document.getElementById('featured_demo_select');
+    var featuredDemoCatalog = {
+        demo_at_scale_autoloader: {
+            icon: '\uD83D\uDCCA',
+            title: 'At-scale Auto Loader (100 tables)',
+            description: 'Generate, onboard, run, and validate 100 metadata-driven Auto Loader tables.'
+        },
+        demo_interactive: {
+            icon: '\uD83D\uDCD6',
+            title: 'Interactive Notebook',
+            description: 'End-to-end notebook walkthrough — submits the SDP-META Interactive Demo as a serverless job.'
+        },
+        demo_cloudfiles: {
+            icon: '\u2601\uFE0F',
+            title: 'Cloud Files',
+            description: 'Ingest streaming data using Auto Loader with cloud file sources.'
+        },
+        demo_acf: {
+            icon: '\uD83D\uDCF7',
+            title: 'Apply Changes Snapshot',
+            description: 'CDC with SCD Type 1 apply changes from full data snapshots.'
+        },
+        demo_silverfanout: {
+            icon: '\uD83D\uDD00',
+            title: 'Silver Fanout',
+            description: 'Fan out bronze data into multiple silver tables in one pipeline.'
+        },
+        demo_dias: {
+            icon: '\uD83E\uDDE0',
+            title: 'DAIS Demo',
+            description: 'Databricks AI Summit end-to-end pipeline walkthrough.'
+        }
+    };
+
+    function renderFeaturedDemo() {
+        var demo = featuredDemoCatalog[featuredDemoSelect.value];
+        if (!demo) return;
+        document.getElementById('featuredDemoIcon').textContent = demo.icon;
+        document.getElementById('featuredDemoTitle').textContent = demo.title;
+        document.getElementById('featuredDemoDescription').textContent = demo.description;
+    }
+
+    featuredDemoSelect.addEventListener('change', renderFeaturedDemo);
+    document.getElementById('runFeaturedDemo').addEventListener('click', function() {
+        runDemo(featuredDemoSelect.value);
     });
+    renderFeaturedDemo();
 
     /* Clear the inline access status when the user edits the catalog
        name — a stale "OK" indicator for a different catalog name would
@@ -3191,6 +3466,7 @@
             .then(function(list) {
                 if (list.error) {
                     sel.innerHTML = '<option value="">Error: ' + escapeHtml(list.error) + '</option>';
+                    showErrorResponse(list, 'Warehouse Error');
                     return;
                 }
                 if (!list.length) {
@@ -3237,6 +3513,7 @@
             if (d.error) {
                 msgEl.className = 'err';
                 msgEl.textContent = 'Error: ' + d.error;
+                showErrorResponse(d, 'Warehouse Error');
             } else {
                 msgEl.className = 'ok';
                 msgEl.textContent = d.message || 'Configured.';
@@ -3438,6 +3715,7 @@
                 if (d.error) {
                     statusEl.style.color = 'var(--brand)';
                     statusEl.textContent = 'Error: ' + d.error;
+                    showErrorResponse(d, 'DataflowSpec Error');
                     return;
                 }
                 _specsData = d;
@@ -3559,6 +3837,7 @@
             headEl.innerHTML = '';
             bodyEl.innerHTML = '<tr><td class="specs-empty">'
                 + escapeHtml(data && data.error ? 'Error: ' + data.error : 'No data')
+                + (data && data.details ? _technicalDetailsHtml(data.details) : '')
                 + '</td></tr>';
             return;
         }
@@ -3669,7 +3948,12 @@
                     ? 'Error: ' + pipelines.error
                     : pipelines.length + ' SDP-META pipeline(s) found';
                 var tbody = document.getElementById('pipelineTableBody');
-                if (!Array.isArray(pipelines) || pipelines.length === 0) {
+                if (!Array.isArray(pipelines)) {
+                    tbody.innerHTML = '<tr><td colspan="4" id="monitorEmpty">Unable to load pipelines.</td></tr>';
+                    showErrorResponse(pipelines, 'Pipeline Monitor Error');
+                    return;
+                }
+                if (pipelines.length === 0) {
                     tbody.innerHTML = '<tr><td colspan="4" id="monitorEmpty">No SDP-META pipelines found in this workspace.</td></tr>';
                     document.getElementById('eventsDrawer').style.display = 'none';
                     return;
@@ -3734,8 +4018,14 @@
             .then(_parseJSON)
             .then(function(d) {
                 hideLoading();
-                showModal('<p>' + escapeHtml(d.error || (name + ' ' + (action === 'start' ? 'started' : 'stopped') + '.')) + '</p>',
-                          action === 'start' ? 'Pipeline Started' : 'Pipeline Stopped');
+                if (d.error) {
+                    showErrorResponse(d, 'Pipeline action error');
+                    return;
+                }
+                showModal(
+                    '<p>' + escapeHtml(name + ' ' + (action === 'start' ? 'started' : 'stopped') + '.') + '</p>',
+                    action === 'start' ? 'Pipeline Started' : 'Pipeline Stopped'
+                );
                 setTimeout(loadPipelines, 1500);
             })
             .catch(function(e) { hideLoading(); handleError(e, 'Pipeline action error'); });
@@ -3754,7 +4044,12 @@
         fetch('/api/pipelines/' + encodeURIComponent(pipelineId) + '/events')
             .then(_parseJSON)
             .then(function(events) {
-                if (!Array.isArray(events) || events.length === 0) {
+                if (!Array.isArray(events)) {
+                    list.innerHTML = '<li><span class="event-msg" style="color:var(--ink-40)">Unable to load events.</span></li>';
+                    showErrorResponse(events, 'Pipeline Events Error');
+                    return;
+                }
+                if (events.length === 0) {
                     list.innerHTML = '<li><span class="event-msg" style="color:var(--ink-40)">No events found.</span></li>';
                     return;
                 }
@@ -3790,6 +4085,7 @@
                 if (!Array.isArray(cats)) {
                     sel.innerHTML = '<option value="">— Select catalog —</option>';
                     _browseStatus('Error loading catalogs: ' + (cats.error || 'unknown error'), true);
+                    showErrorResponse(cats, 'Catalog Browser Error');
                     return;
                 }
                 sel.innerHTML = '<option value="">— Select catalog —</option>' +
@@ -3822,6 +4118,7 @@
                 if (!Array.isArray(schemas)) {
                     sel.innerHTML = '<option value="">— Select schema —</option>';
                     _browseStatus('Error loading schemas: ' + (schemas.error || 'unknown error'), true);
+                    showErrorResponse(schemas, 'Catalog Browser Error');
                     return;
                 }
                 sel.innerHTML = '<option value="">— Select schema —</option>' +
@@ -3852,6 +4149,7 @@
                 if (!Array.isArray(tables)) {
                     sel.innerHTML = '<option value="">— Select table —</option>';
                     _browseStatus('Error loading tables: ' + (tables.error || 'unknown error'), true);
+                    showErrorResponse(tables, 'Catalog Browser Error');
                     return;
                 }
                 sel.innerHTML = '<option value="">— Select table —</option>' +
@@ -3899,6 +4197,7 @@
         .then(function(d) {
             if (d.error) {
                 statusEl.textContent = 'Error: ' + d.error;
+                showErrorResponse(d, 'Table Preview Error');
                 return;
             }
             var cols = d.columns || [];
@@ -4021,7 +4320,7 @@
             .then(_parseJSON)
             .then(function(d) {
                 hideLoading();
-                if (d.error) { showModal('<p style="color:var(--brand)">' + escapeHtml(d.error) + '</p>', 'Load error'); return; }
+                if (d.error) { showErrorResponse(d, 'Load error'); return; }
                 document.getElementById('specEditorTextarea').value = d.content;
                 var fmtSel = document.getElementById('specFormat');
                 if (d.format) fmtSel.value = d.format;
@@ -4048,7 +4347,7 @@
         .then(_parseJSON)
         .then(function(d) {
             hideLoading();
-            if (d.error) { showModal('<p style="color:var(--brand)">' + escapeHtml(d.error) + '</p>', 'Save error'); return; }
+            if (d.error) { showErrorResponse(d, 'Save error'); return; }
             showModal('<p>Saved <code>' + escapeHtml(d.path) + '</code> (' + d.bytes_written + ' bytes)</p>', 'Saved');
         })
         .catch(function(e) { hideLoading(); handleError(e, 'Save error'); });

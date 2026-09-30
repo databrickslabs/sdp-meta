@@ -33,8 +33,7 @@ Out-of-the-box requirements an entry must satisfy:
     the Environment field's value at submit time, OR the entry must
     declare ``env_override`` to force the right value.
 
-The current 4 entries (Cars, Multi-Source CDC, Cloud Files,
-DAIS) all satisfy this contract. Keep this registry in lockstep
+The current entries all satisfy this contract. Keep this registry in lockstep
 with ``databricks_app/routes/demo.py::_DEMO_REGISTRY``.
 """
 

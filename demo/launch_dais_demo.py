@@ -71,6 +71,7 @@ class SDPMETADAISDemo(SDPMETARunner):
         except Exception as e:
             print(e)
             traceback.print_exc()
+            raise
         # finally:
         #     self.clean_up(runner_conf)
 
@@ -82,7 +83,11 @@ class SDPMETADAISDemo(SDPMETARunner):
         - runner_conf: SDPMetaRunnerConf object
         """
         created_job = self.create_daisdemo_workflow(runner_conf)
-        self.open_job_url(runner_conf, created_job)
+        self.open_job_url(
+            runner_conf,
+            created_job,
+            wait_for_completion=True,
+        )
 
     def create_daisdemo_workflow(self, runner_conf: SDPMetaRunnerConf):
         """
