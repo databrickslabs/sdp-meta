@@ -18,6 +18,8 @@ scenarios deterministically without depending on the real CLI.
 from __future__ import annotations
 
 import os
+import signal
+import subprocess
 import sys
 import time
 import unittest
@@ -74,6 +76,7 @@ class _FakeProc:
     called and lets the test poke a returncode."""
 
     def __init__(self, stdout_lines, stderr_lines, *, hang=False,
+                 hang_after_eof=False, ignore_kill=False,
                  returncode=0, pid=12345):
         if hang:
             self.stdout = _FakeHangingPipe(stdout_lines[0] if stdout_lines else "x")
@@ -85,23 +88,35 @@ class _FakeProc:
         self._final_returncode = returncode
         self._terminated = False
         self._waited = False
-        self._poll_alive = hang  # hung processes are "alive" until terminated
+        self._poll_alive = hang or hang_after_eof
+        self._hang_after_eof = hang_after_eof
+        self._ignore_kill = ignore_kill
         self.pid = pid
 
     def wait(self, timeout=None):
         self._waited = True
+        if self._ignore_kill:
+            raise subprocess.TimeoutExpired("fake-process", timeout)
+        if self._hang_after_eof and self._poll_alive:
+            raise subprocess.TimeoutExpired("fake-process", timeout)
+        if self._terminated:
+            return self.returncode
         # Match real Popen.wait(): sets returncode on completion.
         self.returncode = self._final_returncode
         return self.returncode
 
     def terminate(self):
         self._terminated = True
+        if self._ignore_kill:
+            return
         # Real terminate() sends SIGTERM but doesn't reap on its own.
         # The runner calls wait() right after.
         self._poll_alive = False
         self.returncode = -15
 
     def kill(self):
+        if self._ignore_kill:
+            return
         self._poll_alive = False
         self.returncode = -9
 
@@ -118,9 +133,14 @@ class SubprocessRunnerTests(unittest.TestCase):
         # The runner stores results into _jobs[token] \u2014 mint one.
         self._token = _jobs_module._new_job_token()
         self._orig_popen = _runner_module.subprocess.Popen
+        self._orig_killpg = getattr(_runner_module.os, "killpg", None)
+        self._orig_group_exists = _runner_module._process_group_exists
 
     def tearDown(self):
         _runner_module.subprocess.Popen = self._orig_popen
+        if self._orig_killpg is not None:
+            _runner_module.os.killpg = self._orig_killpg
+        _runner_module._process_group_exists = self._orig_group_exists
 
     def _wait_for_done(self, timeout=5.0):
         """Spin until the background thread sets job['done']. We give
@@ -142,7 +162,13 @@ class SubprocessRunnerTests(unittest.TestCase):
             stderr_lines=["warn1"],
             returncode=0,
         )
-        _runner_module.subprocess.Popen = lambda *a, **k: fake
+        popen_kwargs = {}
+
+        def fake_popen(*args, **kwargs):
+            popen_kwargs.update(kwargs)
+            return fake
+
+        _runner_module.subprocess.Popen = fake_popen
 
         _runner_module._run_cli_json_payload(
             token=self._token, json_string="{}", cwd="/",
@@ -157,6 +183,10 @@ class SubprocessRunnerTests(unittest.TestCase):
         # Natural completion should NOT have hit terminate \u2014 that
         # path is only for hung children.
         self.assertFalse(fake._terminated)
+        self.assertEqual(
+            popen_kwargs["start_new_session"],
+            os.name == "posix",
+        )
 
     def test_idle_timeout_reaps_child_and_preserves_partial_output(self):
         """H-1 regression: a hung child must be terminated AND the
@@ -168,6 +198,18 @@ class SubprocessRunnerTests(unittest.TestCase):
             hang=True,
         )
         _runner_module.subprocess.Popen = lambda *a, **k: fake
+        group_signals = []
+        if os.name == "posix":
+            def fake_killpg(pid, sig):
+                group_signals.append((pid, sig))
+                if sig == 0:
+                    raise ProcessLookupError()
+                if sig == signal.SIGTERM:
+                    fake.terminate()
+                else:
+                    fake.kill()
+
+            _runner_module.os.killpg = fake_killpg
 
         # The production timeout is 10 minutes \u2014 monkey-patch it down
         # so the test runs in <2s. The constant lives inside _run()
@@ -209,6 +251,8 @@ class SubprocessRunnerTests(unittest.TestCase):
             fake._terminated,
             "child process was not terminate()-d on idle timeout",
         )
+        if os.name == "posix":
+            self.assertIn((fake.pid, signal.SIGTERM), group_signals)
         # The line we collected BEFORE the timeout must survive \u2014
         # the old code clobbered it via the broad except handler.
         self.assertIn("got this line before hanging", job['stdout'])
@@ -218,6 +262,92 @@ class SubprocessRunnerTests(unittest.TestCase):
         self.assertTrue(
             "no output" in err or "silent" in err,
             f"timeout error should mention silence / no output: {err!r}",
+        )
+
+    def test_closed_pipes_do_not_bypass_process_timeout(self):
+        """A child that closes both pipes but stays alive must be reaped."""
+        fake = _FakeProc(
+            stdout_lines=["last output"],
+            stderr_lines=[],
+            hang_after_eof=True,
+        )
+        _runner_module.subprocess.Popen = lambda *a, **k: fake
+        if os.name == "posix":
+            def fake_killpg(pid, sig):
+                if sig == 0:
+                    if fake._poll_alive:
+                        return
+                    raise ProcessLookupError()
+                if sig == signal.SIGTERM:
+                    fake.terminate()
+                else:
+                    fake.kill()
+
+            _runner_module.os.killpg = fake_killpg
+
+        _runner_module._run_cli_json_payload(
+            token=self._token,
+            json_string="{}",
+            cwd="/",
+        )
+        self._wait_for_done()
+
+        job = _jobs_module._jobs[self._token]
+        self.assertTrue(fake._terminated)
+        self.assertEqual(job["returncode"], -15)
+        self.assertIn("closed its output streams", job["error"])
+        self.assertIn("last output", job["stdout"])
+
+    def test_unreapable_child_does_not_block_job_finalization(self):
+        """Even a child that ignores kill must release its job slot."""
+        fake = _FakeProc(
+            stdout_lines=[],
+            stderr_lines=[],
+            hang_after_eof=True,
+            ignore_kill=True,
+        )
+        _runner_module.subprocess.Popen = lambda *a, **k: fake
+        if os.name == "posix":
+            _runner_module.os.killpg = lambda *args: None
+            _runner_module._process_group_exists = lambda pid: False
+
+        _runner_module._run_cli_json_payload(
+            token=self._token,
+            json_string="{}",
+            cwd="/",
+        )
+        self._wait_for_done()
+
+        job = _jobs_module._jobs[self._token]
+        self.assertTrue(job["done"])
+        self.assertIn("closed its output streams", job["error"])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX process groups only")
+    def test_process_group_escalates_after_leader_exits(self):
+        """Descendants receive SIGKILL even when their leader is gone."""
+        fake = _FakeProc(
+            stdout_lines=[],
+            stderr_lines=[],
+            returncode=0,
+        )
+        fake.returncode = 0
+        fake._poll_alive = False
+        signals = []
+
+        def fake_killpg(pid, sig):
+            signals.append((pid, sig))
+
+        _runner_module.os.killpg = fake_killpg
+        _runner_module._process_group_exists = lambda pid: True
+
+        _runner_module._terminate_process_tree(fake, grace_seconds=0)
+
+        self.assertEqual(
+            signals,
+            [
+                (fake.pid, signal.SIGTERM),
+                (fake.pid, signal.SIGKILL),
+            ],
         )
 
     def test_cleanup_path_unlinked_on_success(self):
