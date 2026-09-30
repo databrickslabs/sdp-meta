@@ -243,10 +243,16 @@ def run_demo():
             kind='demo',
             max_active_for_kind=_jobs_module._MAX_ACTIVE_DEMO_JOBS,
         )
-    except _jobs_module.JobCapacityError as exc:
+    except _jobs_module.JobCapacityError:
+        logger.warning(
+            "Demo launch rejected because the active-demo limit (%d) "
+            "has been reached",
+            _jobs_module._MAX_ACTIVE_DEMO_JOBS,
+        )
         response = jsonify({
             'error': (
-                f"{exc}. Wait for an existing demo to finish before "
+                "Active demo capacity is currently full. Wait for an "
+                "existing demo to finish before "
                 "launching another."
             ),
         })

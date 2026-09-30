@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from unittest import mock
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _APP_DIR = os.path.join(_REPO_ROOT, "databricks_app")
@@ -231,6 +232,27 @@ class FriendlyErrorTests(unittest.TestCase):
         self.assertEqual(
             body["details"]["message"],
             "raw SDK permission failure",
+        )
+
+    @mock.patch(
+        "databricks.sdk.WorkspaceClient",
+        side_effect=RuntimeError("sensitive SDK credential detail"),
+    )
+    def test_warehouse_configuration_does_not_expose_sdk_exception(
+        self,
+        _mock_client,
+    ):
+        response = self.client.post(
+            "/api/warehouse/configure",
+            json={"mode": "existing", "warehouse_id": "warehouse-id"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        response_text = response.get_data(as_text=True)
+        self.assertNotIn("sensitive SDK credential detail", response_text)
+        self.assertIn(
+            "could not use that SQL warehouse",
+            response.get_json()["error"],
         )
 
     def test_landing_page_renders_collapsed_technical_details(self):

@@ -252,7 +252,9 @@ class DemoLauncherAuthenticationTests(unittest.TestCase):
                 )
             self.assertEqual(resp.status_code, 429)
             self.assertEqual(resp.headers.get("Retry-After"), "30")
-            self.assertIn("active demo", resp.get_json()["error"].lower())
+            error = resp.get_json()["error"]
+            self.assertIn("active demo", error.lower())
+            self.assertNotIn("1/1", error)
         finally:
             _jobs_module._jobs.pop(token, None)
 

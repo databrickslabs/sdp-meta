@@ -110,17 +110,13 @@ def configure_warehouse():
                 'state': state_val,
                 'message': f"Warehouse \"{wh.name}\" configured successfully.",
             })
-        except Exception as exc:
+        except Exception:
             logger.exception("configure_warehouse (existing) failed for id=%s", wh_id)
             return jsonify({
                 'error': (
                     'The app could not use that SQL warehouse. Verify the '
                     'warehouse ID and the App service principal permissions.'
                 ),
-                'details': {
-                    'exception_type': type(exc).__name__,
-                    'message': str(exc),
-                },
             }), 400
 
     elif mode == 'create':
