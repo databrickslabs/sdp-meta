@@ -43,7 +43,16 @@ def warehouse_status():
         logger.exception("warehouse_status failed for id=%s", wh_id)
         return jsonify({
             'configured': True, 'warehouse_id': wh_id,
-            'name': None, 'state': None, 'error': str(exc),
+            'name': None,
+            'state': None,
+            'error': (
+                'The app could not read the configured SQL warehouse. '
+                'Verify that the App service principal can use the warehouse.'
+            ),
+            'details': {
+                'exception_type': type(exc).__name__,
+                'message': str(exc),
+            },
         })
 
 
@@ -101,9 +110,14 @@ def configure_warehouse():
                 'state': state_val,
                 'message': f"Warehouse \"{wh.name}\" configured successfully.",
             })
-        except Exception as exc:
+        except Exception:
             logger.exception("configure_warehouse (existing) failed for id=%s", wh_id)
-            return jsonify({'error': str(exc)}), 400
+            return jsonify({
+                'error': (
+                    'The app could not use that SQL warehouse. Verify the '
+                    'warehouse ID and the App service principal permissions.'
+                ),
+            }), 400
 
     elif mode == 'create':
         name = (body.get('name') or 'sdp-meta-app-warehouse').strip()

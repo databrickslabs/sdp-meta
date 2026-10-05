@@ -1196,12 +1196,22 @@ class SDPMETARunner:
         ) as output_file:
             output_file.write(ws_output_file.read())
 
-    def open_job_url(self, runner_conf, created_job):
+    def open_job_url(
+        self,
+        runner_conf,
+        created_job,
+        *,
+        wait_for_completion=False,
+        timeout=timedelta(minutes=90),
+    ):
         runner_conf.job_id = created_job.job_id
         url = f"{self.ws.config.host}/jobs/{created_job.job_id}?o={self.ws.get_workspace_id()}"
-        self.ws.jobs.run_now(job_id=created_job.job_id)
+        waiter = self.ws.jobs.run_now(job_id=created_job.job_id)
         webbrowser.open(url)
         print(f"Job created successfully. job_id={created_job.job_id}, url={url}")
+        if wait_for_completion:
+            waiter.result(timeout=timeout)
+        return waiter
 
     def clean_up(self, runner_conf: SDPMetaRunnerConf):
         print("Cleaning up...")
@@ -1476,18 +1486,17 @@ def get_workspace_api_client(profile=None) -> WorkspaceClient:
        ``~/.databrickscfg`` entry. This is the path
        ``run_integration_tests.py`` and the ``launch_*_demo.py`` scripts
        take when invoked from a developer's terminal.
-    3. **Interactive fallback** — prompts for host + token via ``input()``
-       so ad-hoc local runs without a configured profile still work.
-       Requires a real stdin; do NOT route App / CI traffic through
-       this branch (it raises ``EOFError`` when stdin is not a TTY).
+    3. **SDK default credential chain** — when no profile is supplied, uses
+       ``WorkspaceClient()`` so ``DEFAULT`` profile, PAT environment variables,
+       Azure/GCP credentials, and other SDK-supported non-interactive auth
+       methods work consistently. Background App/CI launchers must never call
+       ``input()`` because stdin may not be attached.
     """
     if os.environ.get("DATABRICKS_APP_PORT"):
         return WorkspaceClient()
     if profile:
         return WorkspaceClient(profile=profile)
-    return WorkspaceClient(
-        host=input("Databricks Workspace URL: "), token=input("Token: ")
-    )
+    return WorkspaceClient()
 
 
 def main():

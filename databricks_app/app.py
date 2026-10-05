@@ -30,9 +30,10 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 import subprocess  # noqa: F401 \u2014 re-exported below so tests can mock subprocess.Popen
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from werkzeug.exceptions import HTTPException
 
 # ── Logging ──────────────────────────────────────────────────────────────────
@@ -68,11 +69,32 @@ app = Flask(__name__)
 # logging them as application errors.
 @app.errorhandler(Exception)
 def handle_exception(exc):
+    request_id = uuid.uuid4().hex[:12]
     if isinstance(exc, HTTPException):
-        return jsonify({'error': exc.description or str(exc)}), exc.code
-    logger.exception("Unhandled exception in route: %s", exc)
+        message = exc.description or str(exc)
+        return jsonify({
+            'error': message,
+            'details': {
+                'request_id': request_id,
+                'exception_type': type(exc).__name__,
+                'message': message,
+            },
+        }), exc.code
+    logger.exception(
+        "Unhandled exception in route (request_id=%s): %s",
+        request_id,
+        exc,
+    )
     return jsonify({
-        'error': str(exc),
+        'error': (
+            'The app could not complete this request. '
+            'Expand Technical details for diagnostics.'
+        ),
+        'details': {
+            'request_id': request_id,
+            'exception_type': type(exc).__name__,
+            'message': str(exc),
+        },
         'stdout': '',
         'stderr': '',
         'returncode': -1,
@@ -121,9 +143,60 @@ def _inject_app_version():
 
 
 # ── Security headers ─────────────────────────────────────────────────────────
+def _friendly_server_error_message():
+    """Return an actionable headline without exposing SDK exception text."""
+    path = request.path
+    if path.startswith('/api/metadata/workspace-'):
+        return (
+            'The app could not access the requested workspace file. Verify '
+            'the path and the App service principal workspace permissions.'
+        )
+    if path.startswith('/api/metadata/'):
+        return (
+            'The app could not access Unity Catalog. Verify that the App '
+            'service principal has USE CATALOG, USE SCHEMA, and the required '
+            'table privileges.'
+        )
+    if path.startswith('/api/warehouse'):
+        return (
+            'The app could not access the SQL warehouse. Verify that the App '
+            'service principal has CAN USE permission on the warehouse.'
+        )
+    if path.startswith('/api/pipelines'):
+        return (
+            'The app could not complete the pipeline request. Verify the '
+            'pipeline exists and the App service principal can manage it.'
+        )
+    return (
+        'The app could not complete this request. '
+        'Expand Technical details for diagnostics.'
+    )
+
+
 @app.after_request
 def add_security_headers(response):
-    """Attach HTTP security headers to every response (fix M4)."""
+    """Normalize JSON errors and attach HTTP security headers."""
+    if response.status_code >= 400 and response.is_json:
+        payload = response.get_json(silent=True)
+        if isinstance(payload, dict) and payload.get('error'):
+            original_error = str(payload['error'])
+            details = payload.get('details')
+            if not isinstance(details, dict):
+                details = {}
+            details.setdefault('status', response.status_code)
+            details.setdefault('message', original_error)
+            payload['details'] = details
+
+            if response.status_code >= 500:
+                payload['error'] = _friendly_server_error_message()
+            elif response.status_code in (401, 403):
+                payload['error'] = (
+                    'The Databricks App service principal does not have '
+                    'permission to complete this request. Ask a catalog or '
+                    'workspace administrator to grant the required access.'
+                )
+            response.set_data(app.json.dumps(payload))
+
     response.headers['Content-Security-Policy'] = (
         "default-src 'self'; "
         "script-src 'self' 'unsafe-inline'; "
