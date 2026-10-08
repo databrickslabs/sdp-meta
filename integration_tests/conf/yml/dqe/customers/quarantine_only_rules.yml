@@ -1,0 +1,2 @@
+expect_or_quarantine:
+  invalid_customer: _rescued_data IS NOT NULL OR id IS NULL OR operation IS NULL

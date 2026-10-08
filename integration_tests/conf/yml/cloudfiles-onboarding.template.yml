@@ -203,3 +203,25 @@
   silver_table: customers
   silver_transformation_json_it: '{uc_volume_path}/integration_tests/conf/yml/silver_transformations.yml'
   silver_data_quality_expectations_json_it: '{uc_volume_path}/integration_tests/conf/yml/dqe/customers/no_quarantine_rules.yml'
+- data_flow_id: '192'
+  data_flow_group: A1
+  source_system: MYSQL
+  source_format: cloudFiles
+  source_details:
+    source_database: APP
+    source_table: CUSTOMERS
+    source_path_it: '{uc_volume_path}/integration_tests/resources/data/customers'
+    source_schema_path: '{uc_volume_path}/integration_tests/resources/customers.ddl'
+  bronze_catalog_it: '{uc_catalog_name}'
+  bronze_database_it: '{bronze_schema}'
+  bronze_table: quarantine_only_customers
+  bronze_reader_options:
+    cloudFiles.format: json
+    cloudFiles.inferColumnTypes: 'true'
+    cloudFiles.rescuedDataColumn: _rescued_data
+  bronze_table_path_it: '{uc_volume_path}/data/bronze/quarantine_only_customers'
+  bronze_data_quality_expectations_json_it: '{uc_volume_path}/integration_tests/conf/yml/dqe/customers/quarantine_only_rules.yml'
+  bronze_catalog_quarantine_it: '{uc_catalog_name}'
+  bronze_database_quarantine_it: '{bronze_schema}'
+  bronze_quarantine_table: quarantine_only_customers_quarantine
+  bronze_quarantine_table_path_it: '{uc_volume_path}/data/bronze/quarantine_only_customers_quarantine'

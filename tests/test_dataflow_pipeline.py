@@ -852,6 +852,28 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
             expected_quarantine_table = f"{q_cl_name}{q_db}.{q_table_name}"
             self.assertEqual(quarantine_kwargs["name"], expected_quarantine_table)
 
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_quarantine_only_dqe_registers_main_and_failed_rows_tables(self, mock_dlt):
+        """A quarantine-only DQE must declare both outputs (issue #496)."""
+        expectations = {"customer_id_missing": "customer_id IS NULL"}
+        spec_map = copy.deepcopy(self.bronze_dataflow_spec_map)
+        spec_map["dataQualityExpectations"] = json.dumps(
+            {"expect_or_quarantine": expectations}
+        )
+        spec = BronzeDataflowSpec(**spec_map)
+        pipeline = DataflowPipeline(self.spark, spec, "customer_inputview")
+        mock_dlt.table.side_effect = lambda reader, **kwargs: reader
+        mock_dlt.expect_all_or_drop.side_effect = lambda rules: lambda reader: reader
+
+        pipeline.write_layer_with_dqe()
+
+        self.assertEqual(mock_dlt.table.call_count, 2)
+        main_call, quarantine_call = mock_dlt.table.call_args_list
+        self.assertEqual(main_call.kwargs["name"], "bronze.customer")
+        self.assertEqual(quarantine_call.kwargs["name"], "bronze.customer_dqe")
+        mock_dlt.expect_all_or_drop.assert_called_once_with(expectations)
+        self.assertEqual(main_call.args[0], pipeline.write_to_delta)
+
     @patch.object(DataflowPipeline, 'get_silver_schema', new_callable=MagicMock)
     @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
     @patch.object(DataflowPipeline, "create_streaming_table", new_callable=MagicMock)

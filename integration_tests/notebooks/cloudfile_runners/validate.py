@@ -46,6 +46,51 @@ for table, counts in tables.items():
     except AssertionError:
         log_list.append(f"Expected: {counts} Actual: {cnt}. Failed!")
 
+# Regression coverage for issue #496. Flow 192 has ONLY
+# expect_or_quarantine rules, so the pipeline must still declare both the
+# main target and its quarantine target. The quarantine output must contain
+# only rows selected by its configured predicate.
+quarantine_only_main = (
+    f"{uc_catalog_name}.{bronze_schema}.quarantine_only_customers"
+    if uc_enabled
+    else f"{bronze_schema}.quarantine_only_customers"
+)
+quarantine_only_bad = (
+    f"{uc_catalog_name}.{bronze_schema}.quarantine_only_customers_quarantine"
+    if uc_enabled
+    else f"{bronze_schema}.quarantine_only_customers_quarantine"
+)
+log_list.append("Validating quarantine-only DQE main/quarantine routing.")
+try:
+    main_stats = spark.sql(
+        f"""
+        SELECT COUNT(*) AS total_rows
+        FROM {quarantine_only_main}
+        """
+    ).collect()[0]
+    quarantine_stats = spark.sql(
+        f"""
+        SELECT COUNT(*) AS total_rows,
+               SUM(CASE WHEN _rescued_data IS NOT NULL
+                              OR id IS NULL
+                              OR operation IS NULL
+                        THEN 1 ELSE 0 END) AS quarantinable_rows
+        FROM {quarantine_only_bad}
+        """
+    ).collect()[0]
+    assert main_stats.total_rows > 0, "main table is empty"
+    assert quarantine_stats.total_rows > 0, "quarantine table is empty"
+    assert quarantine_stats.quarantinable_rows == quarantine_stats.total_rows, (
+        "quarantine table contains rows that did not match its rule"
+    )
+    log_list.append(
+        "Quarantine-only DQE declared both targets and populated the "
+        f"quarantine correctly (main={main_stats.total_rows}, "
+        f"quarantine={quarantine_stats.total_rows}). Passed!"
+    )
+except Exception as exc:
+    log_list.append(f"Quarantine-only DQE validation failed: {exc}. Failed!")
+
 # Backward-compatibility coverage for optional quarantine targets. Flow 190
 # carries non-empty quarantine rules but intentionally omits every quarantine
 # target field. Onboarding must retain the DQE and persist an empty target for

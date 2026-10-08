@@ -630,7 +630,6 @@ class DataflowPipeline:
         is_bronze = isinstance(self.dataflowSpec, BronzeDataflowSpec)
         data_quality_expectations_json = json.loads(self.dataflowSpec.dataQualityExpectations)
 
-        dlt_table_with_expectation = None
         expect_or_quarantine_dict = None
         expect_all_dict, expect_all_or_drop_dict, expect_all_or_fail_dict = self.get_dq_expectations()
         # Both bronze and silver layers support quarantine tables
@@ -649,7 +648,6 @@ class DataflowPipeline:
                 and self.dataflowSpec.clusterByAuto is not None
                 else False
             )
-
             # Create base table with expectations
             if expect_all_dict:
                 dlt_table_with_expectation = dp.expect_all(expect_all_dict)(
@@ -701,6 +699,26 @@ class DataflowPipeline:
                 else:
                     dlt_table_with_expectation = dp.expect_all_or_drop(expect_all_or_drop_dict)(
                         dlt_table_with_expectation)
+            if (
+                expect_all_dict is None
+                and expect_all_or_fail_dict is None
+                and expect_all_or_drop_dict is None
+            ):
+                # ``expect_or_quarantine`` must still declare the primary
+                # output. Keep its existing row-routing semantics unchanged;
+                # the separately registered quarantine table below handles
+                # the configured quarantine predicate.
+                dlt_table_with_expectation = dp.table(
+                    self.write_to_delta,
+                    name=f"{target_table}",
+                    table_properties=self.dataflowSpec.tableProperties,
+                    partition_cols=DataflowSpecUtils.get_partition_cols(self.dataflowSpec.partitionColumns),
+                    cluster_by=DataflowSpecUtils.get_partition_cols(self.dataflowSpec.clusterBy),
+                    cluster_by_auto=cluster_by_auto,
+                    path=target_path,
+                    comment=target_comment,
+                    row_filter=self._get_row_filter(),
+                )
             # Handle quarantine table (Bronze and Silver layers)
         if expect_or_quarantine_dict:
             q_partition_cols = None
