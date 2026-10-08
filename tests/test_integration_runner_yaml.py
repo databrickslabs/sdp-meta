@@ -179,6 +179,58 @@ class IntegrationRunnerYamlTests(unittest.TestCase):
         self.assertIn("expect_or_drop", json_dqe)
         self.assertNotIn("expect_or_quarantine", json_dqe)
 
+    def test_cloudfiles_quarantine_only_flow_matches_json_and_yaml(self):
+        json_path = os.path.join(
+            _PROJECT_ROOT,
+            "integration_tests/conf/json/cloudfiles-onboarding.template",
+        )
+        yaml_path = os.path.join(
+            _PROJECT_ROOT,
+            "integration_tests/conf/yml/cloudfiles-onboarding.template.yml",
+        )
+        with open(json_path) as fh:
+            json_payload = json.load(fh)
+        with open(yaml_path) as fh:
+            yaml_payload = yaml.safe_load(fh)
+
+        json_flow = next(row for row in json_payload if row["data_flow_id"] == "192")
+        yaml_flow = next(row for row in yaml_payload if row["data_flow_id"] == "192")
+        for flow in (json_flow, yaml_flow):
+            self.assertEqual(flow["data_flow_group"], "A1")
+            self.assertEqual(flow["bronze_table"], "quarantine_only_customers")
+            self.assertEqual(
+                flow["bronze_quarantine_table"],
+                "quarantine_only_customers_quarantine",
+            )
+            self.assertIn(
+                "quarantine_only_rules",
+                flow["bronze_data_quality_expectations_json_it"],
+            )
+
+        json_dqe_path = os.path.join(
+            _PROJECT_ROOT,
+            "integration_tests/conf/json/dqe/customers/quarantine_only_rules.json",
+        )
+        yaml_dqe_path = os.path.join(
+            _PROJECT_ROOT,
+            "integration_tests/conf/yml/dqe/customers/quarantine_only_rules.yml",
+        )
+        with open(json_dqe_path) as fh:
+            json_dqe = json.load(fh)
+        with open(yaml_dqe_path) as fh:
+            yaml_dqe = yaml.safe_load(fh)
+        self.assertEqual(json_dqe, yaml_dqe)
+        self.assertEqual(
+            json_dqe,
+            {
+                "expect_or_quarantine": {
+                    "invalid_customer": (
+                        "_rescued_data IS NOT NULL OR id IS NULL OR operation IS NULL"
+                    )
+                }
+            },
+        )
+
     def test_interactive_demo_dqe_without_quarantine_metadata_parity(self):
         json_path = os.path.join(
             _PROJECT_ROOT, "demo/conf/json/sample_onboarding.json"
