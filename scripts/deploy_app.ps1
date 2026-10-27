@@ -190,6 +190,7 @@ try {
     $RuntimeDirs = @(
         'src',                # wheel build source (python setup.py bdist_wheel)
         'examples',           # packaged MCP JSON/YAML examples required by setup.py
+        'compat',             # dlt_meta and src compatibility packages used by setup.py
         'demo',               # launch_*_demo.py + conf templates + sample data
         'integration_tests',  # imported by every demo launcher
         'databricks_app'      # the Flask app itself

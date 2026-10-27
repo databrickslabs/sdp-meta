@@ -133,14 +133,16 @@ trap 'rm -rf "$STAGING"' EXIT
 # unrelated content (docs/ at 336 MB, tests/ at 29 MB, plus coverage_html_report/,
 # examples/, lakehouse_app/, demo_runs/, spark-warehouse/, …) into the App
 # source-code-path on every deploy. None of that is read at runtime: start.sh
-# only requires demo/, src/, integration_tests/ and the databricks_app/ Flask
-# app, plus the setup.py + MANIFEST.in pair (and the files MANIFEST.in
-# references) to build the sdp-meta wheel. Staging is now exactly that subset,
+# only requires demo/, src/, compat/, examples/, integration_tests/ and the
+# databricks_app/ Flask app, plus the setup.py + MANIFEST.in pair (and the
+# files MANIFEST.in references) to build the sdp-meta wheel. Staging is now
+# exactly that subset,
 # which both shrinks the upload and makes the App container's filesystem match
 # what start.sh actually verifies on boot.
 APP_RUNTIME_DIRS=(
     src                 # wheel build source (python setup.py bdist_wheel)
     examples            # packaged MCP JSON/YAML examples required by setup.py
+    compat              # dlt_meta and src compatibility packages used by setup.py
     demo                # launch_*_demo.py + conf templates + sample data
     integration_tests   # imported by every demo launcher
     databricks_app      # the Flask app itself
