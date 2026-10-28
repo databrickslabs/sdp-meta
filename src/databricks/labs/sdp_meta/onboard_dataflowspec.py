@@ -1575,6 +1575,9 @@ class OnboardDataflowspec:
             cdc_apply_changes_flows, cdc_apply_changes_flows_schemas = (
                 self.get_cdc_apply_changes_flows_json(onboarding_row, "bronze", env)
             )
+            self.__validate_cdc_flows_quarantine_expectations(
+                data_quality_expectations, cdc_apply_changes_flows, "bronze"
+            )
             bronze_row_filter = (
                 onboarding_row["bronze_row_filter"]
                 if "bronze_row_filter" in onboarding_row and onboarding_row["bronze_row_filter"]
@@ -2306,6 +2309,20 @@ class OnboardDataflowspec:
             return False
         return bool(parsed.get("expect_or_quarantine"))
 
+    def __validate_cdc_flows_quarantine_expectations(
+        self, data_quality_expectations, cdc_apply_changes_flows, layer
+    ):
+        """Reject an unsupported multi-source CDC quarantine combination."""
+        if (
+            cdc_apply_changes_flows
+            and self.__has_quarantine_expectations(data_quality_expectations)
+        ):
+            raise ValueError(
+                f"{layer}_cdc_apply_changes_flows does not support "
+                "expect_or_quarantine expectations. Use expect, "
+                "expect_or_drop, or expect_or_fail instead."
+            )
+
     def __get_silver_dataflow_spec_dataframe(self, onboarding_df, env):
         """Get silver_dataflow_spec method transform onboarding dataframe to silver dataflowSpec dataframe.
 
@@ -2630,6 +2647,9 @@ class OnboardDataflowspec:
             )
             silver_cdc_apply_changes_flows, _silver_cdc_flow_schemas = (
                 self.get_cdc_apply_changes_flows_json(onboarding_row, "silver", env)
+            )
+            self.__validate_cdc_flows_quarantine_expectations(
+                data_quality_expectations, silver_cdc_apply_changes_flows, "silver"
             )
             apply_changes_from_snapshot = None
             source_format = "delta"

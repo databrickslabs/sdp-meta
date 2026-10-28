@@ -3157,6 +3157,66 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
         self.assertEqual(mock_dp.create_auto_cdc_flow.call_count, 2)
         mock_dp.table.assert_not_called()
 
+    @patch("databricks.labs.sdp_meta.dataflow_pipeline.dp")
+    def test_cdc_apply_changes_flows_supports_non_quarantine_expectations(
+        self, mock_dp
+    ):
+        """Multi-source CDC delegates supported DQE actions to its target table."""
+        mock_dp.create_streaming_table = MagicMock()
+        mock_dp.create_auto_cdc_flow = MagicMock()
+        mock_dp.table = MagicMock(return_value=lambda func: func)
+        expectations = json.dumps(
+            {"expect_or_drop": {"amount_non_negative": "amount >= 0"}}
+        )
+        cases = (
+            ("bronze", BronzeDataflowSpec, self.bronze_dataflow_spec_map),
+            ("silver", SilverDataflowSpec, self.silver_dataflow_spec_map),
+        )
+
+        for layer, spec_type, spec_map in cases:
+            with self.subTest(layer=layer):
+                payload = copy.deepcopy(spec_map)
+                payload["cdcApplyChanges"] = None
+                payload["cdcApplyChangesFlows"] = self._bronze_cdc_flows_payload()
+                payload["dataQualityExpectations"] = expectations
+                spec = spec_type(**payload)
+                pipeline = DataflowPipeline(
+                    self.spark,
+                    spec,
+                    f"{spec.targetDetails['table']}_inputview",
+                    None,
+                )
+
+                pipeline.write_layer_table()
+
+                self.assertEqual(mock_dp.create_streaming_table.call_count, 1)
+                self.assertEqual(mock_dp.create_auto_cdc_flow.call_count, 2)
+                self.assertEqual(
+                    mock_dp.create_streaming_table.call_args.kwargs[
+                        "expect_all_or_drop"
+                    ],
+                    {"amount_non_negative": "amount >= 0"},
+                )
+                mock_dp.table.assert_not_called()
+                mock_dp.reset_mock()
+
+    def test_cdc_apply_changes_flows_rejects_quarantine_expectations(self):
+        """Multi-source CDC must fail clearly until quarantine routing exists."""
+        payload = copy.deepcopy(self.bronze_dataflow_spec_map)
+        payload["cdcApplyChanges"] = None
+        payload["cdcApplyChangesFlows"] = self._bronze_cdc_flows_payload()
+        payload["dataQualityExpectations"] = json.dumps(
+            {"expect_or_quarantine": {"amount_non_negative": "amount >= 0"}}
+        )
+
+        with self.assertRaisesRegex(ValueError, "does not support expect_or_quarantine"):
+            DataflowPipeline(
+                self.spark,
+                BronzeDataflowSpec(**payload),
+                "customer_inputview",
+                None,
+            )
+
     # ------------------------------------------------------------------
     # row_filter coverage on multi-source CDC + snapshot CDC paths
     #
