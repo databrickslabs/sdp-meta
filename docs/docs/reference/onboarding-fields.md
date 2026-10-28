@@ -130,7 +130,7 @@ Example:
 | `bronze_data_quality_expectations_json_{env}` | string | Path to the DQE rules JSON/YAML file for bronze — see [DQ Rules](./dq-rules) |
 | `bronze_catalog_quarantine_{env}` | string | Unity Catalog name for the quarantine table |
 | `bronze_database_quarantine_{env}` | string | Schema name for the quarantine table |
-| `bronze_quarantine_table` | string | Quarantine table name (receives rows that fail `expect_or_drop` rules) |
+| `bronze_quarantine_table` | string | Quarantine table name (receives rows that fail `expect_or_quarantine` rules) |
 | `bronze_quarantine_table_comment` | string | Comment applied to the quarantine table |
 | `bronze_quarantine_table_path_{env}` | string | External storage path for the quarantine table |
 | `bronze_quarantine_table_partitions` | array | Partition columns for the quarantine table |
