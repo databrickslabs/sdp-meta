@@ -2409,6 +2409,35 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
         self.assertIn("silver_cdc_apply_changes_flows", str(ctx.exception))
         self.assertIn("use one or the other", str(ctx.exception))
 
+    def test_cdc_flows_rejects_quarantine_expectations(self):
+        """Multi-source CDC cannot route expect_or_quarantine rows yet."""
+        with open(self.onboarding_silver_cdc_flows_json_file) as source:
+            data = json.load(source)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dqe_path = os.path.join(tmp_dir, "expectations.json")
+            onboarding_path = os.path.join(tmp_dir, "onboarding.json")
+            with open(dqe_path, "w") as dqe_file:
+                json.dump(
+                    {
+                        "expect_or_quarantine": {
+                            "amount_non_negative": "amount >= 0"
+                        }
+                    },
+                    dqe_file,
+                )
+            data[0]["silver_data_quality_expectations_json_dev"] = dqe_path
+            with open(onboarding_path, "w") as onboarding_file:
+                json.dump(data, onboarding_file)
+
+            params = copy.deepcopy(self.onboarding_bronze_silver_params_map)
+            params["onboarding_file_path"] = onboarding_path
+            onboarder = OnboardDataflowspec(self.spark, params)
+            with self.assertRaisesRegex(
+                ValueError, "does not support expect_or_quarantine"
+            ):
+                onboarder.onboard_dataflow_specs()
+
     def test_cdc_flows_pre_validate_duplicate_flow_names(self):
         """Pre-flight validation rejects duplicate ``flow.name`` within a
         group — the runtime would silently let one flow's view name

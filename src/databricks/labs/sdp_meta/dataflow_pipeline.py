@@ -131,6 +131,12 @@ class DataflowPipeline:
             self.cdcApplyChangesFlows = DataflowSpecUtils.get_cdc_apply_changes_flows(
                 dataflow_spec.cdcApplyChangesFlows
             )
+            if self._has_quarantine_expectations():
+                raise ValueError(
+                    "cdcApplyChangesFlows does not support "
+                    "expect_or_quarantine expectations. Use expect, "
+                    "expect_or_drop, or expect_or_fail instead."
+                )
         else:
             self.cdcApplyChangesFlows = None
         if dataflow_spec.appendFlows:
@@ -434,7 +440,7 @@ class DataflowPipeline:
                 self._handle_append_flows()
                 return
             # Handle data quality expectations for bronze
-            if bronze_spec.dataQualityExpectations:
+            if bronze_spec.dataQualityExpectations and not self.cdcApplyChangesFlows:
                 self.write_layer_with_dqe()
                 self._handle_append_flows()
                 return
@@ -446,7 +452,7 @@ class DataflowPipeline:
                 self._handle_append_flows()
                 return
             # Handle data quality expectations for silver
-            if silver_spec.dataQualityExpectations:
+            if silver_spec.dataQualityExpectations and not self.cdcApplyChangesFlows:
                 self.write_layer_with_dqe()
                 self._handle_append_flows()
                 return
@@ -469,6 +475,15 @@ class DataflowPipeline:
         """Handle append flows if they exist."""
         if self.dataflowSpec.appendFlows:
             self.write_append_flows()
+
+    def _has_quarantine_expectations(self) -> bool:
+        """Return whether this spec declares non-empty quarantine expectations."""
+        if not self.dataflowSpec.dataQualityExpectations:
+            return False
+        expectations = json.loads(self.dataflowSpec.dataQualityExpectations)
+        return isinstance(expectations, dict) and bool(
+            expectations.get("expect_or_quarantine")
+        )
 
     def write_bronze(self):
         """Write Bronze tables."""
