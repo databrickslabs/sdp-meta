@@ -51,7 +51,16 @@ Replace `prod` with your environment tag (`dev`, `stag`, etc.) to match your `en
 
 ## Quarantine table
 
-When any expectation uses `expect_or_quarantine`, SDP-META creates `<target_table>_quarantine` automatically. The quarantine table has the same schema as the target table plus an `_error` column recording which expectation failed. Liquid clustering is supported.
+`expect_or_quarantine` routes failing rows to the explicitly configured
+quarantine target. Configure both the quarantine schema and table name in the
+onboarding entry: `bronze_database_quarantine_{env}` and
+`bronze_quarantine_table` for Bronze, or
+`silver_database_quarantine_{env}` and `silver_quarantine_table` for Silver.
+SDP-META does not derive a `<target_table>_quarantine` name automatically.
+
+The quarantine output preserves the input schema. It does not currently add an
+`_error` column identifying the failed expectation. Liquid clustering can be
+configured for quarantine tables.
 
 :::tip
 Use `expect_or_quarantine` rather than `expect_or_drop` when you need to investigate failed rows. Quarantined data is preserved and queryable.
