@@ -141,7 +141,7 @@ def get_dataflowspecs():
                     groups.append(g)
 
             return {'columns': columns, 'rows': rows, 'groups': groups, 'error': None}
-        except Exception as exc:
+        except Exception:
             logger.exception("DataflowSpec query failed for %s.%s.%s", catalog, schema, table_name)
             return {
                 'columns': [],
