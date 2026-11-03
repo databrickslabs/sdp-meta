@@ -49,10 +49,6 @@ def warehouse_status():
                 'The app could not read the configured SQL warehouse. '
                 'Verify that the App service principal can use the warehouse.'
             ),
-            'details': {
-                'exception_type': type(exc).__name__,
-                'message': str(exc),
-            },
         })
 
 

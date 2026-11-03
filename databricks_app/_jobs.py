@@ -98,6 +98,7 @@ def _new_job_token(
         token = uuid.uuid4().hex
         _jobs[token] = {
             'kind': kind,
+            'request_id': uuid.uuid4().hex[:12],
             'logs': [],
             'log_base_offset': 0,
             'done': False,

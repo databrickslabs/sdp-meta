@@ -104,6 +104,7 @@ _BUNDLED_DEMO_SPECS = {
         # ``source_details`` are treated as silver-only consumers and
         # the silver pass picks them up from the same file).
         "tags": ["cloudfiles", "fanout", "one-to-many"],
+        "launcher": "demo_silverfanout",
     },
     "cloudfiles-onboarding": {
         "label": "Cloud Files (Auto Loader)",
@@ -118,6 +119,7 @@ _BUNDLED_DEMO_SPECS = {
         # ``TABLE_OR_VIEW_NOT_FOUND`` failure on the silver layer.
         "merge_with": ["cloudfiles-onboarding_A2"],
         "tags": ["cloudfiles", "auto loader", "row filter"],
+        "launcher": "demo_cloudfiles",
     },
     "onboarding": {
         "label": "DAIS Demo (end-to-end)",
@@ -136,6 +138,7 @@ _BUNDLED_DEMO_SPECS = {
                  "automatically when you pick this demo \u2014 leave it "
                  "alone unless you've edited the template."),
         "tags": ["dais", "end-to-end", "cdc", "dqe"],
+        "launcher": "demo_dias",
     },
 }
 
@@ -337,6 +340,7 @@ def _list_bundled_specs(repo_root: str):
             "merge_with": merge_with,
             "env_override": meta.get("env_override"),
             "note": meta.get("note"),
+            "launcher": meta.get("launcher"),
             "formats": formats,
             "default_local_directory": "demo/",
             "default_update_paths": True,

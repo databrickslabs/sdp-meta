@@ -33,7 +33,7 @@ import os
 import uuid
 import subprocess  # noqa: F401 \u2014 re-exported below so tests can mock subprocess.Popen
 
-from flask import Flask, jsonify, request
+from flask import Flask, g, jsonify, request
 from werkzeug.exceptions import HTTPException
 
 # ── Logging ──────────────────────────────────────────────────────────────────
@@ -62,6 +62,14 @@ app = Flask(__name__)
 
 
 # ── Global JSON error handler ────────────────────────────────────────────────
+def _safe_error_details(request_id: str, status: int) -> dict[str, object]:
+    """Return the only diagnostics exposed for an error response."""
+    return {
+        'request_id': request_id,
+        'status': status,
+    }
+
+
 # Flask returns HTML for unhandled exceptions by default. Override to
 # return JSON so the frontend never receives an HTML page it can't
 # parse. Standard HTTP errors (404, 405, etc.) are passed through
@@ -74,31 +82,16 @@ def handle_exception(exc):
         message = exc.description or str(exc)
         return jsonify({
             'error': message,
-            'details': {
-                'request_id': request_id,
-                'exception_type': type(exc).__name__,
-                'message': message,
-            },
+            'details': _safe_error_details(request_id, exc.code),
         }), exc.code
     logger.exception(
-        "Unhandled exception in route (request_id=%s): %s",
+        "Unhandled exception in route (request_id=%s)",
         request_id,
-        exc,
     )
+    g.unhandled_exception_logged = True
     return jsonify({
-        'error': (
-            'The app could not complete this request. '
-            'Expand Technical details for diagnostics.'
-        ),
-        'details': {
-            'request_id': request_id,
-            'exception_type': type(exc).__name__,
-            'message': str(exc),
-        },
-        'stdout': '',
-        'stderr': '',
-        'returncode': -1,
-        'modal_content': None,
+        'error': _friendly_server_error_message(),
+        'details': _safe_error_details(request_id, 500),
     }), 500
 
 
@@ -179,22 +172,42 @@ def add_security_headers(response):
     if response.status_code >= 400 and response.is_json:
         payload = response.get_json(silent=True)
         if isinstance(payload, dict) and payload.get('error'):
-            original_error = str(payload['error'])
-            details = payload.get('details')
-            if not isinstance(details, dict):
-                details = {}
-            details.setdefault('status', response.status_code)
-            details.setdefault('message', original_error)
-            payload['details'] = details
-
             if response.status_code >= 500:
+                original_error = str(payload['error'])
+                details = payload.get('details')
+                request_id = (
+                    details.get('request_id')
+                    if isinstance(details, dict) and isinstance(details.get('request_id'), str)
+                    else uuid.uuid4().hex[:12]
+                )
+                stdout = payload.pop('stdout', None)
+                stderr = payload.pop('stderr', None)
+                payload.pop('returncode', None)
+                payload.pop('modal_content', None)
+                if stdout or stderr:
+                    logger.error(
+                        "Server command output (request_id=%s): stdout=%r stderr=%r",
+                        request_id,
+                        stdout,
+                        stderr,
+                    )
+                if not getattr(g, 'unhandled_exception_logged', False):
+                    logger.error(
+                        "Server error response (request_id=%s): %s",
+                        request_id,
+                        original_error,
+                    )
                 payload['error'] = _friendly_server_error_message()
+                payload['details'] = _safe_error_details(request_id, response.status_code)
             elif response.status_code in (401, 403):
                 payload['error'] = (
                     'The Databricks App service principal does not have '
                     'permission to complete this request. Ask a catalog or '
                     'workspace administrator to grant the required access.'
                 )
+                payload.pop('details', None)
+            else:
+                payload.pop('details', None)
             response.set_data(app.json.dumps(payload))
 
     response.headers['Content-Security-Policy'] = (

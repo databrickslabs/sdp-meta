@@ -184,6 +184,12 @@ def _run_command_in_background(
                         job,
                         {'stream': stream, 'line': line},
                     )
+                    logger.info(
+                        "Background CLI output (request_id=%s, stream=%s): %s",
+                        job['request_id'],
+                        stream,
+                        line,
+                    )
                     if stream == 'stdout':
                         stdout_parts.append(line)
                     else:

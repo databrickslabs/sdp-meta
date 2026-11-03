@@ -108,6 +108,26 @@ class OnboardingPreviewRouteTests(unittest.TestCase):
                       "{silver_schema}", "{uc_volume_path}"):
             self.assertNotIn(token, body["rendered"])
 
+    @mock.patch(
+        "databricks.labs.sdp_meta.cli.render_onboarding_template",
+        side_effect=RuntimeError("sensitive renderer implementation detail"),
+    )
+    def test_preview_does_not_expose_renderer_exception(self, _mock_render):
+        path = self._write(
+            "onboarding.template.yml",
+            "- data_flow_id: '100'\n"
+            "  bronze_catalog: '{uc_catalog_name}'\n",
+        )
+
+        response = self.client.post("/onboarding/preview", data=self._form(path))
+
+        self.assertEqual(response.status_code, 400)
+        self.assertNotIn(
+            "sensitive renderer implementation detail",
+            response.get_data(as_text=True),
+        )
+        self.assertIn("could not render the template", response.get_json()["error"].lower())
+
     def test_json_preview_returns_rendered_text(self):
         path = self._write(
             "onboarding.json",
@@ -794,6 +814,7 @@ class BundledSpecsEndpointTests(unittest.TestCase):
             self.assertIn("description", spec)
             self.assertIn("formats", spec)
             self.assertIn("default_local_directory", spec)
+            self.assertIn("launcher", spec)
             # At least one format (JSON or YAML) must be present \u2014
             # the registry would filter the entry out otherwise.
             self.assertTrue(spec["formats"], f"Spec {spec['id']} has no formats")
@@ -821,6 +842,15 @@ class BundledSpecsEndpointTests(unittest.TestCase):
         ids = [s["id"] for s in resp.get_json()["specs"]]
         self.assertIn("onboarding_cars", ids)
         self.assertIn("multi-source-cdc-onboarding", ids)
+
+    def test_launchable_bundled_entries_expose_their_demo_workflow(self):
+        specs = self.client.get("/onboarding/bundled-specs").get_json()["specs"]
+        launchers = {spec["id"]: spec["launcher"] for spec in specs}
+
+        self.assertEqual(launchers["cloudfiles-onboarding"], "demo_cloudfiles")
+        self.assertEqual(launchers["silver-fanout-onboarding"], "demo_silverfanout")
+        self.assertEqual(launchers["onboarding"], "demo_dias")
+        self.assertIsNone(launchers["onboarding_cars"])
 
     def test_picker_includes_silver_fanout_single_file_entry(self):
         # Silver Fanout returned to the picker as a single-file entry

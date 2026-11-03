@@ -18,6 +18,8 @@ import json
 import os
 import sys
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _APP_DIR = os.path.join(_REPO_ROOT, "databricks_app")
@@ -88,6 +90,29 @@ class TableDataLimitValidationTests(unittest.TestCase):
         err = resp.get_json()["error"].lower()
         self.assertNotIn("limit must", err)
         self.assertIn("warehouse", err)
+
+    @mock.patch("routes.metadata_browse._get_warehouse_id", return_value="warehouse-id")
+    @mock.patch("databricks.sdk.WorkspaceClient")
+    def test_failed_statement_does_not_expose_warehouse_error(
+        self,
+        mock_workspace_client,
+        _mock_warehouse_id,
+    ):
+        failed_result = SimpleNamespace(
+            status=SimpleNamespace(
+                state="FAILED",
+                error=SimpleNamespace(message="sensitive warehouse SQL detail"),
+            )
+        )
+        mock_workspace_client.return_value.statement_execution.execute_statement.return_value = failed_result
+
+        response = self._post({
+            "catalog": "c", "schema": "s", "table": "t", "limit": 10,
+        })
+
+        self.assertEqual(response.status_code, 400)
+        self.assertNotIn("sensitive warehouse SQL detail", response.get_data(as_text=True))
+        self.assertIn("could not read this table", response.get_json()["error"].lower())
 
     def test_string_numeric_limit_is_accepted(self):
         """JSON clients sometimes send numbers as strings; ``int('50')``
