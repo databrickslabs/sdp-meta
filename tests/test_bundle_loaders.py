@@ -26,11 +26,14 @@ from unittest.mock import MagicMock, patch
 
 from databricks.labs.sdp_meta.bundle import (
     BundleAddFlowCommand,
+    BundleAddPipelineCommand,
     BundlePrepareWheelCommand,
     BundleValidateCommand,
     FlowSpec,
+    PipelineSpec,
     _build_source_details,
     _load_bundle_add_flow_config,
+    _load_bundle_add_pipeline_config,
     _load_bundle_prepare_wheel_config,
     _load_bundle_validate_config,
 )
@@ -284,6 +287,99 @@ class TestLoadBundleAddFlowConfig(unittest.TestCase):
         self.assertEqual(flow.source_path, "/Volumes/raw/snapshots/orders/")
 
 
+class TestLoadBundleAddPipelineConfig(unittest.TestCase):
+    """``bundle_add_pipeline`` interactive parameter loader."""
+
+    def test_bronze_skips_pipeline_mode_and_silver_schema(self):
+        wsi = _make_wsi(
+            questions={
+                "Bundle directory": ".",
+                "Pipeline name (letters, numbers, underscores)": "orders",
+                "data_flow_group": "orders_group",
+                "Bronze target schema (blank = bundle default)": "",
+            },
+            choices={
+                "Layer": "bronze",
+                "Dry run (preview only, no file write)?": "False",
+            },
+        )
+        cfg = _load_bundle_add_pipeline_config(wsi)
+        self.assertIsInstance(cfg, BundleAddPipelineCommand)
+        self.assertEqual(cfg.bundle_dir, ".")
+        self.assertFalse(cfg.dry_run)
+        self.assertEqual(cfg.pipeline.name, "orders")
+        self.assertEqual(cfg.pipeline.layer, "bronze")
+        self.assertEqual(cfg.pipeline.pipeline_mode, "split")
+        self.assertEqual(cfg.pipeline.dataflow_group, "orders_group")
+        self.assertIsNone(cfg.pipeline.bronze_target_schema)
+        self.assertIsNone(cfg.pipeline.silver_target_schema)
+        prompted = [call.args[0] for call in wsi._choice.call_args_list]
+        self.assertNotIn("Pipeline mode", prompted)
+
+    def test_silver_prompts_silver_schema_only(self):
+        wsi = _make_wsi(
+            questions={
+                "Bundle directory": "/tmp/bundle",
+                "Pipeline name (letters, numbers, underscores)": "orders_silver",
+                "data_flow_group": "orders",
+                "Silver target schema (blank = bundle default)": "orders_silver",
+            },
+            choices={
+                "Layer": "silver",
+                "Dry run (preview only, no file write)?": "False",
+            },
+        )
+        cfg = _load_bundle_add_pipeline_config(wsi)
+        self.assertEqual(cfg.pipeline.layer, "silver")
+        self.assertEqual(cfg.pipeline.pipeline_mode, "split")
+        self.assertIsNone(cfg.pipeline.bronze_target_schema)
+        self.assertEqual(cfg.pipeline.silver_target_schema, "orders_silver")
+        prompted = [call.args[0] for call in wsi._choice.call_args_list]
+        self.assertNotIn("Pipeline mode", prompted)
+
+    def test_bronze_silver_split_prompts_both_schemas(self):
+        wsi = _make_wsi(
+            questions={
+                "Bundle directory": ".",
+                "Pipeline name (letters, numbers, underscores)": "orders",
+                "data_flow_group": "orders",
+                "Bronze target schema (blank = bundle default)": "orders_bronze",
+                "Silver target schema (blank = bundle default)": "orders_silver",
+            },
+            choices={
+                "Layer": "bronze_silver",
+                "Pipeline mode": "split",
+                "Dry run (preview only, no file write)?": "False",
+            },
+        )
+        cfg = _load_bundle_add_pipeline_config(wsi)
+        self.assertEqual(cfg.pipeline.layer, "bronze_silver")
+        self.assertEqual(cfg.pipeline.pipeline_mode, "split")
+        self.assertEqual(cfg.pipeline.bronze_target_schema, "orders_bronze")
+        self.assertEqual(cfg.pipeline.silver_target_schema, "orders_silver")
+
+    def test_bronze_silver_combined_and_dry_run(self):
+        wsi = _make_wsi(
+            questions={
+                "Bundle directory": ".",
+                "Pipeline name (letters, numbers, underscores)": "orders",
+                "data_flow_group": "orders",
+                "Bronze target schema (blank = bundle default)": "",
+                "Silver target schema (blank = bundle default)": "",
+            },
+            choices={
+                "Layer": "bronze_silver",
+                "Pipeline mode": "combined",
+                "Dry run (preview only, no file write)?": "True",
+            },
+        )
+        cfg = _load_bundle_add_pipeline_config(wsi)
+        self.assertTrue(cfg.dry_run)
+        self.assertEqual(cfg.pipeline.pipeline_mode, "combined")
+        self.assertIsNone(cfg.pipeline.bronze_target_schema)
+        self.assertIsNone(cfg.pipeline.silver_target_schema)
+
+
 class TestBuildSourceDetails(unittest.TestCase):
     """``_build_source_details`` branches the ``_sdp_meta_sanity_checks``
     e2e tests don't reach: ``eventhub``, ``snapshot``, and the
@@ -468,6 +564,58 @@ class TestCliBundleDispatchers(unittest.TestCase):
         ):
             bundle_add_flow(sdp_meta, flags={})
         self.assertEqual(cm.exception.code, 1)
+
+    def test_bundle_add_pipeline_calls_loader_then_runner_success(self):
+        from databricks.labs.sdp_meta.cli import bundle_add_pipeline
+
+        sdp_meta = MagicMock()
+        loader_result = BundleAddPipelineCommand(
+            bundle_dir=".",
+            pipeline=PipelineSpec(
+                name="orders",
+                layer="bronze",
+                dataflow_group="orders",
+            ),
+        )
+        with (
+            patch(
+                "databricks.labs.sdp_meta.bundle._load_bundle_add_pipeline_config",
+                return_value=loader_result,
+            ) as mock_loader,
+            patch(
+                "databricks.labs.sdp_meta.bundle.bundle_add_pipeline",
+                return_value=0,
+            ) as mock_run,
+        ):
+            bundle_add_pipeline(sdp_meta, flags={})
+            mock_loader.assert_called_once_with(sdp_meta._wsi)
+            mock_run.assert_called_once_with(loader_result)
+
+    def test_bundle_add_pipeline_exits_when_runner_fails(self):
+        from databricks.labs.sdp_meta.cli import bundle_add_pipeline
+
+        sdp_meta = MagicMock()
+        loader_result = BundleAddPipelineCommand(
+            bundle_dir=".",
+            pipeline=PipelineSpec(
+                name="orders",
+                layer="bronze",
+                dataflow_group="orders",
+            ),
+        )
+        with (
+            patch(
+                "databricks.labs.sdp_meta.bundle._load_bundle_add_pipeline_config",
+                return_value=loader_result,
+            ),
+            patch(
+                "databricks.labs.sdp_meta.bundle.bundle_add_pipeline",
+                return_value=2,
+            ),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            bundle_add_pipeline(sdp_meta, flags={})
+        self.assertEqual(cm.exception.code, 2)
 
 
 if __name__ == "__main__":

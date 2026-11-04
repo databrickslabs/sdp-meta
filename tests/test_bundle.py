@@ -3219,6 +3219,126 @@ class BundleAddPipelineTests(unittest.TestCase):
             )
             self.assertEqual(_sdp_meta_sanity_checks(tmp), [])
 
+    def test_rejects_non_bundle_directory(self):
+        with _tempdir() as tmp:
+            output = StringIO()
+            rc = bundle_add_pipeline(
+                BundleAddPipelineCommand(
+                    bundle_dir=str(tmp),
+                    pipeline=PipelineSpec(
+                        name="orders",
+                        layer="bronze",
+                        dataflow_group="orders",
+                    ),
+                ),
+                output=output,
+            )
+            self.assertEqual(rc, 2)
+            self.assertIn("does not look like a bundle", output.getvalue())
+
+    def test_rejects_missing_pipeline_spec(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp)
+            output = StringIO()
+            rc = bundle_add_pipeline(
+                BundleAddPipelineCommand(bundle_dir=str(tmp), pipeline=None),
+                output=output,
+            )
+            self.assertEqual(rc, 2)
+            self.assertIn("pipeline specification is required", output.getvalue())
+
+    def test_rejects_missing_pipelines_yml(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp)
+            (tmp / "resources" / "sdp_meta_pipelines.yml").unlink()
+            output = StringIO()
+            rc = bundle_add_pipeline(
+                BundleAddPipelineCommand(
+                    bundle_dir=str(tmp),
+                    pipeline=PipelineSpec(
+                        name="orders",
+                        layer="bronze",
+                        dataflow_group="orders",
+                    ),
+                ),
+                output=output,
+            )
+            self.assertEqual(rc, 2)
+            self.assertIn("sdp_meta_pipelines.yml not found", output.getvalue())
+
+    def test_dry_run_success_prints_preview_without_writes(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp)
+            tracked_paths = [
+                tmp / "resources" / "variables.yml",
+                tmp / "resources" / "sdp_meta_onboarding_job.yml",
+                tmp / "resources" / "sdp_meta_pipelines.yml",
+                tmp / "conf" / "onboarding.yml",
+            ]
+            before = {path: path.read_text() for path in tracked_paths}
+            output = StringIO()
+
+            rc = bundle_add_pipeline(
+                BundleAddPipelineCommand(
+                    bundle_dir=str(tmp),
+                    dry_run=True,
+                    pipeline=PipelineSpec(
+                        name="orders",
+                        layer="bronze_silver",
+                        pipeline_mode="split",
+                        dataflow_group="orders",
+                        bronze_target_schema="orders_bronze",
+                        silver_target_schema="orders_silver",
+                    ),
+                ),
+                output=output,
+            )
+
+            self.assertEqual(rc, 0)
+            self.assertIn("Would add pipeline", output.getvalue())
+            self.assertEqual(
+                {path: path.read_text() for path in tracked_paths},
+                before,
+            )
+
+    def test_pipeline_spec_rejects_invalid_name(self):
+        with self.assertRaises(ValueError) as cm:
+            PipelineSpec(name="1bad", layer="bronze", dataflow_group="orders")
+        self.assertIn("letters, numbers, and underscores", str(cm.exception))
+
+    def test_pipeline_spec_rejects_bad_layer(self):
+        with self.assertRaises(ValueError) as cm:
+            PipelineSpec(name="orders", layer="gold", dataflow_group="orders")
+        self.assertIn("layer must be one of", str(cm.exception))
+
+    def test_pipeline_spec_rejects_bad_mode(self):
+        with self.assertRaises(ValueError) as cm:
+            PipelineSpec(
+                name="orders",
+                layer="bronze_silver",
+                pipeline_mode="parallel",
+                dataflow_group="orders",
+            )
+        self.assertIn("pipeline_mode must be one of", str(cm.exception))
+
+    def test_pipeline_spec_rejects_combined_without_bronze_silver(self):
+        with self.assertRaises(ValueError) as cm:
+            PipelineSpec(
+                name="orders",
+                layer="bronze",
+                pipeline_mode="combined",
+                dataflow_group="orders",
+            )
+        self.assertIn(
+            "pipeline_mode=combined is only valid with layer=bronze_silver",
+            str(cm.exception),
+        )
+
+    def test_pipeline_spec_rejects_empty_group(self):
+        with self.assertRaises(ValueError) as cm:
+            PipelineSpec(name="orders", layer="bronze", dataflow_group="  ")
+        self.assertIn("dataflow_group must be non-empty", str(cm.exception))
+
     def test_dry_run_rejects_group_without_onboarding_rows_without_writing(self):
         with _tempdir() as tmp:
             self._make_bundle(tmp)
