@@ -20,6 +20,7 @@ Each entry has the shape:
 from __future__ import annotations
 
 import os
+import re
 import time
 import threading
 import uuid
@@ -28,6 +29,13 @@ import uuid
 _jobs: dict = {}
 _jobs_lock = threading.RLock()
 _MAX_LOG_LINES = 5000
+# Output lines that can carry a job/pipeline link or id. They must outlive the
+# ``_MAX_LOG_LINES`` window: a command may print its link early and then emit
+# far more output, and the progress/success links are parsed from retained text.
+_LINK_LINE_RE = re.compile(
+    r"https?://|job_id=|pipeline=|pipeline_id|#job/|#pipeline/", re.IGNORECASE
+)
+_MAX_RETAINED_LINK_LINES = 200
 _MAX_COMPLETED_JOBS = 50
 _COMPLETED_JOB_TTL_SECONDS = 60 * 60
 
@@ -100,6 +108,7 @@ def _new_job_token(
             'kind': kind,
             'request_id': uuid.uuid4().hex[:12],
             'logs': [],
+            'link_lines': [],
             'log_base_offset': 0,
             'done': False,
             'returncode': None,
@@ -117,8 +126,15 @@ def _append_job_log(job: dict, entry: dict) -> None:
     """Append one line while bounding retained per-job output."""
     with _jobs_lock:
         if len(job['logs']) >= _MAX_LOG_LINES:
-            job['logs'].pop(0)
+            evicted = job['logs'].pop(0)
             job['log_base_offset'] += 1
+            link_lines = job.setdefault('link_lines', [])
+            if (
+                evicted.get('stream') == 'stdout'
+                and len(link_lines) < _MAX_RETAINED_LINK_LINES
+                and _LINK_LINE_RE.search(evicted.get('line', ''))
+            ):
+                link_lines.append(evicted['line'])
         job['logs'].append(entry)
 
 
@@ -157,4 +173,5 @@ def _get_job_snapshot(token: str):
             return None
         snapshot = dict(job)
         snapshot['logs'] = [dict(entry) for entry in job['logs']]
+        snapshot['link_lines'] = list(job.get('link_lines', []))
         return snapshot

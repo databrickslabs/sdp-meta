@@ -682,6 +682,16 @@ def _transitive_dependencies(
     return visited, cycles
 
 
+def _pipeline_configuration(spec: Any) -> Dict[str, Any]:
+    """Return a pipeline's ``configuration`` mapping, or ``{}`` if absent/malformed.
+
+    Hand-edited bundles can leave ``configuration`` as ``None`` or a scalar;
+    those are reported by ``bundle-validate``, so callers must not crash on them.
+    """
+    config = spec.get("configuration") if isinstance(spec, dict) else None
+    return config if isinstance(config, dict) else {}
+
+
 def _pipeline_ownership_errors(
     configured: Dict[str, Dict[str, Any]],
     variables: Dict[str, Any],
@@ -695,9 +705,7 @@ def _pipeline_ownership_errors(
         # the sanity checks that own them; skip them here instead of crashing.
         if not isinstance(spec, dict):
             continue
-        config = spec.get("configuration")
-        if not isinstance(config, dict):
-            continue
+        config = _pipeline_configuration(spec)
         pipeline_layer = config.get("layer")
         if pipeline_layer not in ("bronze", "silver", "bronze_silver"):
             continue
@@ -911,7 +919,7 @@ def _split_dependency_errors(
     for key, spec in effective_pipelines.items():
         if not isinstance(spec, dict):
             continue
-        config = spec.get("configuration") or {}
+        config = _pipeline_configuration(spec)
         layer = config.get("layer")
         if layer not in ("bronze", "silver"):
             continue
@@ -1658,7 +1666,7 @@ def _wire_split_pipeline_dependencies(
         for key, spec in effective_pipelines.items():
             if not isinstance(spec, dict):
                 continue
-            config = spec.get("configuration") or {}
+            config = _pipeline_configuration(spec)
             layer = config.get("layer")
             if layer not in ("bronze", "silver"):
                 continue
@@ -1730,7 +1738,7 @@ def _onboarding_layer_updates(
     for pipeline in pipelines.values():
         if not isinstance(pipeline, dict):
             continue
-        pipeline_layer = (pipeline.get("configuration") or {}).get("layer")
+        pipeline_layer = _pipeline_configuration(pipeline).get("layer")
         if pipeline_layer == "bronze_silver":
             required.update(("bronze", "silver"))
         elif pipeline_layer in ("bronze", "silver"):
@@ -2465,7 +2473,7 @@ def _apply_pipeline_defaults(
     for pipeline in pipelines.values():
         if not isinstance(pipeline, dict):
             continue
-        config = pipeline.get("configuration") or {}
+        config = _pipeline_configuration(pipeline)
         raw_groups = (
             config.get("bronze.group"),
             config.get("silver.group"),

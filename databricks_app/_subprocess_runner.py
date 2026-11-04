@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import queue as _queue_module
 import signal
 import subprocess
@@ -30,23 +29,14 @@ import _jobs as _jobs_module  # noqa: E402 \u2014 absolute import; databricks_ap
 logger = logging.getLogger(__name__)
 
 
-# Stdout lines that can carry a job/pipeline link or id. ``_parse_command_result``
-# reads these from the joined stdout, so they must survive the line cap.
-_LINK_LINE_RE = re.compile(
-    r"https?://|job_id=|pipeline=|pipeline_id|#job/|#pipeline/", re.IGNORECASE
-)
-# Upper bound on link-bearing lines kept after they fall out of the tail window.
-_MAX_RETAINED_LINK_LINES = 200
-
-
 def _append_capped(parts: deque, retained_links: list, line: str) -> None:
     """Append ``line`` to the capped tail, keeping any link line that is evicted.
 
     A command can print its job URL early and then emit more than the cap; the
     tail alone would then drop the only line that identifies the resource.
     """
-    if len(parts) == parts.maxlen and _LINK_LINE_RE.search(parts[0]):
-        if len(retained_links) < _MAX_RETAINED_LINK_LINES:
+    if len(parts) == parts.maxlen and _jobs_module._LINK_LINE_RE.search(parts[0]):
+        if len(retained_links) < _jobs_module._MAX_RETAINED_LINK_LINES:
             retained_links.append(parts[0])
     parts.append(line)
 

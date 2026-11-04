@@ -3307,28 +3307,63 @@ class BundleAddPipelineTests(unittest.TestCase):
                 before,
             )
 
+    def _add_malformed_pipeline(self, tmp: Path, value) -> None:
+        path = tmp / "resources" / "sdp_meta_pipelines.yml"
+        doc = yaml.safe_load(path.read_text())
+        doc["resources"]["pipelines"]["extra"] = value
+        path.write_text(yaml.safe_dump(doc, sort_keys=False))
+
     def test_body_less_pipeline_entry_does_not_crash(self):
         with _tempdir() as tmp:
             self._make_bundle(tmp)
-            path = tmp / "resources" / "sdp_meta_pipelines.yml"
-            doc = yaml.safe_load(path.read_text())
-            doc["resources"]["pipelines"]["extra"] = None
-            path.write_text(yaml.safe_dump(doc, sort_keys=False))
-            output = StringIO()
+            self._add_malformed_pipeline(tmp, None)
 
+            # bundle-validate reports the entry instead of raising.
+            errors = _sdp_meta_sanity_checks(tmp)
+            self.assertTrue(
+                any("`extra` has no `configuration` mapping" in e for e in errors),
+                errors,
+            )
+
+            # bundle-add-pipeline still succeeds for a valid, unrelated group.
+            output = StringIO()
             rc = bundle_add_pipeline(
                 BundleAddPipelineCommand(
                     bundle_dir=str(tmp),
                     pipeline=PipelineSpec(
-                        name="orders_extra",
+                        name="orders",
                         layer="bronze",
-                        dataflow_group="orders_extra",
+                        dataflow_group="orders",
                     ),
                 ),
                 output=output,
             )
+            self.assertEqual(rc, 0, output.getvalue())
 
-            self.assertIn(rc, (0, 2))
+    def test_non_mapping_pipeline_configuration_does_not_crash(self):
+        for bad_configuration in (None, "oops", ["a"], 7):
+            with self.subTest(configuration=bad_configuration), _tempdir() as tmp:
+                self._make_bundle(tmp)
+                self._add_malformed_pipeline(
+                    tmp, {"schema": "x", "configuration": bad_configuration}
+                )
+
+                errors = _sdp_meta_sanity_checks(tmp)
+                self.assertTrue(any("`extra`" in e for e in errors), errors)
+
+                output = StringIO()
+                rc = bundle_add_pipeline(
+                    BundleAddPipelineCommand(
+                        bundle_dir=str(tmp),
+                        pipeline=PipelineSpec(
+                            name="orders",
+                            layer="bronze",
+                            dataflow_group="orders",
+                        ),
+                    ),
+                    output=output,
+                )
+                self.assertEqual(rc, 0, output.getvalue())
 
     def test_keeps_isolated_quarantine_schema_and_follows_main_schema(self):
         with _tempdir() as tmp:
@@ -3336,11 +3371,15 @@ class BundleAddPipelineTests(unittest.TestCase):
             onboarding = tmp / "conf" / "onboarding.yml"
             rows = yaml.safe_load(onboarding.read_text())
             rows[1]["bronze_database_quarantine_dev"] = "test_cat.ops_quarantine"
+            rows[1]["silver_database_dev"] = "test_cat.test_silver"
+            rows[1]["silver_database_quarantine_dev"] = "test_cat.ops_silver_quarantine"
             rows.append({
                 "data_flow_id": "3",
                 "data_flow_group": "orders",
                 "bronze_database_dev": "test_cat.test_bronze",
                 "bronze_database_quarantine_dev": "test_cat.test_bronze",
+                "silver_database_dev": "test_cat.test_silver",
+                "silver_database_quarantine_dev": "test_cat.test_silver",
                 "bronze_table": "orders_extra",
             })
             onboarding.write_text(yaml.safe_dump(rows, sort_keys=False))
@@ -3349,9 +3388,10 @@ class BundleAddPipelineTests(unittest.TestCase):
                 bundle_dir=str(tmp),
                 pipeline=PipelineSpec(
                     name="orders",
-                    layer="bronze",
+                    layer="bronze_silver",
                     dataflow_group="orders",
                     bronze_target_schema="orders_bronze",
+                    silver_target_schema="orders_silver",
                 ),
             ))
 
@@ -3366,6 +3406,15 @@ class BundleAddPipelineTests(unittest.TestCase):
             self.assertEqual(followed["bronze_database_dev"], "test_cat.orders_bronze")
             self.assertEqual(
                 followed["bronze_database_quarantine_dev"], "test_cat.orders_bronze"
+            )
+            self.assertEqual(isolated["silver_database_dev"], "test_cat.orders_silver")
+            self.assertEqual(
+                isolated["silver_database_quarantine_dev"],
+                "test_cat.ops_silver_quarantine",
+            )
+            self.assertEqual(followed["silver_database_dev"], "test_cat.orders_silver")
+            self.assertEqual(
+                followed["silver_database_quarantine_dev"], "test_cat.orders_silver"
             )
 
     def test_pipeline_spec_rejects_invalid_name(self):

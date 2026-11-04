@@ -381,6 +381,32 @@ class JobRetentionTests(unittest.TestCase):
         finally:
             _jobs_module._jobs.pop(token, None)
 
+    def test_progress_link_survives_log_cap(self):
+        token = _jobs_module._new_job_token()
+        job = _jobs_module._jobs[token]
+        url = "https://example.cloud.databricks.com/jobs/123"
+        try:
+            with mock.patch.object(_jobs_module, "_MAX_LOG_LINES", 2):
+                for line in (
+                    f"Job created successfully url={url}",
+                    "noise 1",
+                    "noise 2",
+                    "noise 3",
+                ):
+                    _jobs_module._append_job_log(
+                        job, {"stream": "stdout", "line": line}
+                    )
+
+            resource = demo_routes._safe_progress_resource(
+                _jobs_module._get_job_snapshot(token)
+            )
+
+            self.assertIsNotNone(resource)
+            self.assertEqual(resource["url"], url)
+            self.assertEqual(resource["kind"], "job")
+        finally:
+            _jobs_module._jobs.pop(token, None)
+
     def test_completed_job_does_not_expose_subprocess_output(self):
         token = _jobs_module._new_job_token()
         job = _jobs_module._jobs[token]
