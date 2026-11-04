@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -127,7 +128,7 @@ class LandingPageFeaturedDemoTests(unittest.TestCase):
         )
         self.assertIn('id="runFeaturedDemo"', html)
 
-    def test_onboarding_picker_links_to_featured_at_scale_demo(self):
+    def test_onboarding_picker_routes_launcher_entries_by_metadata(self):
         html = self.client.get("/").get_data(as_text=True)
 
         self.assertIn("__featured_at_scale_autoloader__", html)
@@ -139,9 +140,12 @@ class LandingPageFeaturedDemoTests(unittest.TestCase):
             html,
         )
         self.assertIn('id="onboardingSubmitBtn"', html)
-        self.assertIn("bundledPicker.value === '__featured_at_scale_autoloader__'", html)
-        self.assertIn("runDemo('demo_at_scale_autoloader');", html)
+        self.assertIn("var bundledLauncher = form.dataset.bundledLauncher;", html)
+        self.assertIn("runDemo(bundledLauncher);", html)
+        self.assertIn("entry.launcher || ''", html)
+        self.assertNotIn("bundledPicker.value === '__featured_at_scale_autoloader__'", html)
         self.assertIn("'&#9654; Run Featured Demo'", html)
+        self.assertIn("'&#9654; Launch Demo Workflow'", html)
 
     def test_progress_modal_can_close_while_demo_runs(self):
         html = self.client.get("/").get_data(as_text=True)
@@ -187,7 +191,7 @@ class LandingPageFeaturedDemoTests(unittest.TestCase):
         self.assertIn("status: err.status || null", fail_body)
         self.assertIn("retries: session.retryCount", fail_body)
 
-    def test_new_operation_reopens_instead_of_abandoning_active_progress(self):
+    def test_new_operation_tracks_multiple_active_progress_sessions(self):
         html = self.client.get("/").get_data(as_text=True)
 
         claim_body = html.split(
@@ -197,13 +201,32 @@ class LandingPageFeaturedDemoTests(unittest.TestCase):
             "function _releaseProgressClaim()",
             1,
         )[0]
-        self.assertIn("_progressSession && !_progressSession.finished", claim_body)
-        self.assertIn("progressModal", claim_body)
-        self.assertIn("return false;", claim_body)
+        self.assertIn("_progressPending = true;", claim_body)
+        self.assertIn("return true;", claim_body)
+        self.assertNotIn("return false;", claim_body)
+        self.assertIn("var _progressSessions = {};", html)
+        self.assertIn("function _renderActiveRuns()", html)
+        self.assertIn('id="activeRuns"', html)
         self.assertGreaterEqual(
             html.count("if (!_claimProgressOperation()) return;"),
             3,
         )
+
+    def test_completed_background_runs_remain_available_in_progress_panel(self):
+        html = self.client.get("/").get_data(as_text=True)
+
+        finish_body = html.split(
+            "function finishOnce(data) {",
+            1,
+        )[1].split(
+            "function schedulePoll(delay)",
+            1,
+        )[0]
+        self.assertNotIn("delete _progressSessions[token];", finish_body)
+        self.assertIn("session.result = data.result || null;", finish_body)
+        self.assertIn("session.status = session.success", finish_body)
+        self.assertIn("function _showProgressSession(session)", html)
+        self.assertIn("_showProgressSession(session);", html)
 
 
 class FriendlyErrorTests(unittest.TestCase):
@@ -215,24 +238,100 @@ class FriendlyErrorTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 500)
         body = response.get_json()
-        self.assertNotIn("raw SDK failure", body["error"])
-        self.assertEqual(body["details"]["exception_type"], "RuntimeError")
-        self.assertIn("principal lacks USE CATALOG", body["details"]["message"])
+        self.assertNotIn("raw SDK failure", response.get_data(as_text=True))
+        self.assertNotIn("principal lacks USE CATALOG", response.get_data(as_text=True))
         self.assertTrue(body["details"]["request_id"])
+        self.assertEqual(body["details"]["status"], 500)
+        self.assertEqual(set(body["details"]), {"request_id", "status"})
 
-    def test_caught_server_error_is_normalized(self):
-        with app_mod.app.test_request_context():
+    @mock.patch.object(app_mod, "logger")
+    def test_caught_server_error_is_normalized_and_logged(self, mock_logger):
+        with app_mod.app.test_request_context("/api/test"):
             response = app_mod.app.make_response(
-                (app_mod.jsonify({"error": "raw SDK permission failure"}), 500)
+                (
+                    app_mod.jsonify(
+                        {
+                            "error": "raw SDK permission failure",
+                            "details": {"message": "raw SDK permission failure"},
+                            "stderr": "raw SDK permission failure",
+                        }
+                    ),
+                    500,
+                )
             )
             response = app_mod.add_security_headers(response)
 
         body = response.get_json()
-        self.assertNotIn("raw SDK permission failure", body["error"])
-        self.assertEqual(
-            body["details"]["message"],
+        self.assertNotIn("raw SDK permission failure", response.get_data(as_text=True))
+        self.assertEqual(body["details"]["status"], 500)
+        self.assertTrue(body["details"]["request_id"])
+        self.assertNotIn("stderr", body)
+        mock_logger.error.assert_any_call(
+            mock.ANY,
+            body["details"]["request_id"],
             "raw SDK permission failure",
         )
+        mock_logger.error.assert_any_call(
+            mock.ANY,
+            body["details"]["request_id"],
+            None,
+            "raw SDK permission failure",
+        )
+
+    @mock.patch("routes.warehouse._get_warehouse_id", return_value="warehouse-id")
+    @mock.patch(
+        "databricks.sdk.WorkspaceClient",
+        side_effect=RuntimeError("sensitive warehouse SDK detail"),
+    )
+    def test_warehouse_status_does_not_leak_caught_exception(
+        self,
+        _mock_workspace_client,
+        _mock_warehouse_id,
+    ):
+        response = self.client.get("/api/warehouse/status")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("sensitive warehouse SDK detail", response.get_data(as_text=True))
+        self.assertNotIn("details", response.get_json())
+
+    @mock.patch("routes.dataflowspecs._get_warehouse_id", return_value="warehouse-id")
+    @mock.patch(
+        "databricks.sdk.WorkspaceClient",
+        side_effect=RuntimeError("sensitive DataflowSpec SDK detail"),
+    )
+    def test_dataflowspec_query_does_not_leak_caught_exception(
+        self,
+        _mock_workspace_client,
+        _mock_warehouse_id,
+    ):
+        response = self.client.get("/api/dataflowspecs?catalog=main&schema=sdp_meta")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("sensitive DataflowSpec SDK detail", response.get_data(as_text=True))
+        self.assertNotIn("details", response.get_json()["bronze"])
+        self.assertNotIn("details", response.get_json()["silver"])
+
+    @mock.patch("routes.dataflowspecs._get_warehouse_id", return_value="warehouse-id")
+    @mock.patch("databricks.sdk.WorkspaceClient")
+    def test_dataflowspec_query_does_not_leak_failed_statement_text(
+        self,
+        mock_workspace_client,
+        _mock_warehouse_id,
+    ):
+        failed_result = SimpleNamespace(
+            status=SimpleNamespace(
+                state="FAILED",
+                error=SimpleNamespace(message="sensitive warehouse SQL error"),
+            )
+        )
+        workspace_client = mock_workspace_client.return_value
+        workspace_client.statement_execution.execute_statement.return_value = failed_result
+
+        response = self.client.get("/api/dataflowspecs?catalog=main&schema=sdp_meta")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("sensitive warehouse SQL error", response.get_data(as_text=True))
+        self.assertIn("could not read this DataflowSpec table", response.get_json()["bronze"]["error"])
 
     @mock.patch(
         "databricks.sdk.WorkspaceClient",
@@ -262,6 +361,8 @@ class FriendlyErrorTests(unittest.TestCase):
         self.assertIn("<summary", html)
         self.assertIn("Technical details", html)
         self.assertIn("escapeHtml(text)", html)
+        self.assertIn("safeDetails.request_id", html)
+        self.assertIn("safeDetails.status", html)
         self.assertIn(
             "error: 'The operation failed before it could complete.'",
             html,

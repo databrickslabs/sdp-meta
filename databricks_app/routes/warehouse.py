@@ -39,7 +39,7 @@ def warehouse_status():
             'name': wh.name,
             'state': state.value if hasattr(state, 'value') else str(state) if state else None,
         })
-    except Exception as exc:
+    except Exception:
         logger.exception("warehouse_status failed for id=%s", wh_id)
         return jsonify({
             'configured': True, 'warehouse_id': wh_id,
@@ -49,10 +49,6 @@ def warehouse_status():
                 'The app could not read the configured SQL warehouse. '
                 'Verify that the App service principal can use the warehouse.'
             ),
-            'details': {
-                'exception_type': type(exc).__name__,
-                'message': str(exc),
-            },
         })
 
 

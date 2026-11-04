@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from urllib.parse import urlparse
 from dataclasses import asdict
 
 from flask import Blueprint, jsonify, request
@@ -39,6 +40,46 @@ except ImportError:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 bp = Blueprint('demo', __name__)
+
+_DATABRICKS_HOST_SUFFIXES = (
+    '.cloud.databricks.com',
+    '.azuredatabricks.net',
+    '.gcp.databricks.com',
+)
+
+
+def _safe_progress_resource(job: dict) -> dict | None:
+    """Extract an allowlisted Databricks job or pipeline link from CLI output."""
+    stdout = "\n".join(
+        entry.get('line', '')
+        for entry in job.get('logs', [])
+        if entry.get('stream') == 'stdout'
+    ) or job.get('stdout', '')
+    if not stdout:
+        return None
+
+    resource = _parse_command_result(stdout, '', 0).get('modal_content')
+    if not isinstance(resource, dict):
+        return None
+    url = resource.get('job_url')
+    if not isinstance(url, str):
+        return None
+
+    parsed_url = urlparse(url)
+    location = f"{parsed_url.path}#{parsed_url.fragment}"
+    if (
+        parsed_url.scheme != 'https'
+        or not parsed_url.hostname
+        or not parsed_url.hostname.endswith(_DATABRICKS_HOST_SUFFIXES)
+        or not any(marker in location for marker in ('/jobs/', '/pipelines/', '#job/', '#pipeline/'))
+    ):
+        return None
+
+    return {
+        'id': str(resource.get('job_id') or ''),
+        'url': url,
+        'kind': 'pipeline' if '/pipelines/' in location or '#pipeline/' in location else 'job',
+    }
 
 
 @bp.route('/check-uc-grants', methods=['GET'])
@@ -273,8 +314,12 @@ def run_demo():
 
 @bp.route('/api/job/<token>/logs', methods=['GET'])
 def get_job_logs(token):
-    """Polling endpoint: returns buffered log lines + done/returncode
-    for the progress UI."""
+    """Polling endpoint: returns safe job status for the progress UI.
+
+    Full subprocess output stays in the App logs under the job request ID;
+    it can contain SDK diagnostics or configuration values and must not be
+    returned to a browser.
+    """
     job = _jobs_module._get_job_snapshot(token)
     if job is None:
         return jsonify({'error': 'Job not found'}), 404
@@ -297,19 +342,42 @@ def get_job_logs(token):
             'error': f"offset must be non-negative (got {offset})"
         }), 400
     base_offset = job.get('log_base_offset', 0)
-    relative_offset = max(0, offset - base_offset)
-    new_logs = job['logs'][relative_offset:]
     payload: dict = {
-        'logs': new_logs,
+        # Advance the client offset without exposing buffered subprocess logs.
+        'logs': [],
         'next_offset': base_offset + len(job['logs']),
         'done': job['done'],
         'returncode': job.get('returncode'),
-        'error': job.get('error'),
+        'progress': {
+            'state': (
+                'Databricks workload is running'
+                if job.get('logs')
+                else 'Preparing Databricks resources'
+            ),
+        },
     }
+    resource = _safe_progress_resource(job)
+    if resource:
+        payload['progress']['resource'] = resource
     if job.get('done'):
-        payload['result'] = _parse_command_result(
-            job.get('stdout', ''),
-            job.get('stderr', ''),
-            job.get('returncode', -1),
-        )
+        returncode = job.get('returncode', -1)
+        if returncode == 0 and not job.get('error'):
+            parsed = _parse_command_result(
+                job.get('stdout', ''),
+                job.get('stderr', ''),
+                returncode,
+            )
+            payload['result'] = {
+                'returncode': returncode,
+                'modal_content': parsed.get('modal_content'),
+            }
+        else:
+            payload['result'] = {
+                'returncode': returncode,
+                'error': 'The operation failed before it could complete.',
+                'details': {
+                    'request_id': job['request_id'],
+                    'status': 500,
+                },
+            }
     return jsonify(payload)

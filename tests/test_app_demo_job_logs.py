@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 import unittest
 from unittest import mock
 
@@ -76,18 +77,41 @@ class JobLogsOffsetValidationTests(unittest.TestCase):
         self.assertIn("non-negative", resp.get_json()["error"].lower())
 
     def test_missing_offset_defaults_to_zero(self):
-        """``offset`` is optional; absent means start of the buffer."""
+        """``offset`` is optional; buffered subprocess text is never returned."""
         resp = self._get("")
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(len(resp.get_json()["logs"]), 3)
+        self.assertEqual(resp.get_json()["logs"], [])
+        self.assertEqual(resp.get_json()["next_offset"], 3)
 
     def test_valid_offset_slices_from_position(self):
-        """A well-formed numeric offset returns the trailing slice."""
+        """A well-formed offset advances safely without returning log text."""
         resp = self._get("?offset=1")
         self.assertEqual(resp.status_code, 200)
-        logs = resp.get_json()["logs"]
-        self.assertEqual(len(logs), 2)
-        self.assertEqual(logs[0]["line"], "line-1")
+        self.assertEqual(resp.get_json()["logs"], [])
+        self.assertEqual(resp.get_json()["next_offset"], 3)
+
+    def test_progress_exposes_only_allowlisted_databricks_job_link(self):
+        job = _jobs_module._get_job(self.token)
+        job["logs"].append({
+            "stream": "stdout",
+            "line": (
+                "At-scale demo job: "
+                "https://workspace.cloud.databricks.com/?o=123#job/456/run/789 "
+                "sensitive SDK output"
+            ),
+        })
+
+        response = self._get("")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("sensitive SDK output", response.get_data(as_text=True))
+        progress = response.get_json()["progress"]
+        self.assertEqual(progress["state"], "Databricks workload is running")
+        self.assertEqual(progress["resource"], {
+            "id": "456",
+            "kind": "job",
+            "url": "https://workspace.cloud.databricks.com/?o=123#job/456/run/789",
+        })
 
     def test_offset_beyond_end_returns_empty(self):
         """An offset past the end of the buffer returns an empty list,
@@ -352,11 +376,33 @@ class JobRetentionTests(unittest.TestCase):
             payload = client.get(
                 f"/api/job/{token}/logs?offset=0"
             ).get_json()
-            self.assertEqual(
-                [entry["line"] for entry in payload["logs"]],
-                ["two", "three"],
-            )
+            self.assertEqual(payload["logs"], [])
             self.assertEqual(payload["next_offset"], 3)
+        finally:
+            _jobs_module._jobs.pop(token, None)
+
+    def test_completed_job_does_not_expose_subprocess_output(self):
+        token = _jobs_module._new_job_token()
+        job = _jobs_module._jobs[token]
+        try:
+            job.update(
+                {
+                    "done": True,
+                    "finished_at": time.time(),
+                    "returncode": 1,
+                    "stdout": "sensitive SDK token output",
+                    "stderr": "sensitive SDK token error",
+                    "error": "sensitive background exception",
+                }
+            )
+
+            response = app_mod.app.test_client().get(f"/api/job/{token}/logs")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertNotIn("sensitive", response.get_data(as_text=True))
+            result = response.get_json()["result"]
+            self.assertEqual(result["error"], "The operation failed before it could complete.")
+            self.assertEqual(result["details"]["request_id"], job["request_id"])
         finally:
             _jobs_module._jobs.pop(token, None)
 

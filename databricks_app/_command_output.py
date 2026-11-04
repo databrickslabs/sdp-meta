@@ -110,7 +110,10 @@ def _parse_command_result(stdout: str, stderr: str, returncode: int) -> dict:
     # find. Match AWS (*.cloud.databricks.com), Azure (*.azuredatabricks.net),
     # and GCP (*.gcp.databricks.com) workspace hosts \u2014 restricting to
     # AWS would silently drop the success modal on Azure/GCP workspaces.
-    if pipeline_id and (not job_url or ('/pipelines/' not in job_url and '/jobs/' not in job_url)):
+    if pipeline_id and (
+        not job_url
+        or not any(marker in job_url for marker in ('/pipelines/', '/jobs/', '#pipeline/', '#job/'))
+    ):
         all_hosts = re.findall(
             r"(https?://[a-zA-Z0-9.\-]+\."
             r"(?:cloud\.databricks\.com|azuredatabricks\.net|gcp\.databricks\.com))",

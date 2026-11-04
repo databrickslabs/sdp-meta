@@ -1968,6 +1968,7 @@
             <h3 id="progressTitle">Running Onboarding&hellip;</h3>
             <span class="progress-dots" id="progressDots">&#9679;</span>
         </div>
+        <div id="activeRuns" style="display:none;padding:10px 20px 0;font-size:.78rem"></div>
         <div class="progress-log" id="progressLog"></div>
         <div class="progress-foot">
             <span class="progress-status" id="progressStatus">Starting&hellip;</span>
@@ -2023,19 +2024,13 @@
 
     /* ── Progress log modal (onboarding) ───────────────────── */
     var _progressSession = null;
+    var _progressSessions = {};
     var _progressSessionCounter = 0;
     var _progressPending = false;
     var _dotsTimer = null;
+    var _completedProgressSessionLimit = 10;
 
     function _claimProgressOperation() {
-        if (_progressPending || (_progressSession && !_progressSession.finished)) {
-            /* Keep one recoverable progress stream per browser tab. Reopen the
-               existing dialog instead of launching an operation whose token
-               would replace—and make unreachable—the current one. */
-            document.getElementById('progressModal').classList.add('visible');
-            _startDots();
-            return false;
-        }
         _progressPending = true;
         return true;
     }
@@ -2045,14 +2040,76 @@
     }
 
     function showProgressModal(title) {
+        _progressSession = null;
         document.getElementById('progressTitle').textContent = title || 'Running…';
-        document.getElementById('progressLog').innerHTML = '';
+        var progressLog = document.getElementById('progressLog');
+        progressLog.innerHTML = '';
+        delete progressLog.dataset.resourceKey;
         document.getElementById('progressStatus').textContent = 'Starting…';
         document.getElementById('progressClose').disabled = false;
         document.getElementById('progressDots').textContent = '●';
         document.getElementById('progressDots').style.color = '';
         document.getElementById('progressModal').classList.add('visible');
         _startDots();
+    }
+
+    function _showProgressSession(session) {
+        showProgressModal(session.title);
+        _progressSession = session;
+        document.getElementById('progressStatus').textContent = session.status || 'Starting';
+        if (session.resource && isValidHttpsUrl(session.resource.url)) {
+            _updateSafeProgress({ resource: session.resource });
+        }
+        if (session.finished) {
+            _finishProgressModal(session.success, session.status);
+        }
+    }
+
+    function _renderActiveRuns() {
+        var container = document.getElementById('activeRuns');
+        var sessions = Object.keys(_progressSessions).map(function(token) {
+            return _progressSessions[token];
+        });
+        container.innerHTML = '';
+        var hasCompletedRun = sessions.some(function(session) { return session.finished; });
+        if (sessions.length < 2 && !hasCompletedRun) {
+            container.style.display = 'none';
+            return;
+        }
+        container.style.display = 'block';
+        var heading = document.createElement('div');
+        heading.textContent = hasCompletedRun ? 'Runs' : 'Active runs';
+        heading.style.fontWeight = '600';
+        heading.style.marginBottom = '5px';
+        container.appendChild(heading);
+        sessions.forEach(function(session) {
+            var row = document.createElement('div');
+            row.style.marginTop = '3px';
+            var openRun = document.createElement('button');
+            openRun.type = 'button';
+            openRun.textContent = session.title + ': ' + (session.status || 'Starting');
+            openRun.style.border = '0';
+            openRun.style.padding = '0';
+            openRun.style.background = 'none';
+            openRun.style.color = 'inherit';
+            openRun.style.cursor = 'pointer';
+            openRun.style.textDecoration = 'underline';
+            openRun.addEventListener('click', function() {
+                _showProgressSession(session);
+            });
+            row.appendChild(openRun);
+            if (session.resource && isValidHttpsUrl(session.resource.url)) {
+                row.appendChild(document.createTextNode(' — '));
+                var link = document.createElement('a');
+                link.href = session.resource.url;
+                link.textContent = 'Open live ' + session.resource.kind + ' ↗';
+                link.target = '_blank';
+                link.rel = 'noopener noreferrer';
+                link.className = 'progress-link';
+                row.appendChild(link);
+            }
+            container.appendChild(row);
+        });
     }
 
     function closeProgressModal() {
@@ -2095,6 +2152,36 @@
         log.scrollTop = log.scrollHeight;
     }
 
+    function _updateSafeProgress(progress) {
+        if (!progress) return;
+        if (progress.state) {
+            document.getElementById('progressStatus').textContent = progress.state;
+        }
+        var resource = progress.resource;
+        if (!resource || !resource.url || !isValidHttpsUrl(resource.url)) return;
+
+        var log = document.getElementById('progressLog');
+        var resourceKey = resource.kind + ':' + resource.id + ':' + resource.url;
+        if (log.dataset.resourceKey === resourceKey) return;
+        log.dataset.resourceKey = resourceKey;
+
+        var line = document.createElement('span');
+        line.className = 'log-info';
+        line.appendChild(document.createTextNode(
+            '→ Databricks ' + (resource.kind || 'resource') + ' is available: '
+        ));
+        var link = document.createElement('a');
+        link.href = resource.url;
+        link.textContent = 'Open live ' + (resource.kind || 'resource') + ' ↗';
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.className = 'progress-link';
+        line.appendChild(link);
+        line.appendChild(document.createTextNode('\n'));
+        log.appendChild(line);
+        log.scrollTop = log.scrollHeight;
+    }
+
     function _finishProgressModal(success, statusText) {
         _releaseProgressClaim();
         var dotsEl = document.getElementById('progressDots');
@@ -2105,46 +2192,68 @@
         if (_dotsTimer)    { clearInterval(_dotsTimer);    _dotsTimer    = null; }
     }
 
-    function _pollJob(token, onDone) {
+    function _pollJob(token, title, onDone) {
         _releaseProgressClaim();
         var offset = 0;
         var maxRetries = 4;
         var session = {
             id: ++_progressSessionCounter,
             token: token,
+            title: title || 'Operation',
+            status: 'Starting',
+            resource: null,
             timer: null,
             controller: null,
             retryCount: 0,
             finished: false
         };
         _progressSession = session;
+        _progressSessions[token] = session;
+        _renderActiveRuns();
 
         function ownsProgressSurface() {
             return _progressSession === session;
         }
 
         function finishOnce(data) {
-            if (!ownsProgressSurface() || session.finished) return;
+            if (session.finished) return;
             session.finished = true;
             if (session.timer) clearTimeout(session.timer);
             session.controller = null;
-            _progressSession = null;
-            onDone(data);
+            session.success = data.returncode === 0;
+            session.result = data.result || null;
+            session.status = session.success
+                ? 'Completed successfully'
+                : 'Failed' + (data.returncode !== undefined ? ' (exit ' + data.returncode + ')' : '');
+            var completedSessions = Object.keys(_progressSessions).map(function(key) {
+                return _progressSessions[key];
+            }).filter(function(candidate) {
+                return candidate.finished && candidate !== session;
+            }).sort(function(a, b) {
+                return a.id - b.id;
+            });
+            while (completedSessions.length >= _completedProgressSessionLimit) {
+                delete _progressSessions[completedSessions.shift().token];
+            }
+            _renderActiveRuns();
+            onDone(data, session, ownsProgressSurface());
         }
 
         function schedulePoll(delay) {
-            if (!ownsProgressSurface() || session.finished) return;
+            if (session.finished) return;
             session.timer = setTimeout(poll, delay);
         }
 
         function failPolling(err) {
-            if (!ownsProgressSurface()) return;
             var message = err.message || String(err);
             var userMessage = err.status === 404
                 ? 'Progress tracking expired. Start the operation again.'
                 : 'The app could not check progress after repeated attempts.';
-            _appendProgressLine('stderr', message);
-            _finishProgressModal(false, 'Unable to check progress');
+            session.status = 'Unable to check progress';
+            if (ownsProgressSurface()) {
+                _appendProgressLine('stderr', message);
+                _finishProgressModal(false, 'Unable to check progress');
+            }
             finishOnce({
                 done: true,
                 returncode: -1,
@@ -2162,7 +2271,7 @@
         }
 
         function poll() {
-            if (!ownsProgressSurface() || session.finished) return;
+            if (session.finished) return;
             session.controller = new AbortController();
             fetch(
                 '/api/job/' + token + '/logs?offset=' + offset,
@@ -2181,16 +2290,21 @@
                     });
                 })
                 .then(function(d) {
-                    if (!ownsProgressSurface()) return;
                     session.controller = null;
                     session.retryCount = 0;
-                    (d.logs || []).forEach(function(entry) {
-                        _appendProgressLine(entry.stream, entry.line);
-                    });
+                    session.status = (d.progress && d.progress.state) || 'Running';
+                    session.resource = d.progress && d.progress.resource ? d.progress.resource : null;
+                    _renderActiveRuns();
+                    if (ownsProgressSurface()) {
+                        (d.logs || []).forEach(function(entry) {
+                            _appendProgressLine(entry.stream, entry.line);
+                        });
+                        _updateSafeProgress(d.progress);
+                    }
                     offset = Number.isInteger(d.next_offset)
                         ? d.next_offset
                         : offset + (d.logs || []).length;
-                    if (offset > 0) {
+                    if (ownsProgressSurface() && !d.progress && offset > 0) {
                         document.getElementById('progressStatus').textContent = 'Running… (' + offset + ' lines)';
                     }
                     if (d.done) {
@@ -2200,16 +2314,19 @@
                     }
                 })
                 .catch(function(err) {
-                    if (!ownsProgressSurface() || err.name === 'AbortError') return;
+                    if (err.name === 'AbortError') return;
                     session.controller = null;
                     console.warn('Progress poll error:', err);
                     var transientFailure = !err.status || err.status >= 500;
                     if (transientFailure && session.retryCount < maxRetries) {
                         session.retryCount += 1;
                         var retryDelay = Math.pow(2, session.retryCount - 1) * 1000;
-                        document.getElementById('progressStatus').textContent =
-                            'Connection interrupted — retrying (' +
+                        session.status = 'Connection interrupted — retrying (' +
                             session.retryCount + '/' + maxRetries + ')…';
+                        _renderActiveRuns();
+                        if (ownsProgressSurface()) {
+                            document.getElementById('progressStatus').textContent = session.status;
+                        }
                         schedulePoll(retryDelay);
                         return;
                     }
@@ -2251,14 +2368,16 @@
         }
     }
     function _technicalDetailsHtml(details) {
-        if (!details) return '';
-        var text;
-        try {
-            text = typeof details === 'string' ? details : JSON.stringify(details, null, 2);
-        } catch (e) {
-            text = String(details);
+        if (!details || typeof details !== 'object') return '';
+        var safeDetails = {};
+        if (typeof details.request_id === 'string' && details.request_id) {
+            safeDetails.request_id = details.request_id;
         }
-        if (!text.trim()) return '';
+        if (typeof details.status === 'number') {
+            safeDetails.status = details.status;
+        }
+        if (Object.keys(safeDetails).length === 0) return '';
+        var text = JSON.stringify(safeDetails, null, 2);
         return '<details style="margin-top:14px">' +
             '<summary style="cursor:pointer;font-weight:500">Technical details</summary>' +
             '<pre style="white-space:pre-wrap;font-size:.78rem;max-height:320px;overflow:auto;margin-top:8px">' +
@@ -2417,10 +2536,9 @@
     document.getElementById('onboardingForm').addEventListener('submit', function(e) {
         e.preventDefault();
         var form = this;
-        var bundledPicker = document.getElementById('bundled_spec_id');
         var sourceMode = (document.querySelector('input[name="source_mode"]:checked') || {}).value;
-        if (sourceMode === 'bundled' && bundledPicker &&
-                bundledPicker.value === '__featured_at_scale_autoloader__') {
+        var bundledLauncher = form.dataset.bundledLauncher;
+        if (sourceMode === 'bundled' && bundledLauncher) {
             var onboardingCatalog = document.getElementById('unity_catalog_name');
             var catalogName = (onboardingCatalog.value || '').trim();
             if (!catalogName) {
@@ -2428,7 +2546,7 @@
                 return;
             }
             document.getElementById('demo_uc_name').value = catalogName;
-            runDemo('demo_at_scale_autoloader');
+            runDemo(bundledLauncher);
             return;
         }
         if (!_claimProgressOperation()) return;
@@ -2467,7 +2585,8 @@
                     _appendProgressLine('info',
                         '→ Launching onboarding job… preparing UC volume, schemas, and uploading supporting files. ' +
                         'The job URL will appear below once Databricks accepts it (typically ~30–60 s).');
-                    _pollJob(d.token, function(jobData) {
+                    _pollJob(d.token, 'Onboarding', function(jobData, session, isCurrent) {
+                        if (!isCurrent) return;
                         var success = jobData.returncode === 0;
                         var label   = success ? 'Completed successfully' : 'Failed (exit ' + jobData.returncode + ')';
                         _finishProgressModal(success, label);
@@ -2583,9 +2702,11 @@
             var submitBtn = document.getElementById('onboardingSubmitBtn');
             var previewBtn = document.getElementById('onboardingPreviewBtn');
             var isLauncher = Boolean(entry && entry.launcher);
-            submitBtn.innerHTML = isLauncher
-                ? '&#9654; Run Featured Demo'
-                : '&#9654; Run Onboarding';
+            submitBtn.innerHTML = !isLauncher
+                ? '&#9654; Run Onboarding'
+                : entry.id === '__featured_at_scale_autoloader__'
+                    ? '&#9654; Run Featured Demo'
+                    : '&#9654; Launch Demo Workflow';
             previewBtn.disabled = isLauncher;
             previewBtn.title = isLauncher
                 ? 'The featured demo is an orchestrated launcher and has no single onboarding template to preview.'
@@ -2631,6 +2752,8 @@
         function _syncBundledToHidden() {
             var entry = _bundledSpecById(bundledSelect.value);
             if (!entry) return;
+            document.getElementById('onboardingForm').dataset.bundledLauncher =
+                entry.launcher || '';
             /* The featured at-scale demo is an orchestrated launcher, not a
                static onboarding spec. Keep it discoverable here, but route
                it to the Demos workflow instead of writing invalid paths
@@ -2700,9 +2823,11 @@
                 _fillBundledSchemaDefaultsIfBlank();
                 _syncBundledToHidden();
             } else if (mode === 'uc_volume') {
+                document.getElementById('onboardingForm').dataset.bundledLauncher = '';
                 _setOnboardingActionForEntry(null);
                 _syncUcToHidden();
             } else {
+                document.getElementById('onboardingForm').dataset.bundledLauncher = '';
                 _setOnboardingActionForEntry(null);
                 _syncManualToHidden();
             }
@@ -2736,6 +2861,8 @@
                        Choosing any option explicitly still uses the normal
                        change handler below. */
                     bundledSelect.selectedIndex = 0;
+                    document.getElementById('onboardingForm').dataset.bundledLauncher =
+                        bundledData[0].launcher || '';
                     _renderBundledMeta(bundledData[0]);
                     _setOnboardingActionForEntry(bundledData[0]);
                 })
@@ -3080,7 +3207,8 @@
                     _appendProgressLine('info',
                         '→ Launching pipeline deployment… generating the pipeline definition and submitting to Databricks. ' +
                         'The pipeline URL will appear below once it\u2019s registered (typically ~15\u201330 s).');
-                    _pollJob(d.token, function(jobData) {
+                    _pollJob(d.token, 'Pipeline deployment', function(jobData, session, isCurrent) {
+                        if (!isCurrent) return;
                         var success = jobData.returncode === 0;
                         var label   = success ? 'Completed successfully' : 'Failed (exit ' + jobData.returncode + ')';
                         _finishProgressModal(success, label);
@@ -3339,7 +3467,8 @@
                     'info',
                     '\u2192 Launcher started. Progress and the Databricks run URL will appear here.'
                 );
-                _pollJob(resp.body.token, function(jobData) {
+                _pollJob(resp.body.token, demoTitle, function(jobData, session, isCurrent) {
+                    if (!isCurrent) return;
                     var success = jobData.returncode === 0;
                     _finishProgressModal(
                         success,
