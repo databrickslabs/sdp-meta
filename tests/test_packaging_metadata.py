@@ -332,14 +332,14 @@ class CodeqlWorkflowTests(unittest.TestCase):
         self.assertEqual(
             workflow.count(
                 "github/codeql-action/"
-                "init@cdf488f595d80d6e07e03d4674febd5ab45fa938"
+                "init@1c5b675653bb5c22dbe9b12b556ec555138e09fd"
             ),
             1,
         )
         self.assertEqual(
             workflow.count(
                 "github/codeql-action/"
-                "analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938"
+                "analyze@1c5b675653bb5c22dbe9b12b556ec555138e09fd"
             ),
             1,
         )
