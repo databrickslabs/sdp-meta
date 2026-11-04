@@ -99,11 +99,11 @@ Catalog targets also use the corresponding
 
 Legacy onboarding files with non-empty `expect_or_quarantine` rules but no
 target continue to onboard successfully. They do not produce a quarantine
-table until target metadata is supplied, and onboarding emits a warning. If
-`expect_or_quarantine` is the only non-empty constraint block, the pipeline
-also does not declare the main output table. Add the quarantine table and
-database fields to avoid a pipeline with no declared output. Missing targets
-remain accepted only for backward compatibility.
+table until target metadata is supplied, and onboarding emits a warning. The
+pipeline still declares its primary output table, including when
+`expect_or_quarantine` is the only non-empty constraint block. Add the
+quarantine table and database fields to route matching rows to a quarantine
+output. Missing targets remain accepted only for backward compatibility.
 
 Existing onboarding files may include optional quarantine metadata before
 quarantine rules are added. SDP-META preserves that metadata, but no

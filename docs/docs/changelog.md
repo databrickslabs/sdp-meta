@@ -18,7 +18,10 @@ sidebar_position: 99
 ### Fixes
 
 - **Databricks SDK compatibility floor** — runtime and App dependencies now require `databricks-sdk>=0.138.0,<1`, and CI tests serverless onboarding environment models against exactly that minimum. ([Issue #457](https://github.com/databrickslabs/sdp-meta/issues/457))
-- **[Databricks App] Make demo launches asynchronous and feature the 100-table Auto Loader demo**. ([Issue #491](https://github.com/databrickslabs/sdp-meta/issues/491))
+- **[Databricks App] Asynchronous demos and safe concurrent progress tracking** — onboarding, pipeline deployment, and demo workflows now run asynchronously, including the featured 100-table Auto Loader demo. Multiple runs can be tracked from one browser session, with retained completion status and curated Databricks job or pipeline links. Bundled onboarding entries launch their supported demo workflow when available, while unsupported bundles continue with standard onboarding. Browser responses no longer expose raw backend exception or subprocess details. ([Issue #491](https://github.com/databrickslabs/sdp-meta/issues/491), [Issue #508](https://github.com/databrickslabs/sdp-meta/issues/508))
+- **Quarantine-only DQE flows** — bronze and silver primary targets are now declared when a flow contains only `expect_or_quarantine` rules, allowing primary and quarantine outputs to be created and validated correctly. ([Issue #496](https://github.com/databrickslabs/sdp-meta/issues/496))
+- **Multi-source Auto CDC expectations** — `expect`, `expect_or_drop`, and `expect_or_fail` flows now create their streaming target correctly. Unsupported `expect_or_quarantine` together with `cdc_apply_changes_flows` now fails early with an actionable validation error rather than failing while the pipeline runs. ([Issue #503](https://github.com/databrickslabs/sdp-meta/issues/503))
+- **Documentation dependency security** — upgraded Docusaurus and remediated high and critical npm findings in the documentation build dependency graph.
 - **Data-quality expectations without quarantine targets** — bronze and silver flows can apply DQ expectations when no quarantine table is configured, without referencing a missing quarantine target. ([PR #487](https://github.com/databrickslabs/sdp-meta/pull/487))
 - **Databricks App deployment packaging** — deployment staging now includes the `examples/` wheel-build inputs on both macOS/Linux and Windows, preventing remote App startup failures while building the SDP-META wheel.
 - **DAB pipeline group ownership** — `bundle-add-pipeline` and `bundle-validate` reject duplicate ownership of the same data-flow group and layer, including conflicts introduced through target overrides. ([Issue #458](https://github.com/databrickslabs/sdp-meta/issues/458))
@@ -29,6 +32,9 @@ sidebar_position: 99
 - **Legacy dataflow-spec schema evolution** — append onboarding adds current bronze and silver fields to v0.0.10 Delta spec tables before merging, preserving existing rows and audit fields. ([Issue #460](https://github.com/databrickslabs/sdp-meta/issues/460))
 - **Legacy Python wheel task entry point** — the `dlt-meta` compatibility package restores the `group_1:run` entry point used by v0.0.10 Databricks Python wheel tasks. ([Issue #455](https://github.com/databrickslabs/sdp-meta/issues/455))
 - **Legacy workspace configuration keys** — v0.0.10 `dlt_meta_*` workspace keys migrate to their `sdp_meta_*` equivalents with deprecation warnings and deterministic precedence. ([Issue #456](https://github.com/databrickslabs/sdp-meta/issues/456))
+- **Compat shim startup** — importing the `dlt-meta` compatibility package no longer prints startup tracebacks or fails immediately on environments without pyspark; unavailable runtime dependencies now produce an actionable error only when SDP-META functionality is accessed.
+- **Onboarding PyPI dependency** — `databricks labs sdp-meta onboard` now installs the published `databricks-labs-sdp-meta` package instead of the nonexistent `sdp-meta` package, preventing job-environment setup failures.
+- **DAB wheel packaging and quickstart onboarding** — installed wheels now include the full DAB template, generated bronze flows include required quarantine defaults when DQE is configured, and serverless runners force a clean dependency reinstall.
 
 ### Compatibility warning
 
