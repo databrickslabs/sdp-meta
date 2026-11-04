@@ -2516,6 +2516,12 @@ class EndToEndRenderTests(unittest.TestCase):
                 cell1_code[1],
                 "serverless pipeline installs must not reuse stale environment metadata",
             )
+            self.assertIn(
+                "--no-deps",
+                cell1_code[1],
+                "re-installing the sdp-meta wheel must not re-resolve runtime "
+                "dependencies (databricks-sdk, PyYAML, setuptools) from the index",
+            )
             self.assertIn("$", cell1_code[1],
                           "the `%pip install` line must reference the python "
                           "variable from the line above (e.g. `$sdp_meta_dependency`)")
@@ -3299,6 +3305,67 @@ class BundleAddPipelineTests(unittest.TestCase):
             self.assertEqual(
                 {path: path.read_text() for path in tracked_paths},
                 before,
+            )
+
+    def test_body_less_pipeline_entry_does_not_crash(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp)
+            path = tmp / "resources" / "sdp_meta_pipelines.yml"
+            doc = yaml.safe_load(path.read_text())
+            doc["resources"]["pipelines"]["extra"] = None
+            path.write_text(yaml.safe_dump(doc, sort_keys=False))
+            output = StringIO()
+
+            rc = bundle_add_pipeline(
+                BundleAddPipelineCommand(
+                    bundle_dir=str(tmp),
+                    pipeline=PipelineSpec(
+                        name="orders_extra",
+                        layer="bronze",
+                        dataflow_group="orders_extra",
+                    ),
+                ),
+                output=output,
+            )
+
+            self.assertIn(rc, (0, 2))
+
+    def test_keeps_isolated_quarantine_schema_and_follows_main_schema(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp)
+            onboarding = tmp / "conf" / "onboarding.yml"
+            rows = yaml.safe_load(onboarding.read_text())
+            rows[1]["bronze_database_quarantine_dev"] = "test_cat.ops_quarantine"
+            rows.append({
+                "data_flow_id": "3",
+                "data_flow_group": "orders",
+                "bronze_database_dev": "test_cat.test_bronze",
+                "bronze_database_quarantine_dev": "test_cat.test_bronze",
+                "bronze_table": "orders_extra",
+            })
+            onboarding.write_text(yaml.safe_dump(rows, sort_keys=False))
+
+            rc = bundle_add_pipeline(BundleAddPipelineCommand(
+                bundle_dir=str(tmp),
+                pipeline=PipelineSpec(
+                    name="orders",
+                    layer="bronze",
+                    dataflow_group="orders",
+                    bronze_target_schema="orders_bronze",
+                ),
+            ))
+
+            self.assertEqual(rc, 0)
+            rows = yaml.safe_load(onboarding.read_text())
+            isolated = next(r for r in rows if r["data_flow_id"] == "2")
+            followed = next(r for r in rows if r["data_flow_id"] == "3")
+            self.assertEqual(isolated["bronze_database_dev"], "test_cat.orders_bronze")
+            self.assertEqual(
+                isolated["bronze_database_quarantine_dev"], "test_cat.ops_quarantine"
+            )
+            self.assertEqual(followed["bronze_database_dev"], "test_cat.orders_bronze")
+            self.assertEqual(
+                followed["bronze_database_quarantine_dev"], "test_cat.orders_bronze"
             )
 
     def test_pipeline_spec_rejects_invalid_name(self):

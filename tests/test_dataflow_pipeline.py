@@ -2879,6 +2879,21 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
         self._assert_main_table_row_filter(mock_dlt, spec, self.ROW_FILTER_REGION)
 
     @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_write_layer_with_dqe_empty_expect_still_declares_main_table(self, mock_dlt):
+        """An empty ``expect`` dict must not skip the main table declaration
+        or raise UnboundLocalError when an expect_or_fail family is present."""
+        mock_dlt.expect_all = MagicMock(return_value=lambda func: func)
+        mock_dlt.expect_all_or_drop = MagicMock(return_value=lambda func: func)
+        mock_dlt.expect_all_or_fail = MagicMock(return_value=lambda func: func)
+        mock_dlt.table = MagicMock(return_value=lambda func: func)
+
+        pipeline, spec = self._build_dqe_pipeline(
+            {"expect": {}, "expect_or_fail": {"valid_id": "id IS NOT NULL"}}
+        )
+        pipeline.write_layer_with_dqe()
+        self._assert_main_table_row_filter(mock_dlt, spec, self.ROW_FILTER_REGION)
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
     def test_write_layer_with_dqe_expect_all_or_drop_passes_row_filter(self, mock_dlt):
         """`expect_all_or_drop` branch (when expect_all and expect_all_or_fail
         are both absent) constructs dp.table itself and passes row_filter through."""

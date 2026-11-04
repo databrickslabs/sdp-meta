@@ -1557,8 +1557,7 @@ class OnboardDataflowspec:
                 logger.warning(
                     "Bronze DQE contains non-empty expect_or_quarantine rules "
                     "but its quarantine target is incomplete. No quarantine "
-                    "table will be created; if these are the only DQE rules, "
-                    "the pipeline will not declare a main output table. Add "
+                    "table will be created. Add "
                     "bronze_quarantine_table and "
                     "bronze_database_quarantine_%s. Missing targets remain "
                     "allowed for backward compatibility.",
@@ -2621,8 +2620,7 @@ class OnboardDataflowspec:
                 logger.warning(
                     "Silver DQE contains non-empty expect_or_quarantine rules "
                     "but its quarantine target is incomplete. No quarantine "
-                    "table will be created; if these are the only DQE rules, "
-                    "the pipeline will not declare a main output table. Add "
+                    "table will be created. Add "
                     "silver_quarantine_table and "
                     "silver_database_quarantine_%s. Missing targets remain "
                     "allowed for backward compatibility.",

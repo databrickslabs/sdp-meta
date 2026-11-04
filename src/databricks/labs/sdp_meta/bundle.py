@@ -691,7 +691,13 @@ def _pipeline_ownership_errors(
     """Reject multiple pipelines owning the same group/layer pair."""
     owners: Dict[Tuple[str, str], List[Tuple[str, Any]]] = {}
     for key, spec in configured.items():
-        config = spec.get("configuration") or {}
+        # Malformed entries (e.g. a body-less ``extra:`` key) are reported by
+        # the sanity checks that own them; skip them here instead of crashing.
+        if not isinstance(spec, dict):
+            continue
+        config = spec.get("configuration")
+        if not isinstance(config, dict):
+            continue
         pipeline_layer = config.get("layer")
         if pipeline_layer not in ("bronze", "silver", "bronze_silver"):
             continue
@@ -1818,11 +1824,16 @@ def _onboarding_layer_updates(
             row.setdefault("bronze_table_path_dev", "")
             row.setdefault("bronze_partition_columns", "")
             target = f"{catalog}.{bronze_schema}"
-            if row.get("bronze_database_dev") != target:
+            previous_main = row.get("bronze_database_dev")
+            if previous_main != target:
                 row["bronze_database_dev"] = target
                 changed = True
             if "bronze_database_quarantine_dev" in row:
-                row["bronze_database_quarantine_dev"] = target
+                # Only follow the main schema when quarantine rows were still
+                # routed alongside it; keep a user-isolated quarantine schema.
+                current_quarantine = row.get("bronze_database_quarantine_dev")
+                if not current_quarantine or current_quarantine == previous_main:
+                    row["bronze_database_quarantine_dev"] = target
         if pipeline_spec.layer in ("silver", "bronze_silver"):
             silver_table = (
                 row.get("silver_table")
@@ -1849,11 +1860,14 @@ def _onboarding_layer_updates(
             if silver_table not in silver_tables:
                 silver_tables.append(silver_table)
             target = f"{catalog}.{silver_schema}"
-            if row.get("silver_database_dev") != target:
+            previous_main = row.get("silver_database_dev")
+            if previous_main != target:
                 row["silver_database_dev"] = target
                 changed = True
             if "silver_database_quarantine_dev" in row:
-                row["silver_database_quarantine_dev"] = target
+                current_quarantine = row.get("silver_database_quarantine_dev")
+                if not current_quarantine or current_quarantine == previous_main:
+                    row["silver_database_quarantine_dev"] = target
         if row != original_row:
             changed = True
     if matched_rows == 0:
