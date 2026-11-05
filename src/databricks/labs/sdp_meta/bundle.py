@@ -2143,6 +2143,13 @@ class FlowSpec:
     cloudfiles_format: str = "json"
 
     def __post_init__(self) -> None:
+        # Interactive and CSV callers represent an omitted schema override as
+        # an empty string. Normalize that form so pipeline defaults still win
+        # over the broader variables.yml fallback.
+        if self.bronze_target_schema == "":
+            self.bronze_target_schema = None
+        if self.silver_target_schema == "":
+            self.silver_target_schema = None
         if self.layer and self.layer not in ("bronze", "silver", "bronze_silver"):
             raise ValueError("layer must be one of: bronze, silver, bronze_silver")
         if self.bronze_target_schema:
@@ -2453,20 +2460,56 @@ def _flows_from_csv(csv_path: Path) -> List[FlowSpec]:
     return flows
 
 
-def _apply_pipeline_defaults(
-    bundle_dir: Path,
-    variables: Dict[str, Any],
-    spec: FlowSpec,
-) -> None:
-    """Fill a flow's layer/schemas from the pipeline serving its group."""
-    group = spec.data_flow_group or _var_default(variables, "dataflow_group")
-    if not group:
-        return
+def _load_pipeline_resources(bundle_dir: Path) -> Dict[str, Any]:
+    """Load ``resources.pipelines`` from ``sdp_meta_pipelines.yml``.
+
+    Returns an empty mapping when the file is absent. Raises ``ValueError`` or
+    ``yaml.YAMLError`` when the document is present but malformed; callers such
+    as ``bundle_add_flow`` catch those and surface ``ERROR:`` + exit 2.
+    """
     pipelines_path = bundle_dir / "resources" / "sdp_meta_pipelines.yml"
     if not pipelines_path.is_file():
+        return {}
+    doc = yaml.safe_load(pipelines_path.read_text())
+    if doc is None:
+        return {}
+    if not isinstance(doc, dict):
+        raise ValueError(
+            f"{pipelines_path.name}: document root must be a mapping"
+        )
+    resources = doc.get("resources")
+    if resources is None:
+        return {}
+    if not isinstance(resources, dict):
+        raise ValueError(
+            f"{pipelines_path.name}: `resources` must be a mapping"
+        )
+    pipelines = resources.get("pipelines")
+    if pipelines is None:
+        return {}
+    if not isinstance(pipelines, dict):
+        raise ValueError(
+            f"{pipelines_path.name}: `resources.pipelines` must be a mapping"
+        )
+    return pipelines
+
+
+def _apply_pipeline_defaults(
+    variables: Dict[str, Any],
+    spec: FlowSpec,
+    pipelines: Dict[str, Any],
+) -> None:
+    """Fill a flow's layer/schemas from the pipeline serving its group.
+
+    ``pipelines`` is the pre-loaded ``resources.pipelines`` mapping so a batch
+    of flows does not re-parse the YAML once per entry. Resolved target schemas
+    are validated with ``validate_uc_identifier`` before assignment, because
+    ``FlowSpec.__post_init__`` has already run by the time this helper fills
+    them in.
+    """
+    group = spec.data_flow_group or _var_default(variables, "dataflow_group")
+    if not group or not pipelines:
         return
-    doc = yaml.safe_load(pipelines_path.read_text()) or {}
-    pipelines = (doc.get("resources") or {}).get("pipelines") or {}
     layers = set()
     bronze_schemas = set()
     silver_schemas = set()
@@ -2474,18 +2517,26 @@ def _apply_pipeline_defaults(
         if not isinstance(pipeline, dict):
             continue
         config = _pipeline_configuration(pipeline)
-        raw_groups = (
-            config.get("bronze.group"),
-            config.get("silver.group"),
-        )
-        resolved_groups = {
-            _var_default(variables, match.group(1))
-            if isinstance(raw_group, str)
-            and (match := _VARIABLE_REF_RE.fullmatch(raw_group))
-            else raw_group
-            for raw_group in raw_groups
-            if raw_group
-        }
+        resolved_groups = set()
+        for key in ("bronze.group", "silver.group"):
+            raw_group = config.get(key)
+            if raw_group in (None, ""):
+                continue
+            if not isinstance(raw_group, str):
+                raise ValueError(
+                    f"pipeline configuration `{key}` must be a string"
+                )
+            match = _VARIABLE_REF_RE.fullmatch(raw_group)
+            resolved_group = (
+                _var_default(variables, match.group(1))
+                if match
+                else raw_group
+            )
+            if not isinstance(resolved_group, str):
+                raise ValueError(
+                    f"pipeline configuration `{key}` must resolve to a string"
+                )
+            resolved_groups.add(resolved_group)
         if group not in resolved_groups:
             continue
         layer = config.get("layer")
@@ -2495,14 +2546,18 @@ def _apply_pipeline_defaults(
             layers.add(layer)
         bronze_schema = config.get("sdp_meta.bronzeTargetSchema")
         silver_schema = config.get("sdp_meta.silverTargetSchema")
-        if bronze_schema:
-            bronze_schemas.add(
-                _resolve_bundle_reference(bronze_schema, variables, {}, None)
-            )
-        if silver_schema:
-            silver_schemas.add(
-                _resolve_bundle_reference(silver_schema, variables, {}, None)
-            )
+        # Validate after resolving: values copied into flow rows must be real
+        # UC identifiers, not an unresolved ``${var.x}_bronze`` fragment.
+        if spec.bronze_target_schema is None and bronze_schema:
+            bronze_schemas.add(validate_uc_identifier(
+                _resolve_bundle_reference(bronze_schema, variables, {}, None),
+                kind="bronze_target_schema",
+            ))
+        if spec.silver_target_schema is None and silver_schema:
+            silver_schemas.add(validate_uc_identifier(
+                _resolve_bundle_reference(silver_schema, variables, {}, None),
+                kind="silver_target_schema",
+            ))
     if len(bronze_schemas) > 1 or len(silver_schemas) > 1:
         raise ValueError(
             f"data_flow_group={group!r} is served by pipelines with conflicting "
@@ -2576,23 +2631,33 @@ def bundle_add_flow(
         if isinstance(flow, dict) and flow.get("data_flow_id") is not None
     }
 
+    try:
+        pipelines = _load_pipeline_resources(bundle_dir)
+    except (OSError, ValueError, yaml.YAMLError, AttributeError) as exc:
+        print(f"ERROR: {exc}", file=output)
+        return 2
+
     new_entries: List[Dict[str, Any]] = []
     for spec in pending:
-        _apply_pipeline_defaults(bundle_dir, variables, spec)
-        if spec.data_flow_id == "auto":
-            assigned = str(next_id)
-            next_id += 1
-        else:
-            assigned = str(spec.data_flow_id)
-        if assigned in existing_ids:
-            print(
-                f"ERROR: data_flow_id={assigned!r} already exists in {onboarding_path.name}. "
-                "Pick a different id or use `auto`.",
-                file=output,
-            )
+        try:
+            _apply_pipeline_defaults(variables, spec, pipelines)
+            if spec.data_flow_id == "auto":
+                assigned = str(next_id)
+                next_id += 1
+            else:
+                assigned = str(spec.data_flow_id)
+            if assigned in existing_ids:
+                print(
+                    f"ERROR: data_flow_id={assigned!r} already exists in "
+                    f"{onboarding_path.name}. Pick a different id or use `auto`.",
+                    file=output,
+                )
+                return 2
+            existing_ids.add(assigned)
+            new_entries.append(_flow_to_dict(spec, variables, assigned))
+        except (ValueError, yaml.YAMLError, AttributeError) as exc:
+            print(f"ERROR: {exc}", file=output)
             return 2
-        existing_ids.add(assigned)
-        new_entries.append(_flow_to_dict(spec, variables, assigned))
 
     if cmd.dry_run:
         print(

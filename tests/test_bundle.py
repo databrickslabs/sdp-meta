@@ -4277,13 +4277,304 @@ class BundleAddFlowTests(unittest.TestCase):
     def test_kafka_requires_bootstrap_and_topic(self):
         with _tempdir() as tmp:
             self._make_bundle(tmp, seed_flows=[])
+            output = StringIO()
             cmd = BundleAddFlowCommand(
                 bundle_dir=str(tmp),
                 flows=[FlowSpec(source_format="kafka", bronze_table="t", silver_table="t")],
             )
-            with self.assertRaises(ValueError) as ctx:
-                bundle_add_flow(cmd)
-            self.assertIn("kafka_bootstrap_servers", str(ctx.exception))
+            self.assertEqual(bundle_add_flow(cmd, output=output), 2)
+            self.assertIn("kafka_bootstrap_servers", output.getvalue())
+
+    def _write_pipelines_yml(self, tmp: Path, pipelines: dict) -> None:
+        (tmp / "resources" / "sdp_meta_pipelines.yml").write_text(
+            yaml.safe_dump({"resources": {"pipelines": pipelines}}, sort_keys=False)
+        )
+
+    def test_rejects_invalid_pipeline_target_schema_without_traceback(self):
+        for target_key, bad_schema in (
+            ("sdp_meta.bronzeTargetSchema", "bad-schema"),
+            ("sdp_meta.bronzeTargetSchema", "${var.catalog}_bronze"),
+            ("sdp_meta.silverTargetSchema", "bad-silver"),
+        ):
+            with self.subTest(target=target_key, schema=bad_schema), _tempdir() as tmp:
+                self._make_bundle(tmp, seed_flows=[])
+                self._write_pipelines_yml(tmp, {
+                    "combined": {
+                        "configuration": {
+                            "layer": "bronze_silver",
+                            "bronze.group": "G1",
+                            "silver.group": "G1",
+                            target_key: bad_schema,
+                        },
+                    },
+                })
+                onboarding = tmp / "conf" / "onboarding.yml"
+                transformations = tmp / "conf" / "silver_transformations.yml"
+                before = (onboarding.read_text(), transformations.read_text())
+                output = StringIO()
+                rc = bundle_add_flow(
+                    BundleAddFlowCommand(
+                        bundle_dir=str(tmp),
+                        flows=[FlowSpec(
+                            source_format="cloudFiles",
+                            bronze_table="orders",
+                            data_flow_group="G1",
+                        )],
+                    ),
+                    output=output,
+                )
+                self.assertEqual(rc, 2)
+                self.assertIn("ERROR:", output.getvalue())
+                expected_kind = (
+                    "bronze_target_schema"
+                    if "bronze" in target_key
+                    else "silver_target_schema"
+                )
+                self.assertIn(expected_kind, output.getvalue())
+                self.assertEqual(
+                    (onboarding.read_text(), transformations.read_text()),
+                    before,
+                )
+
+    def test_resolves_and_applies_valid_pipeline_target_schemas(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp, seed_flows=[])
+            self._write_pipelines_yml(tmp, {
+                "combined": {
+                    "configuration": {
+                        "layer": "bronze_silver",
+                        "bronze.group": "G1",
+                        "silver.group": "G1",
+                        "sdp_meta.bronzeTargetSchema":
+                            "${var.bronze_target_schema}",
+                        "sdp_meta.silverTargetSchema":
+                            "${var.silver_target_schema}",
+                    },
+                },
+            })
+            rc = bundle_add_flow(BundleAddFlowCommand(
+                bundle_dir=str(tmp),
+                flows=[FlowSpec(
+                    source_format="cloudFiles",
+                    bronze_table="orders",
+                    data_flow_group="G1",
+                )],
+            ))
+            self.assertEqual(rc, 0)
+            row = yaml.safe_load(
+                (tmp / "conf" / "onboarding.yml").read_text()
+            )[0]
+            self.assertEqual(row["bronze_database_dev"], "test_cat.test_bronze")
+            self.assertEqual(row["silver_database_dev"], "test_cat.test_silver")
+
+    def test_explicit_schema_override_ignores_invalid_pipeline_default(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp, layer="bronze", seed_flows=[])
+            self._write_pipelines_yml(tmp, {
+                "bronze": {
+                    "configuration": {
+                        "layer": "bronze",
+                        "bronze.group": "G1",
+                        "sdp_meta.bronzeTargetSchema":
+                            "${var.catalog}_bronze",
+                    },
+                },
+            })
+            rc = bundle_add_flow(BundleAddFlowCommand(
+                bundle_dir=str(tmp),
+                flows=[FlowSpec(
+                    source_format="cloudFiles",
+                    bronze_table="orders",
+                    data_flow_group="G1",
+                    bronze_target_schema="explicit_bronze",
+                )],
+            ))
+            self.assertEqual(rc, 0)
+            row = yaml.safe_load(
+                (tmp / "conf" / "onboarding.yml").read_text()
+            )[0]
+            self.assertEqual(
+                row["bronze_database_dev"],
+                "test_cat.explicit_bronze",
+            )
+
+    def test_empty_schema_overrides_use_pipeline_defaults(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp, seed_flows=[])
+            self._write_pipelines_yml(tmp, {
+                "combined": {
+                    "configuration": {
+                        "layer": "bronze_silver",
+                        "bronze.group": "G1",
+                        "silver.group": "G1",
+                        "sdp_meta.bronzeTargetSchema": "pipeline_bronze",
+                        "sdp_meta.silverTargetSchema": "pipeline_silver",
+                    },
+                },
+            })
+            rc = bundle_add_flow(BundleAddFlowCommand(
+                bundle_dir=str(tmp),
+                flows=[FlowSpec(
+                    source_format="cloudFiles",
+                    bronze_table="orders",
+                    data_flow_group="G1",
+                    bronze_target_schema="",
+                    silver_target_schema="",
+                )],
+            ))
+            self.assertEqual(rc, 0)
+            row = yaml.safe_load(
+                (tmp / "conf" / "onboarding.yml").read_text()
+            )[0]
+            self.assertEqual(
+                row["bronze_database_dev"],
+                "test_cat.pipeline_bronze",
+            )
+            self.assertEqual(
+                row["silver_database_dev"],
+                "test_cat.pipeline_silver",
+            )
+
+    def test_rejects_conflicting_pipeline_schemas_without_traceback(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp, seed_flows=[])
+            self._write_pipelines_yml(tmp, {
+                "a": {
+                    "schema": "schema_a",
+                    "configuration": {
+                        "layer": "bronze",
+                        "bronze.group": "G1",
+                        "sdp_meta.bronzeTargetSchema": "schema_a",
+                    },
+                },
+                "b": {
+                    "schema": "schema_b",
+                    "configuration": {
+                        "layer": "bronze",
+                        "bronze.group": "G1",
+                        "sdp_meta.bronzeTargetSchema": "schema_b",
+                    },
+                },
+            })
+            output = StringIO()
+            rc = bundle_add_flow(
+                BundleAddFlowCommand(
+                    bundle_dir=str(tmp),
+                    flows=[FlowSpec(
+                        source_format="cloudFiles",
+                        bronze_table="orders",
+                        data_flow_group="G1",
+                    )],
+                ),
+                output=output,
+            )
+            self.assertEqual(rc, 2)
+            self.assertIn("ERROR:", output.getvalue())
+            self.assertIn("conflicting", output.getvalue())
+
+    def test_rejects_malformed_pipelines_yml_without_traceback(self):
+        malformed_documents = (
+            ("root", "- not a mapping\n", "document root"),
+            ("resources", "resources: []\n", "`resources`"),
+            (
+                "pipelines",
+                "resources:\n  pipelines: []\n",
+                "`resources.pipelines`",
+            ),
+            ("syntax", "resources: [\n", "while parsing"),
+        )
+        for name, document, message in malformed_documents:
+            with self.subTest(shape=name), _tempdir() as tmp:
+                self._make_bundle(tmp, seed_flows=[])
+                onboarding = tmp / "conf" / "onboarding.yml"
+                transformations = tmp / "conf" / "silver_transformations.yml"
+                before = (onboarding.read_text(), transformations.read_text())
+                (tmp / "resources" / "sdp_meta_pipelines.yml").write_text(
+                    document
+                )
+                output = StringIO()
+                rc = bundle_add_flow(
+                    BundleAddFlowCommand(
+                        bundle_dir=str(tmp),
+                        flows=[FlowSpec(
+                            source_format="cloudFiles",
+                            bronze_table="orders",
+                        )],
+                    ),
+                    output=output,
+                )
+                self.assertEqual(rc, 2)
+                self.assertIn("ERROR:", output.getvalue())
+                self.assertIn(message, output.getvalue())
+                self.assertEqual(
+                    (onboarding.read_text(), transformations.read_text()),
+                    before,
+                )
+
+    def test_rejects_non_string_pipeline_group_without_traceback(self):
+        for malformed_group in (["G1"], {"name": "G1"}):
+            with self.subTest(group=malformed_group), _tempdir() as tmp:
+                self._make_bundle(tmp, seed_flows=[])
+                self._write_pipelines_yml(tmp, {
+                    "bronze": {
+                        "configuration": {
+                            "layer": "bronze",
+                            "bronze.group": malformed_group,
+                        },
+                    },
+                })
+                output = StringIO()
+                rc = bundle_add_flow(
+                    BundleAddFlowCommand(
+                        bundle_dir=str(tmp),
+                        flows=[FlowSpec(
+                            source_format="cloudFiles",
+                            bronze_table="orders",
+                            data_flow_group="G1",
+                        )],
+                    ),
+                    output=output,
+                )
+                self.assertEqual(rc, 2)
+                self.assertIn("ERROR:", output.getvalue())
+                self.assertIn("must be a string", output.getvalue())
+
+    def test_pipeline_resources_are_loaded_once_for_batch(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp, seed_flows=[])
+            self._write_pipelines_yml(tmp, {
+                "bronze": {
+                    "configuration": {
+                        "layer": "bronze",
+                        "bronze.group": "G1",
+                    },
+                },
+            })
+            from databricks.labs.sdp_meta import bundle as bundle_module
+
+            original_loader = bundle_module._load_pipeline_resources
+            with patch.object(
+                bundle_module,
+                "_load_pipeline_resources",
+                wraps=original_loader,
+            ) as loader:
+                rc = bundle_add_flow(BundleAddFlowCommand(
+                    bundle_dir=str(tmp),
+                    flows=[
+                        FlowSpec(
+                            source_format="cloudFiles",
+                            bronze_table="orders",
+                            data_flow_group="G1",
+                        ),
+                        FlowSpec(
+                            source_format="cloudFiles",
+                            bronze_table="customers",
+                            data_flow_group="G1",
+                        ),
+                    ],
+                ))
+            self.assertEqual(rc, 0)
+            loader.assert_called_once_with(tmp.resolve())
 
     def test_silver_falls_back_to_bronze_table(self):
         with _tempdir() as tmp:

@@ -1793,7 +1793,11 @@ def bundle_init(sdp_meta: SDPMeta, flags: dict = None):
         cfg_dir = Path(output_dir).resolve()
         cfg_dir.mkdir(parents=True, exist_ok=True)
         cfg_path = write_quickstart_config_file(cfg_dir)
-        cmd = BundleInitCommand(output_dir=output_dir, config_file=str(cfg_path))
+        cmd = BundleInitCommand(
+            output_dir=output_dir,
+            config_file=str(cfg_path),
+            profile=flags.get("profile") or None,
+        )
     else:
         logger.info("Scaffolding a new sdp-meta DAB from the packaged template.")
         cmd = _load_bundle_init_config(sdp_meta._wsi)
@@ -1801,18 +1805,21 @@ def bundle_init(sdp_meta: SDPMeta, flags: dict = None):
         # since the user explicitly typed it on the command line.
         if flags.get("output-dir") or flags.get("output_dir"):
             cmd.output_dir = output_dir
+        if flags.get("profile"):
+            cmd.profile = flags["profile"]
     _run(cmd)
 
 
 def bundle_prepare_wheel(sdp_meta: SDPMeta, flags: dict = None):
-    # `flags` is accepted for dispatcher uniformity (see main()) but unused.
-    del flags
     logger.info("Building the sdp-meta wheel and uploading it to a UC volume.")
     from databricks.labs.sdp_meta.bundle import (
         _load_bundle_prepare_wheel_config,
         bundle_prepare_wheel as _run,
     )
-    _run(_load_bundle_prepare_wheel_config(sdp_meta._wsi))
+    cmd = _load_bundle_prepare_wheel_config(sdp_meta._wsi)
+    if flags and flags.get("profile"):
+        cmd.profile = flags["profile"]
+    _run(cmd)
 
 
 def _flag_value(flags: dict, *names: str):
@@ -1847,13 +1854,15 @@ def _split_flag_values(value):
 
 
 def bundle_validate(sdp_meta: SDPMeta, flags: dict = None):
-    del flags
     logger.info("Validating the sdp-meta DAB (databricks bundle validate + sanity checks).")
     from databricks.labs.sdp_meta.bundle import (
         _load_bundle_validate_config,
         bundle_validate as _run,
     )
-    rc = _run(_load_bundle_validate_config(sdp_meta._wsi))
+    cmd = _load_bundle_validate_config(sdp_meta._wsi)
+    if flags and flags.get("profile"):
+        cmd.profile = flags["profile"]
+    rc = _run(cmd)
     if rc != 0:
         sys.exit(rc)
 

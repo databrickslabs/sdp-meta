@@ -389,6 +389,13 @@ class JobRetentionTests(unittest.TestCase):
             with mock.patch.object(_jobs_module, "_MAX_LOG_LINES", 2):
                 for line in (
                     f"Job created successfully url={url}",
+                    # Pip download URLs used to match a broad ``https?://``
+                    # pattern and fill the retained-link budget before the
+                    # real job URL could be kept.
+                    *(
+                        f"Downloading https://files.pythonhosted.org/p/{i}.whl"
+                        for i in range(5)
+                    ),
                     "noise 1",
                     "noise 2",
                     "noise 3",
@@ -404,6 +411,41 @@ class JobRetentionTests(unittest.TestCase):
             self.assertIsNotNone(resource)
             self.assertEqual(resource["url"], url)
             self.assertEqual(resource["kind"], "job")
+            self.assertNotIn(
+                "files.pythonhosted.org",
+                "\n".join(job.get("link_lines", [])),
+            )
+        finally:
+            _jobs_module._jobs.pop(token, None)
+
+    def test_pipeline_progress_link_survives_log_cap(self):
+        token = _jobs_module._new_job_token()
+        job = _jobs_module._jobs[token]
+        pipeline_id = "12345678-1234-1234-1234-123456789abc"
+        url = (
+            "https://example.cloud.databricks.com/pipelines/"
+            f"{pipeline_id}"
+        )
+        try:
+            with mock.patch.object(_jobs_module, "_MAX_LOG_LINES", 1):
+                for line in (
+                    f"Pipeline created successfully url={url} "
+                    f"pipeline_id={pipeline_id}",
+                    "noise 1",
+                    "noise 2",
+                ):
+                    _jobs_module._append_job_log(
+                        job, {"stream": "stdout", "line": line}
+                    )
+
+            resource = demo_routes._safe_progress_resource(
+                _jobs_module._get_job_snapshot(token)
+            )
+            self.assertEqual(resource, {
+                "id": pipeline_id,
+                "url": url,
+                "kind": "pipeline",
+            })
         finally:
             _jobs_module._jobs.pop(token, None)
 

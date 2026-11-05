@@ -32,8 +32,12 @@ _MAX_LOG_LINES = 5000
 # Output lines that can carry a job/pipeline link or id. They must outlive the
 # ``_MAX_LOG_LINES`` window: a command may print its link early and then emit
 # far more output, and the progress/success links are parsed from retained text.
+# Match Databricks job/pipeline markers only — not arbitrary ``https://``
+# lines (e.g. pip's ``Downloading https://files.pythonhosted.org/...``),
+# which would fill the retained-link budget before the real job URL arrives.
 _LINK_LINE_RE = re.compile(
-    r"https?://|job_id=|pipeline=|pipeline_id|#job/|#pipeline/", re.IGNORECASE
+    r"/jobs/|/pipelines/|#job/|#pipeline/|job_id=|pipeline=|pipeline_id",
+    re.IGNORECASE,
 )
 _MAX_RETAINED_LINK_LINES = 200
 _MAX_COMPLETED_JOBS = 50
