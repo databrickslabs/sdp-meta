@@ -22,6 +22,10 @@ Bonus targets:
 from __future__ import annotations
 
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
 from databricks.labs.sdp_meta.bundle import (
@@ -488,8 +492,9 @@ class TestCliBundleDispatchers(unittest.TestCase):
             ) as mock_run,
         ):
             mock_run.return_value = 0
-            bundle_prepare_wheel(sdp_meta, flags={})
+            bundle_prepare_wheel(sdp_meta, flags={"profile": "fevm"})
             mock_loader.assert_called_once_with(sdp_meta._wsi)
+            self.assertEqual(loader_result.profile, "fevm")
             mock_run.assert_called_once_with(loader_result)
 
     def test_bundle_validate_calls_loader_then_runner_success(self):
@@ -508,7 +513,8 @@ class TestCliBundleDispatchers(unittest.TestCase):
             ),
         ):
             # Successful run (rc == 0) must NOT call sys.exit.
-            bundle_validate(sdp_meta, flags={})
+            bundle_validate(sdp_meta, flags={"profile": "fevm"})
+            self.assertEqual(loader_result.profile, "fevm")
 
     def test_bundle_validate_exits_when_runner_returns_nonzero(self):
         from databricks.labs.sdp_meta.cli import bundle_validate
@@ -564,6 +570,51 @@ class TestCliBundleDispatchers(unittest.TestCase):
         ):
             bundle_add_flow(sdp_meta, flags={})
         self.assertEqual(cm.exception.code, 1)
+
+    def test_bundle_add_flow_malformed_yaml_prints_error_and_exits_two(self):
+        """Exercise the real runner through the CLI wrapper."""
+        from databricks.labs.sdp_meta.cli import bundle_add_flow
+
+        with TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            (tmp / "resources").mkdir()
+            (tmp / "conf").mkdir()
+            (tmp / "databricks.yml").write_text("bundle: {name: t}\n")
+            (tmp / "resources" / "variables.yml").write_text(
+                "variables:\n"
+                "  layer: {default: bronze}\n"
+                "  uc_catalog_name: {default: test_cat}\n"
+                "  bronze_target_schema: {default: test_bronze}\n"
+                "  dataflow_group: {default: G1}\n"
+                "  onboarding_file_name: {default: onboarding.yml}\n"
+                "  onboarding_file_format: {default: yaml}\n"
+            )
+            (tmp / "resources" / "sdp_meta_pipelines.yml").write_text(
+                "resources: [\n"
+            )
+            (tmp / "conf" / "onboarding.yml").write_text("[]\n")
+            command = BundleAddFlowCommand(
+                bundle_dir=str(tmp),
+                flows=[FlowSpec(
+                    source_format="cloudFiles",
+                    bronze_table="orders",
+                )],
+            )
+            sdp_meta = MagicMock()
+            output = StringIO()
+            with (
+                patch(
+                    "databricks.labs.sdp_meta.bundle."
+                    "_load_bundle_add_flow_config",
+                    return_value=command,
+                ),
+                redirect_stdout(output),
+                self.assertRaises(SystemExit) as cm,
+            ):
+                bundle_add_flow(sdp_meta, flags={})
+
+            self.assertEqual(cm.exception.code, 2)
+            self.assertIn("ERROR:", output.getvalue())
 
     def test_bundle_add_pipeline_calls_loader_then_runner_success(self):
         from databricks.labs.sdp_meta.cli import bundle_add_pipeline

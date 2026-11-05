@@ -50,11 +50,16 @@ _DATABRICKS_HOST_SUFFIXES = (
 
 def _safe_progress_resource(job: dict) -> dict | None:
     """Extract an allowlisted Databricks job or pipeline link from CLI output."""
-    stdout = "\n".join(
-        entry.get('line', '')
-        for entry in job.get('logs', [])
-        if entry.get('stream') == 'stdout'
-    ) or job.get('stdout', '')
+    # ``link_lines`` holds link-bearing lines already evicted from the capped
+    # ``logs`` window, so an early job URL still resolves after long output.
+    stdout = "\n".join([
+        *job.get('link_lines', []),
+        *(
+            entry.get('line', '')
+            for entry in job.get('logs', [])
+            if entry.get('stream') == 'stdout'
+        ),
+    ]) or job.get('stdout', '')
     if not stdout:
         return None
 

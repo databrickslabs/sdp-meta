@@ -67,13 +67,27 @@ commands:
         description: "Skip all prompts and scaffold a developer-friendly bundle (cloudFiles + bronze_silver + split + pypi) under <output-dir>/my_sdp_meta_pipeline. Edit resources/variables.yml afterwards to point at your real catalog/schema/sdp_meta_dependency. Prefer the '=' syntax (--quickstart=true) so the labs CLI string-flag parser does not consume the next CLI token (e.g. --output-dir) as its value; bare --quickstart is recovered on a best-effort basis."
       - name: output-dir
         description: Parent directory the new bundle folder is created under (default ".", honored by both interactive and --quickstart modes). The bundle itself lands in <output-dir>/<bundle_name>, e.g. <output-dir>/my_sdp_meta_pipeline in quickstart mode.
+      - name: profile
+        description: Databricks CLI profile to use for authentication and bundle initialization (optional).
   - name: bundle-prepare-wheel
     description: Build the local sdp-meta wheel and upload it to a UC volume (for wheel_source=volume_path bundles); prints the resulting /Volumes/... path to paste into resources/variables.yml
+    flags:
+      - name: profile
+        description: Databricks CLI profile to use for authentication and the wheel upload (optional).
   - name: bundle-validate
     description: Run `databricks bundle validate` plus sdp-meta sanity checks (per-pipeline layer, group and job wiring, wheel_source vs sdp_meta_dependency, onboarding placeholders) against a scaffolded bundle
+    flags:
+      - name: profile
+        description: Databricks CLI profile to use for authentication and bundle validation (optional).
   - name: bundle-add-flow
     description: Append flow entries to a bundle's conf/onboarding.{yml,json} (interactive single-flow prompts or batch from CSV); auto-increments data_flow_id and seeds silver_transformations.* for new silver flows
+    flags:
+      - name: profile
+        description: Databricks CLI profile to use for authentication (optional).
   - name: bundle-add-pipeline
     description: Add an independently configured bronze, silver, split, or combined sdp-meta pipeline topology and wire it into the bundle pipelines job
+    flags:
+      - name: profile
+        description: Databricks CLI profile to use for authentication (optional).
   - name: mcp
     description: Run the sdp-meta Model Context Protocol (MCP) server over stdio so an MCP-capable client can drive sdp-meta scaffolding and inspection. Requires the `mcp` extra (`pip install databricks-labs-sdp-meta[mcp]`).

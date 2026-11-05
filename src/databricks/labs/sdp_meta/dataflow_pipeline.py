@@ -679,7 +679,7 @@ class DataflowPipeline:
                     )
                 )
             if expect_all_or_fail_dict:
-                if expect_all_dict is None:
+                if not expect_all_dict:
                     dlt_table_with_expectation = dp.expect_all_or_fail(expect_all_or_fail_dict)(
                         dp.table(
                             self.write_to_delta,
@@ -697,7 +697,7 @@ class DataflowPipeline:
                     dlt_table_with_expectation = dp.expect_all_or_fail(expect_all_or_fail_dict)(
                         dlt_table_with_expectation)
             if expect_all_or_drop_dict:
-                if expect_all_dict is None and expect_all_or_fail_dict is None:
+                if not expect_all_dict and not expect_all_or_fail_dict:
                     dlt_table_with_expectation = dp.expect_all_or_drop(expect_all_or_drop_dict)(
                         dp.table(
                             self.write_to_delta,
@@ -715,9 +715,9 @@ class DataflowPipeline:
                     dlt_table_with_expectation = dp.expect_all_or_drop(expect_all_or_drop_dict)(
                         dlt_table_with_expectation)
             if (
-                expect_all_dict is None
-                and expect_all_or_fail_dict is None
-                and expect_all_or_drop_dict is None
+                not expect_all_dict
+                and not expect_all_or_fail_dict
+                and not expect_all_or_drop_dict
             ):
                 # ``expect_or_quarantine`` must still declare the primary
                 # output. Keep its existing row-routing semantics unchanged;

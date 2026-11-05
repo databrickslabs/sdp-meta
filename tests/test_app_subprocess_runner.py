@@ -23,6 +23,7 @@ import subprocess
 import sys
 import time
 import unittest
+from collections import deque
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _APP_DIR = os.path.join(_REPO_ROOT, "databricks_app")
@@ -391,6 +392,74 @@ class SubprocessRunnerTests(unittest.TestCase):
         job = _jobs_module._jobs[self._token]
         self.assertEqual(job['returncode'], -1)
         self.assertIn("simulated", job['error'])
+
+
+class RetainedLinkLinesTests(unittest.TestCase):
+    """The stdout cap must not drop the job/pipeline link printed early on."""
+
+    def test_link_line_evicted_by_cap_is_kept(self):
+        parts = deque(maxlen=3)
+        kept: list = []
+        url_line = "Job created: https://ws.cloud.databricks.com/jobs/123"
+        for line in [url_line, "step 1", "step 2", "step 3", "step 4"]:
+            _runner_module._append_capped(parts, kept, line)
+
+        joined = _runner_module._joined_stdout(parts, kept)
+
+        self.assertIn(url_line, joined)
+        self.assertEqual(joined.splitlines()[-3:], ["step 2", "step 3", "step 4"])
+
+    def test_plain_lines_evicted_by_cap_are_dropped(self):
+        parts = deque(maxlen=2)
+        kept: list = []
+        for line in ["noise a", "noise b", "noise c"]:
+            _runner_module._append_capped(parts, kept, line)
+
+        self.assertEqual(_runner_module._joined_stdout(parts, kept), "noise b\nnoise c")
+
+    def test_pip_download_urls_are_not_retained(self):
+        """Arbitrary ``https://`` lines (e.g. pip downloads) must not fill the
+        retained-link budget and crowd out the real job URL."""
+        parts = deque(maxlen=2)
+        kept: list = []
+        job_line = "Job created: https://ws.cloud.databricks.com/jobs/123"
+        lines = [
+            job_line,
+            *(
+                f"Downloading https://files.pythonhosted.org/packages/{i}/x.whl"
+                for i in range(5)
+            ),
+            "done",
+        ]
+        for line in lines:
+            _runner_module._append_capped(parts, kept, line)
+
+        joined = _runner_module._joined_stdout(parts, kept)
+        self.assertIn(job_line, joined)
+        # Pip download URLs may still appear in the capped tail, but they
+        # must not consume retained-link slots that keep the job URL alive.
+        self.assertEqual(kept, [job_line])
+        self.assertTrue(
+            all("files.pythonhosted.org" not in line for line in kept)
+        )
+
+    def test_all_supported_job_and_pipeline_markers_are_retained(self):
+        marker_lines = (
+            "https://ws.cloud.databricks.com/jobs/123",
+            "https://ws.cloud.databricks.com/pipelines/abc",
+            "https://ws.cloud.databricks.com/?o=1#job/123/run/456",
+            "https://ws.cloud.databricks.com/?o=1#pipeline/abc",
+            "job_id=123",
+            "pipeline=123",
+            "pipeline_id=12345678-1234-1234-1234-123456789abc",
+        )
+        for marker_line in marker_lines:
+            with self.subTest(line=marker_line):
+                parts = deque(maxlen=1)
+                kept: list = []
+                _runner_module._append_capped(parts, kept, marker_line)
+                _runner_module._append_capped(parts, kept, "later output")
+                self.assertEqual(kept, [marker_line])
 
 
 if __name__ == "__main__":  # pragma: no cover

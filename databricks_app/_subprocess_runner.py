@@ -29,6 +29,23 @@ import _jobs as _jobs_module  # noqa: E402 \u2014 absolute import; databricks_ap
 logger = logging.getLogger(__name__)
 
 
+def _append_capped(parts: deque, retained_links: list, line: str) -> None:
+    """Append ``line`` to the capped tail, keeping any link line that is evicted.
+
+    A command can print its job URL early and then emit more than the cap; the
+    tail alone would then drop the only line that identifies the resource.
+    """
+    if len(parts) == parts.maxlen and _jobs_module._LINK_LINE_RE.search(parts[0]):
+        if len(retained_links) < _jobs_module._MAX_RETAINED_LINK_LINES:
+            retained_links.append(parts[0])
+    parts.append(line)
+
+
+def _joined_stdout(parts: deque, retained_links: list) -> str:
+    """Retained link lines first (oldest), then the capped tail."""
+    return '\n'.join([*retained_links, *parts])
+
+
 def _process_group_exists(process_group_id: int) -> bool:
     """Return whether a POSIX process group still has live members."""
     try:
@@ -138,6 +155,7 @@ def _run_command_in_background(
         proc: subprocess.Popen | None = None
         timed_out = False
         stdout_parts = deque(maxlen=_jobs_module._MAX_LOG_LINES)
+        stdout_links: list = []
         stderr_parts = deque(maxlen=_jobs_module._MAX_LOG_LINES)
         try:
             _env = {**(env or os.environ), 'PYTHONUNBUFFERED': '1'}
@@ -191,7 +209,7 @@ def _run_command_in_background(
                         line,
                     )
                     if stream == 'stdout':
-                        stdout_parts.append(line)
+                        _append_capped(stdout_parts, stdout_links, line)
                     else:
                         stderr_parts.append(line)
             except _queue_module.Empty:
@@ -237,7 +255,7 @@ def _run_command_in_background(
                     )
             _jobs_module._update_job(
                 token,
-                stdout='\n'.join(stdout_parts),
+                stdout=_joined_stdout(stdout_parts, stdout_links),
                 stderr='\n'.join(stderr_parts),
                 returncode=proc.returncode,
             )
@@ -253,7 +271,7 @@ def _run_command_in_background(
             # enough to set them).
             values = {'returncode': -1}
             if not job.get('stdout'):
-                values['stdout'] = '\n'.join(stdout_parts)
+                values['stdout'] = _joined_stdout(stdout_parts, stdout_links)
             if not job.get('stderr'):
                 values['stderr'] = '\n'.join(stderr_parts)
             if not job.get('error'):

@@ -874,6 +874,27 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
         mock_dlt.expect_all_or_drop.assert_called_once_with(expectations)
         self.assertEqual(main_call.args[0], pipeline.write_to_delta)
 
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_empty_expect_with_quarantine_still_registers_main_table(self, mock_dlt):
+        """``{"expect": {}, "expect_or_quarantine": {...}}`` must still declare
+        the main table next to the quarantine table (PR #513 review)."""
+        expectations = {"customer_id_missing": "customer_id IS NULL"}
+        spec_map = copy.deepcopy(self.bronze_dataflow_spec_map)
+        spec_map["dataQualityExpectations"] = json.dumps(
+            {"expect": {}, "expect_or_quarantine": expectations}
+        )
+        spec = BronzeDataflowSpec(**spec_map)
+        pipeline = DataflowPipeline(self.spark, spec, "customer_inputview")
+        mock_dlt.table.side_effect = lambda reader, **kwargs: reader
+        mock_dlt.expect_all_or_drop.side_effect = lambda rules: lambda reader: reader
+
+        pipeline.write_layer_with_dqe()
+
+        self.assertEqual(mock_dlt.table.call_count, 2)
+        main_call, quarantine_call = mock_dlt.table.call_args_list
+        self.assertEqual(main_call.kwargs["name"], "bronze.customer")
+        self.assertEqual(quarantine_call.kwargs["name"], "bronze.customer_dqe")
+
     @patch.object(DataflowPipeline, 'get_silver_schema', new_callable=MagicMock)
     @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
     @patch.object(DataflowPipeline, "create_streaming_table", new_callable=MagicMock)
@@ -2874,6 +2895,21 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
 
         pipeline, spec = self._build_dqe_pipeline(
             {"expect_all_or_fail": {"valid_id": "id IS NOT NULL"}}
+        )
+        pipeline.write_layer_with_dqe()
+        self._assert_main_table_row_filter(mock_dlt, spec, self.ROW_FILTER_REGION)
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_write_layer_with_dqe_empty_expect_still_declares_main_table(self, mock_dlt):
+        """An empty ``expect`` dict must not skip the main table declaration
+        or raise UnboundLocalError when an expect_or_fail family is present."""
+        mock_dlt.expect_all = MagicMock(return_value=lambda func: func)
+        mock_dlt.expect_all_or_drop = MagicMock(return_value=lambda func: func)
+        mock_dlt.expect_all_or_fail = MagicMock(return_value=lambda func: func)
+        mock_dlt.table = MagicMock(return_value=lambda func: func)
+
+        pipeline, spec = self._build_dqe_pipeline(
+            {"expect": {}, "expect_or_fail": {"valid_id": "id IS NOT NULL"}}
         )
         pipeline.write_layer_with_dqe()
         self._assert_main_table_row_filter(mock_dlt, spec, self.ROW_FILTER_REGION)

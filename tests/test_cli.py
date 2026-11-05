@@ -2391,6 +2391,29 @@ class CliCommandWiringTests(unittest.TestCase):
             self.assertIn(cmd, mapping, f"{cmd!r} missing from cli.MAPPING")
             self.assertIn(cmd, labs_yml_cmds, f"{cmd!r} missing from labs.yml")
 
+    def test_bundle_commands_declare_profile_flag(self):
+        """The command-level flag must reach the Python JSON payload.
+
+        Relying only on the Labs CLI global flag leaves duplicate profiles for
+        one host ambiguous when ``WorkspaceClient`` initializes.
+        """
+        commands = {
+            entry["name"]: entry
+            for entry in self._labs_yml["commands"]
+        }
+        for name in (
+            "bundle-init",
+            "bundle-prepare-wheel",
+            "bundle-validate",
+            "bundle-add-flow",
+            "bundle-add-pipeline",
+        ):
+            flags = {
+                flag["name"]
+                for flag in commands[name].get("flags", [])
+            }
+            self.assertIn("profile", flags, f"{name} drops --profile")
+
     def test_main_dispatches_bundle_command_through_mapping(self):
         """Functional smoke test: the `main()` dispatcher actually finds
         and calls the wired bundle handler -- the exact code path that
@@ -2999,11 +3022,16 @@ class BundleInitQuickstartFlagTests(unittest.TestCase):
             fake_run.return_value = 0
             cli_bundle_init(
                 sdp_meta,
-                flags={"quickstart": "true", "output-dir": tmp},
+                flags={
+                    "quickstart": "true",
+                    "output-dir": tmp,
+                    "profile": "fevm",
+                },
             )
             self.assertEqual(fake_run.call_count, 1)
             cmd = fake_run.call_args[0][0]
             self.assertEqual(cmd.output_dir, tmp)
+            self.assertEqual(cmd.profile, "fevm")
             self.assertIsNotNone(cmd.config_file)
             cfg_path = cmd.config_file
             self.assertTrue(cfg_path.endswith(".json"))
@@ -3043,6 +3071,21 @@ class BundleInitQuickstartFlagTests(unittest.TestCase):
             cli_bundle_init(sdp_meta, flags={"output-dir": "/cli/wins"})
             cmd = fake_run.call_args[0][0]
             self.assertEqual(cmd.output_dir, "/cli/wins")
+
+    def test_interactive_profile_and_output_dir_alias_are_forwarded(self):
+        from databricks.labs.sdp_meta.cli import bundle_init as cli_bundle_init
+
+        sdp_meta = MagicMock()
+        sdp_meta._wsi._question.return_value = "/interactive/answer"
+        with self._patched_run() as fake_run:
+            fake_run.return_value = 0
+            cli_bundle_init(
+                sdp_meta,
+                flags={"output_dir": "/alias/wins", "profile": "fevm"},
+            )
+            cmd = fake_run.call_args[0][0]
+            self.assertEqual(cmd.output_dir, "/alias/wins")
+            self.assertEqual(cmd.profile, "fevm")
 
     def test_bare_quickstart_recovers_swallowed_output_dir(self):
         """Regression: the labs string-flag parser lets a bare `--quickstart`
