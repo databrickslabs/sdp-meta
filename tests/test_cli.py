@@ -3072,6 +3072,21 @@ class BundleInitQuickstartFlagTests(unittest.TestCase):
             cmd = fake_run.call_args[0][0]
             self.assertEqual(cmd.output_dir, "/cli/wins")
 
+    def test_interactive_profile_and_output_dir_alias_are_forwarded(self):
+        from databricks.labs.sdp_meta.cli import bundle_init as cli_bundle_init
+
+        sdp_meta = MagicMock()
+        sdp_meta._wsi._question.return_value = "/interactive/answer"
+        with self._patched_run() as fake_run:
+            fake_run.return_value = 0
+            cli_bundle_init(
+                sdp_meta,
+                flags={"output_dir": "/alias/wins", "profile": "fevm"},
+            )
+            cmd = fake_run.call_args[0][0]
+            self.assertEqual(cmd.output_dir, "/alias/wins")
+            self.assertEqual(cmd.profile, "fevm")
+
     def test_bare_quickstart_recovers_swallowed_output_dir(self):
         """Regression: the labs string-flag parser lets a bare `--quickstart`
         eat the next token, arriving as

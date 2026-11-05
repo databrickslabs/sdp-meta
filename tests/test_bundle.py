@@ -4511,6 +4511,28 @@ class BundleAddFlowTests(unittest.TestCase):
                     before,
                 )
 
+    def test_accepts_empty_pipeline_resource_documents(self):
+        empty_documents = (
+            "",
+            "{}\n",
+            "resources: {}\n",
+            "resources:\n  pipelines: {}\n",
+        )
+        for document in empty_documents:
+            with self.subTest(document=document), _tempdir() as tmp:
+                self._make_bundle(tmp, seed_flows=[])
+                (tmp / "resources" / "sdp_meta_pipelines.yml").write_text(
+                    document
+                )
+                rc = bundle_add_flow(BundleAddFlowCommand(
+                    bundle_dir=str(tmp),
+                    flows=[FlowSpec(
+                        source_format="cloudFiles",
+                        bronze_table="orders",
+                    )],
+                ))
+                self.assertEqual(rc, 0)
+
     def test_rejects_non_string_pipeline_group_without_traceback(self):
         for malformed_group in (["G1"], {"name": "G1"}):
             with self.subTest(group=malformed_group), _tempdir() as tmp:
@@ -4538,6 +4560,38 @@ class BundleAddFlowTests(unittest.TestCase):
                 self.assertEqual(rc, 2)
                 self.assertIn("ERROR:", output.getvalue())
                 self.assertIn("must be a string", output.getvalue())
+
+    def test_rejects_pipeline_group_variable_resolving_to_non_string(self):
+        with _tempdir() as tmp:
+            self._make_bundle(tmp, seed_flows=[])
+            variables_path = tmp / "resources" / "variables.yml"
+            variables_doc = yaml.safe_load(variables_path.read_text())
+            variables_doc["variables"]["bad_group"] = {
+                "default": ["G1"],
+            }
+            variables_path.write_text(yaml.safe_dump(variables_doc))
+            self._write_pipelines_yml(tmp, {
+                "bronze": {
+                    "configuration": {
+                        "layer": "bronze",
+                        "bronze.group": "${var.bad_group}",
+                    },
+                },
+            })
+            output = StringIO()
+            rc = bundle_add_flow(
+                BundleAddFlowCommand(
+                    bundle_dir=str(tmp),
+                    flows=[FlowSpec(
+                        source_format="cloudFiles",
+                        bronze_table="orders",
+                        data_flow_group="G1",
+                    )],
+                ),
+                output=output,
+            )
+            self.assertEqual(rc, 2)
+            self.assertIn("must resolve to a string", output.getvalue())
 
     def test_pipeline_resources_are_loaded_once_for_batch(self):
         with _tempdir() as tmp:
