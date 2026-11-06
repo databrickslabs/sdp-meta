@@ -77,16 +77,16 @@ class bdist_wheel_with_pth_file(_bdist_wheel):
 
 setup(
     name="dlt-meta",
-    version="0.1.0",
-    # Match the primary package's Python floor and ceiling: pyspark
-    # 3.5.5 (a transitive runtime dep) is incompatible with Python
-    # 3.13's pickle changes, so cap at <3.13. Re-evaluate when pyspark
-    # ships a 3.13-compatible release.
-    python_requires=">=3.8, <3.13",
+    version="0.1.1",
+    # Match the primary package's Python bounds: databricks-sdk>=0.138.0
+    # requires Python 3.10+, while pyspark 3.5.5 is incompatible with Python
+    # 3.13's pickle changes. Re-evaluate the ceiling when pyspark supports
+    # Python 3.13.
+    python_requires=">=3.10, <3.13",
     install_requires=[
         # Keep this redirect on the release series that provides the legacy
         # dlt_meta and src.* compatibility surfaces.
-        "databricks-labs-sdp-meta>=0.1.0,<0.2.0",
+        "databricks-labs-sdp-meta>=0.1.1,<0.2.0",
     ],
     author="Ravi Gawai",
     author_email="databrickslabs@databricks.com",
@@ -151,14 +151,19 @@ Source: https://github.com/databrickslabs/sdp-meta
     # installed. Maintainers running editable installs should
     # explicitly ``import dlt_meta`` in their notebooks.
     cmdclass={"bdist_wheel": bdist_wheel_with_pth_file},
-    entry_points={"group_1": "run=dlt_meta:main"},
+    # Preserve the Python wheel task contract published by dlt-meta v0.0.10:
+    # Databricks invokes ``group_1:run`` with onboarding parameters in
+    # ``sys.argv``. ``dlt_meta.main`` is the Labs CLI JSON dispatcher and
+    # requires a positional ``raw`` argument, so it is not compatible with
+    # that contract. Forward to the canonical zero-argument wheel entry point.
+    entry_points={
+        "group_1": "run=databricks.labs.sdp_meta.__main__:main"
+    },
     # Must stay identical to the primary package's version classifiers so both
     # advertise the same interpreters; tests/test_packaging_metadata.py enforces it.
     classifiers=[
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3 :: Only",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",

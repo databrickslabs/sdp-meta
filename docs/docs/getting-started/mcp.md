@@ -154,6 +154,7 @@ your shell environment:
 | `sdp_meta_bundle_init` | Scaffold a new SDP-META DAB. Pass `quickstart=true` for developer defaults. |
 | `sdp_meta_bundle_validate` | Run `databricks bundle validate` plus SDP-META checks against a scaffolded bundle. |
 | `sdp_meta_bundle_add_flow` | Append one or more flow entries to a bundle's onboarding file. |
+| `sdp_meta_bundle_add_pipeline` | Add and wire an independently configured pipeline into a bundle. |
 | `sdp_meta_list_templates` | List the names of every packaged onboarding, DQE, and silver-transformation template. |
 | `sdp_meta_get_onboarding_template` | Return the raw text of a packaged template by name. |
 
@@ -196,6 +197,20 @@ Preview adding a flow without modifying the bundle:
       "bronze_table": "customers_bronze"
     }
   ]
+}
+```
+
+Preview adding an independently configured pipeline:
+
+```json
+{
+  "bundle_dir": "demo/my_sdp_meta_pipeline",
+  "dry_run": true,
+  "pipeline": {
+    "name": "customers_bronze",
+    "layer": "bronze",
+    "dataflow_group": "customers"
+  }
 }
 ```
 

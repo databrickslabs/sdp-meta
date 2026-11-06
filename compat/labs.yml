@@ -6,7 +6,7 @@ description: "[DEPRECATED] Metadata-driven framework - Please migrate to 'databr
 install:
   script: install.py
 entrypoint: entrypoint.py
-min_python: 3.8
+min_python: 3.10
 commands:
   - name: onboard
     description: "[DEPRECATED] Please use 'databricks labs sdp-meta onboard' instead"

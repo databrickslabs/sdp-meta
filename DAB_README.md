@@ -53,14 +53,16 @@ databricks bundle run pipelines  --target dev
 | `databricks labs sdp-meta bundle-prepare-wheel` | Builds the local sdp-meta wheel and uploads it to a UC volume. Prints the resulting `/Volumes/...` path so you can paste it into `resources/variables.yml` as the `sdp_meta_dependency` default. |
 | `databricks labs sdp-meta bundle-validate` | Runs `databricks bundle validate` plus sdp-meta-specific static checks. |
 | `databricks labs sdp-meta bundle-add-flow` | Appends one or more flow entries to the bundle's onboarding file. Two modes: single (interactive prompts per source format) and CSV (batch). Auto-increments `data_flow_id`, refuses to write on collisions, preserves YAML/JSON. |
+| `databricks labs sdp-meta bundle-add-pipeline` | Adds an independently configured pipeline topology and wires its task(s) into the bundle's `pipelines` job. |
 
 `bundle-validate` catches common authoring mistakes that the upstream `databricks bundle validate` doesn't:
 
 - onboarding file referenced by `variables.yml` is missing
 - onboarding file is not a YAML/JSON list of flow dicts
-- `dataflow_group` variable is not used by any flow in the onboarding file
-- `layer` variable doesn't match the pipelines actually declared
-- `pipeline_mode=combined` bundle has split pipelines (or vice versa)
+- a pipeline's `bronze.group` / `silver.group` is not used by any onboarding flow
+- a pipeline is missing layer-specific dataflowspec table configuration
+- a pipeline is missing or duplicated in the `pipelines` job
+- a split silver task does not depend on a bronze task for the same group
 - `<your-...>` placeholders left in `conf/onboarding.{yml,json}` (eventhub keys, kafka brokers, etc.)
 - `<your-...>` placeholders left in `databricks.yml` itself — most commonly an uncommented `run_as.service_principal_name` block that still says `<your-prod-service-principal-application-id>`. (Comments are stripped at YAML parse time, so the shipped commented block is silent until you uncomment it.)
 
@@ -72,7 +74,7 @@ databricks bundle run pipelines  --target dev
 databricks labs sdp-meta bundle-init --quickstart
 cd my_sdp_meta_pipeline
 # point sdp_meta_dependency at a real PyPI coord OR a UC volume wheel:
-sed -i.bak 's/__SET_ME__/databricks-labs-sdp-meta==0.1.0/' resources/variables.yml
+sed -i.bak 's/__SET_ME__/databricks-labs-sdp-meta==0.1.1/' resources/variables.yml
 databricks labs sdp-meta bundle-validate
 databricks bundle deploy --target dev
 ```
@@ -94,7 +96,7 @@ Listed in the order the template asks for them.
 | 9 | `onboarding_file_format` | `yaml` | `yaml` or `json` — chosen format flows into the seeded onboarding, silver, and DQE files. |
 | 10 | `dataflow_group` | `my_group` | Ties flows in the onboarding file to the pipeline's `*.group` configuration. |
 | 11 | `wheel_source` | `pypi` | `pypi` or `volume_path`. Picks the install style; `bundle-validate` enforces that `sdp_meta_dependency` matches. |
-| 12 | `sdp_meta_dependency` | `__SET_ME__` | Concrete install spec. PyPI coordinate (e.g. `databricks-labs-sdp-meta==0.1.0`) or `/Volumes/...` wheel path. The `__SET_ME__` sentinel is rejected by both `bundle-validate` and the runner notebook so you can't accidentally deploy with a placeholder. |
+| 12 | `sdp_meta_dependency` | `__SET_ME__` | Concrete install spec. PyPI coordinate (e.g. `databricks-labs-sdp-meta==0.1.1`) or `/Volumes/...` wheel path. The `__SET_ME__` sentinel is rejected by both `bundle-validate` and the runner notebook so you can't accidentally deploy with a placeholder. |
 | 13 | `author` | `sdp-meta-user` | Written to the `import_author` column on dataflowspec rows. |
 
 ## Choosing pipeline_mode (when `layer=bronze_silver`)
@@ -114,7 +116,7 @@ Once `databricks-labs-sdp-meta` is published, this is the steady-state choice. A
 
 ```
 Where sdp-meta is installed from. ... [pypi]:        pypi
-Concrete value the bundle pins for installs. ... [__SET_ME__]:    databricks-labs-sdp-meta==0.1.0
+Concrete value the bundle pins for installs. ... [__SET_ME__]:    databricks-labs-sdp-meta==0.1.1
 ```
 
 If you keep `__SET_ME__`, bundle-validate will fail (good), so you can't accidentally deploy a placeholder. You can also paste the sentinel now and edit `resources/variables.yml` later.
@@ -131,11 +133,11 @@ This is the right choice today, while sdp-meta isn't on PyPI. Two-step flow:
 # 2. Build + upload the wheel; reuse the same UC catalog/schema you picked above:
 cd <bundle_name>
 databricks labs sdp-meta bundle-prepare-wheel
-#   → prints: /Volumes/<cat>/<sch>/<vol>/databricks_labs_sdp_meta-0.1.0-py3-none-any.whl
+#   → prints: /Volumes/<cat>/<sch>/<vol>/databricks_labs_sdp_meta-0.1.1-py3-none-any.whl
 
 # 3. Paste that into resources/variables.yml:
 #       sdp_meta_dependency:
-#         default: /Volumes/<cat>/<sch>/<vol>/databricks_labs_sdp_meta-0.1.0-py3-none-any.whl
+#         default: /Volumes/<cat>/<sch>/<vol>/databricks_labs_sdp_meta-0.1.1-py3-none-any.whl
 
 # 4. Validate
 databricks labs sdp-meta bundle-validate
@@ -199,7 +201,10 @@ After appending, run:
 databricks labs sdp-meta bundle-validate
 ```
 
-The sanity checks confirm that the new `data_flow_group` values still line up with the bundle's `dataflow_group` variable, the file is parseable, and the layer/pipeline_mode topology is consistent.
+The sanity checks confirm that each pipeline's configured group exists in the
+onboarding file, every layer has the required dataflowspec-table settings, and
+the `pipelines` job references each pipeline exactly once with valid split
+dependencies.
 
 ## Generating flows programmatically (100s of tables)
 

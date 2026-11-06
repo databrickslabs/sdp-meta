@@ -23,5 +23,6 @@ pyspark==3.5.5
 # Integration-test CLI (IT_REQUIREMENTS in setup.py)
 typer[all]==0.27.2
 
-# MCP server extra (MCP_REQUIREMENTS in setup.py)
-mcp>=2.0.0,<3.0
+# MCP SDK used by development and CI. The published `mcp` extra keeps its
+# broader >=2.0.0 compatibility floor in setup.py.
+mcp>=2.2.0,<3.0

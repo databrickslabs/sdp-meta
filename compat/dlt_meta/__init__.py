@@ -15,13 +15,17 @@ This module wires three independent compatibility surfaces:
    are registered in :data:`sys.modules` so the legacy import path
    resolves without a `ModuleNotFoundError`. See
    :func:`_register_src_aliases`.
-3. **Actionable runtime errors** when the underlying SDP runtime
-   (``pyspark.pipelines``) is unavailable: instead of silently swallowing
-   the import failure (which leaves callers staring at confusing
-   ``ImportError: cannot import name 'DataflowPipeline'`` messages), each
-   submodule that fails on the optional-runtime predicate is replaced by
-   a stub that raises a clear ``Lakeflow SDP runtime`` error on any
-   attribute access.
+3. **Actionable runtime errors** when the underlying import fails:
+   instead of silently swallowing the failure (which leaves callers
+   staring at confusing ``ImportError: cannot import name
+   'DataflowPipeline'`` messages) or re-raising it (which the
+   ``dlt_meta.pth`` startup hook would turn into a site.py traceback
+   printed on every interpreter launch), each failing submodule is
+   replaced by a stub that raises a clear error on attribute access —
+   a ``Lakeflow SDP runtime`` message when
+   :func:`_optional_runtime_import_error` recognizes the failure, a
+   generic missing-dependency message otherwise. Import of
+   ``dlt_meta`` itself therefore never raises.
 
 Removal timeline: every alias here is scheduled for removal in v0.2.0.
 """
@@ -85,8 +89,13 @@ def _optional_runtime_import_error(exc: BaseException) -> bool:
     ``pyspark.pipelines`` package:
 
     - **No pyspark at all** → ``ModuleNotFoundError`` with
-      ``exc.name == 'pyspark.pipelines'`` (or ``'pipelines'`` on some
-      runtimes).
+      ``exc.name == 'pyspark'``. CPython reports the *top-level* package
+      it failed to find, so ``from pyspark import pipelines`` and
+      ``from pyspark.sql import DataFrame`` both surface as
+      ``name='pyspark'`` on a machine without pyspark (a laptop or CI
+      box that ``pip install dlt-meta``-ed the shim). ``'pyspark.pipelines'``
+      / ``'pipelines'`` are also accepted for runtimes where the parent
+      package resolves but the submodule lookup fails.
     - **pyspark exists, no Lakeflow SDP** → bare ``ImportError`` with
       message ``cannot import name 'pipelines' from 'pyspark'`` and
       ``name`` unset.
@@ -109,9 +118,15 @@ def _optional_runtime_import_error(exc: BaseException) -> bool:
       of which specific ``Exception`` subclass got raised.
 
     All three are treated as recoverable (register a stub that raises
-    a clear error on access) and everything else is re-raised.
+    a clear error on access). Callers use the predicate only to pick
+    the stub's *message*: SDP-runtime-missing when it returns ``True``,
+    a generic compat-import-failure otherwise. Nothing is re-raised at
+    import time — the ``.pth`` runs ``import dlt_meta`` at interpreter
+    startup, and any exception escaping it is printed by ``site.py``
+    on every ``python3`` launch.
     """
     if isinstance(exc, ModuleNotFoundError) and exc.name in {
+        "pyspark",
         "pyspark.pipelines",
         "pipelines",
     }:
@@ -140,7 +155,36 @@ def _optional_runtime_import_error(exc: BaseException) -> bool:
     return False
 
 
-def _make_stub_module(qualified_name: str, original_error: str) -> types.ModuleType:
+def _stub_error_message(qualified_name: str, original_error: str,
+                        runtime_missing: bool) -> str:
+    """Compose the actionable error a stub raises on attribute access.
+
+    ``runtime_missing=True`` is the Lakeflow-SDP-missing case (the
+    predicate matched); ``False`` covers every other import failure —
+    e.g. a stripped image missing ``yaml`` or ``databricks-sdk``. Both
+    get a stub rather than an import-time raise so the ``.pth`` startup
+    hook can never print a traceback (site.py prints any exception a
+    ``.pth`` line raises on EVERY interpreter launch); real problems
+    still fail loudly, just at first use instead of at startup.
+    """
+    if runtime_missing:
+        return (
+            f"{qualified_name} requires the Lakeflow SDP runtime "
+            f"(pyspark.pipelines) which is not installed. Run on a "
+            f"Databricks Runtime that ships Lakeflow SDP, or use the "
+            f"v0.0.10 dlt-meta wheel if you must stay on legacy DLT. "
+            f"Original error: {original_error}"
+        )
+    return (
+        f"{qualified_name} is unavailable because importing "
+        f"databricks.labs.sdp_meta failed in this Python environment. "
+        f"Install the missing dependency and retry. "
+        f"Original error: {original_error}"
+    )
+
+
+def _make_stub_module(qualified_name: str, original_error: str,
+                      runtime_missing: bool = True) -> types.ModuleType:
     """Build a sentinel module that raises a clear error on any access.
 
     The error message tells the customer exactly what's wrong (Lakeflow
@@ -179,14 +223,12 @@ def _make_stub_module(qualified_name: str, original_error: str) -> types.ModuleT
     # Self-describing sentinel: shows up if anything logs the path.
     mod.__file__ = f"<sdp-meta compat stub for {qualified_name}>"
 
+    _message = _stub_error_message(
+        qualified_name, original_error, runtime_missing
+    )
+
     def _raise() -> None:
-        raise ImportError(
-            f"{qualified_name} requires the Lakeflow SDP runtime "
-            f"(pyspark.pipelines) which is not installed. Run on a "
-            f"Databricks Runtime that ships Lakeflow SDP, or use the "
-            f"v0.0.10 dlt-meta wheel if you must stay on legacy DLT. "
-            f"Original error: {original_error}"
-        )
+        raise ImportError(_message)
 
     def __getattr__(name: str):  # noqa: N807 (module-level dunder)
         # PEP 562: raising ``AttributeError`` (not ``ImportError``)
@@ -339,19 +381,20 @@ def _flat_reexport_or_stub() -> None:
         # error formatter when raising ``PIPELINES_NOT_SUPPORTED`` on
         # a runtime that lacks ``dlt`` (see
         # :func:`_optional_runtime_import_error` for the full
-        # traceback shape). The predicate inspects the traceback
-        # chain to decide which exceptions are the legitimate
-        # Lakeflow-SDP-missing case; anything that doesn't match is
-        # re-raised so a real bug in our own modules still fails
-        # loudly at import time.
-        if not _optional_runtime_import_error(exc):
-            raise
-        # Bind a single descriptor that raises the actionable error on
-        # ANY public attribute access. Implemented via module
-        # ``__getattr__`` (PEP 562) -- set on this module's globals so
-        # ``from dlt_meta import DataflowPipeline`` raises with the
-        # SDP-runtime-missing message rather than the historical silent
-        # ``cannot import name 'DataflowPipeline' from 'dlt_meta'``.
+        # traceback shape).
+        #
+        # NOTHING is re-raised here. This module is imported by the
+        # ``dlt_meta.pth`` startup hook, and ``site.py`` prints any
+        # exception a ``.pth`` line raises on EVERY ``python3`` launch
+        # ("Error processing line 1 of dlt_meta.pth ... Remainder of
+        # file ignored"). Before this guard, a laptop without pyspark
+        # (``ModuleNotFoundError: name='pyspark'`` — a shape the
+        # predicate previously missed) got that traceback at every
+        # interpreter start, and an explicit ``import dlt_meta``
+        # failed outright. Instead, ALWAYS degrade to a module-level
+        # ``__getattr__`` stub; the predicate only chooses the message
+        # (SDP-runtime-missing vs. generic dependency failure), so
+        # real problems still fail loudly — at first use.
         #
         # Dunders raise ``AttributeError`` instead of ``ImportError``
         # for the same reason ``_make_stub_module`` does: tools like
@@ -360,16 +403,16 @@ def _flat_reexport_or_stub() -> None:
         # ``ImportError`` poisons their traceback formatter (which
         # itself probes dunders). See ``_make_stub_module`` for the
         # full rationale.
+        _runtime_missing = _optional_runtime_import_error(exc)
         _err_msg = str(exc)
 
         def __getattr__(name: str):  # noqa: N807
             if name.startswith("__") and name.endswith("__"):
                 raise AttributeError(name)
             raise ImportError(
-                f"dlt_meta.{name} requires the Lakeflow SDP runtime "
-                f"(pyspark.pipelines) which is not installed. Run on a "
-                f"Databricks Runtime that ships Lakeflow SDP. "
-                f"Original error: {_err_msg}"
+                _stub_error_message(
+                    f"dlt_meta.{name}", _err_msg, _runtime_missing
+                )
             )
 
         sys.modules[__name__].__getattr__ = __getattr__  # type: ignore[attr-defined]
@@ -392,7 +435,16 @@ def _register_src_aliases() -> None:
     # doesn't get clobbered (their import will have already populated
     # ``sys.modules['src']`` before this runs, and our ``setdefault``
     # is a no-op).
-    sys.modules.setdefault("src", sys.modules[__name__])
+    parent = sys.modules.setdefault("src", sys.modules[__name__])
+    if not _is_alias_parent(parent):
+        # A customer-owned ``src`` package won: registering ``src.<sub>``
+        # aliases now would shadow THEIR submodules in ``sys.modules``,
+        # and binding our stubs/proxies onto their package (or onto
+        # ``dlt_meta``, which ``import src.x`` never consults when the
+        # parent isn't us) would be wrong either way. Skip aliasing
+        # entirely — same effect as SDP_META_DISABLE_SRC_ALIAS=1 for
+        # the ``src.*`` surface.
+        return
 
     for sub in _SRC_SUBMODULES:
         alias = f"src.{sub}"
@@ -404,21 +456,76 @@ def _register_src_aliases() -> None:
             target = importlib.import_module(target_qualname)
         except Exception as exc:  # noqa: BLE001 (broad-except is intentional)
             # See ``_flat_reexport_or_stub`` for why we catch the
-            # broad ``Exception`` rather than just ``ImportError``:
-            # serverless DLT raises a TypeError (not an ImportError)
-            # out of ``pyspark.pipelines/__init__.py`` on certain
-            # runtimes that lack ``dlt`` but whose PySpark error
-            # formatter expects substitutions for the
-            # ``PIPELINES_NOT_SUPPORTED`` errorClass.
-            if not _optional_runtime_import_error(exc):
-                raise
-            sys.modules[alias] = _make_stub_module(alias, str(exc))
+            # broad ``Exception`` rather than just ``ImportError``
+            # (serverless DLT raises a TypeError out of
+            # ``pyspark.pipelines/__init__.py`` on certain runtimes)
+            # and why NOTHING is re-raised: this runs from the
+            # ``.pth`` at interpreter startup, where a raise becomes
+            # site.py noise on every ``python3`` launch. The predicate
+            # only picks the stub's message.
+            stub = _make_stub_module(
+                alias, str(exc),
+                runtime_missing=_optional_runtime_import_error(exc),
+            )
+            sys.modules[alias] = stub
+            _bind_on_parent(sub, stub)
             continue
 
         # Wrap in a lazy proxy so DeprecationWarning fires at the
         # customer's import line (stacklevel resolved per attribute
         # access), not on the eager registration walk.
-        sys.modules[alias] = _LazyAliasModule(alias, target)
+        proxy = _LazyAliasModule(alias, target)
+        sys.modules[alias] = proxy
+        _bind_on_parent(sub, proxy)
+
+
+def _is_alias_parent(parent: types.ModuleType) -> bool:
+    """Is *parent* a ``src`` object the shim is allowed to alias into?
+
+    Two legitimate parents exist:
+
+    - this package itself (``sys.modules.setdefault`` installed us as
+      ``src`` — the ``.pth`` / plain ``import dlt_meta`` path), or
+    - the **bundled** ``compat/src`` package shipped in the primary
+      wheel, which is mid-import when it runs ``import dlt_meta`` for
+      the registration side effects (the serverless ``%pip install``
+      path, where ``.pth`` scanning never re-fires). It identifies
+      itself with ``__sdp_meta_compat__ = True``, set before the
+      import so it is visible here.
+
+    Anything else is a customer-owned ``src`` package and must be left
+    completely alone. ``parent.__dict__`` is probed directly (not
+    ``getattr``) so a customer package with a module-level
+    ``__getattr__`` is never tickled.
+    """
+    return parent is sys.modules[__name__] or bool(
+        parent.__dict__.get("__sdp_meta_compat__", False)
+    )
+
+
+def _bind_on_parent(sub: str, module: types.ModuleType) -> None:
+    """Mirror what ``import a.b`` does: set ``b`` on the ``src`` parent.
+
+    Only ever called when :func:`_register_src_aliases` established via
+    :func:`_is_alias_parent` that ``sys.modules['src']`` is a parent we
+    own (this package, or the bundled compat ``src`` package — a
+    customer-owned ``src`` short-circuits the registration walk before
+    any binding). Without this, ``import src.dataflow_pipeline``
+    succeeds (sys.modules hit) but the subsequent
+    ``src.dataflow_pipeline`` attribute access falls through to the
+    parent's ``__getattr__`` — which, when the flat re-exports failed,
+    raises the flat-stub message instead of resolving to the registered
+    submodule stub/proxy. Dunder submodules (``__about__``,
+    ``__main__``) are skipped so they don't shadow real package
+    dunders.
+    """
+    if sub.startswith("__"):
+        return
+    parent = sys.modules.get("src")
+    if parent is None or not _is_alias_parent(parent):  # defensive
+        return
+    if sub not in parent.__dict__:
+        parent.__dict__[sub] = module
 
 
 # ---------------------------------------------------------------------------

@@ -1,9 +1,11 @@
 # Databricks notebook source
 import pandas as pd
+import json
 
 run_id = dbutils.widgets.get("run_id")
 uc_enabled = dbutils.widgets.get("uc_enabled").strip().lower() == "true"
 uc_catalog_name = dbutils.widgets.get("uc_catalog_name")
+sdp_meta_schema = dbutils.widgets.get("sdp_meta_schema")
 bronze_schema = dbutils.widgets.get("bronze_schema")
 silver_schema = dbutils.widgets.get("silver_schema")
 output_file_path = dbutils.widgets.get("output_file_path")
@@ -43,6 +45,191 @@ for table, counts in tables.items():
         log_list.append(f"Expected: {counts} Actual: {cnt}. Passed!")
     except AssertionError:
         log_list.append(f"Expected: {counts} Actual: {cnt}. Failed!")
+
+# Regression coverage for issue #496. Flow 192 has ONLY
+# expect_or_quarantine rules, so the pipeline must still declare both the
+# main target and its quarantine target. The quarantine output must contain
+# only rows selected by its configured predicate.
+quarantine_only_main = (
+    f"{uc_catalog_name}.{bronze_schema}.quarantine_only_customers"
+    if uc_enabled
+    else f"{bronze_schema}.quarantine_only_customers"
+)
+quarantine_only_bad = (
+    f"{uc_catalog_name}.{bronze_schema}.quarantine_only_customers_quarantine"
+    if uc_enabled
+    else f"{bronze_schema}.quarantine_only_customers_quarantine"
+)
+log_list.append("Validating quarantine-only DQE main/quarantine routing.")
+try:
+    main_stats = spark.sql(
+        f"""
+        SELECT COUNT(*) AS total_rows
+        FROM {quarantine_only_main}
+        """
+    ).collect()[0]
+    quarantine_stats = spark.sql(
+        f"""
+        SELECT COUNT(*) AS total_rows,
+               SUM(CASE WHEN _rescued_data IS NOT NULL
+                              OR id IS NULL
+                              OR operation IS NULL
+                        THEN 1 ELSE 0 END) AS quarantinable_rows
+        FROM {quarantine_only_bad}
+        """
+    ).collect()[0]
+    assert main_stats.total_rows > 0, "main table is empty"
+    assert quarantine_stats.total_rows > 0, "quarantine table is empty"
+    assert quarantine_stats.quarantinable_rows == quarantine_stats.total_rows, (
+        "quarantine table contains rows that did not match its rule"
+    )
+    log_list.append(
+        "Quarantine-only DQE declared both targets and populated the "
+        f"quarantine correctly (main={main_stats.total_rows}, "
+        f"quarantine={quarantine_stats.total_rows}). Passed!"
+    )
+except Exception as exc:
+    log_list.append(f"Quarantine-only DQE validation failed: {exc}. Failed!")
+
+# Backward-compatibility coverage for optional quarantine targets. Flow 190
+# carries non-empty quarantine rules but intentionally omits every quarantine
+# target field. Onboarding must retain the DQE and persist an empty target for
+# both layers rather than failing an existing customer configuration.
+log_list.append(
+    "Validating legacy quarantine rules without target metadata."
+)
+for layer in ("bronze", "silver"):
+    spec_table = (
+        f"{uc_catalog_name}.{sdp_meta_schema}."
+        f"{layer}_dataflowspec_cdc"
+    )
+    rows = spark.sql(
+        f"""
+        SELECT dataQualityExpectations, quarantineTargetDetails
+        FROM {spec_table}
+        WHERE dataFlowId = '190'
+          AND dataFlowGroup = 'QUARANTINE_COMPAT'
+        """
+    ).collect()
+    try:
+        assert len(rows) == 1
+        dqe = json.loads(rows[0].dataQualityExpectations)
+        assert dqe.get("expect_or_quarantine")
+        assert not rows[0].quarantineTargetDetails
+        log_list.append(
+            f"{layer.title()} compatibility DataflowSpec retained DQE "
+            "with an empty quarantine target. Passed!"
+        )
+    except (AssertionError, TypeError, ValueError) as exc:
+        log_list.append(
+            f"{layer.title()} compatibility DataflowSpec validation "
+            f"failed: {exc}. Failed!"
+        )
+
+# Exact optional-metadata scenario: flow 191 has DQE rules, but no
+# expect_or_quarantine block and no quarantine fields. Both layers must retain
+# the drop rules without synthesizing or requiring a quarantine target.
+log_list.append(
+    "Validating DQE without quarantine rules or target metadata."
+)
+for layer in ("bronze", "silver"):
+    spec_table = (
+        f"{uc_catalog_name}.{sdp_meta_schema}."
+        f"{layer}_dataflowspec_cdc"
+    )
+    rows = spark.sql(
+        f"""
+        SELECT dataQualityExpectations, quarantineTargetDetails
+        FROM {spec_table}
+        WHERE dataFlowId = '191'
+          AND dataFlowGroup = 'DQE_NO_QUARANTINE'
+        """
+    ).collect()
+    try:
+        assert len(rows) == 1
+        dqe = json.loads(rows[0].dataQualityExpectations)
+        assert dqe.get("expect_or_drop")
+        assert not dqe.get("expect_or_quarantine")
+        assert not rows[0].quarantineTargetDetails
+        log_list.append(
+            f"{layer.title()} DQE-only DataflowSpec retained drop "
+            "rules with an empty quarantine target. Passed!"
+        )
+    except (AssertionError, TypeError, ValueError) as exc:
+        log_list.append(
+            f"{layer.title()} DQE-only DataflowSpec validation "
+            f"failed: {exc}. Failed!"
+        )
+
+# Regression coverage for issue #444: source_metadata nested under a bronze
+# append flow must be serialized like top-level source metadata. Every
+# transaction row comes from either `transactions/` or `transactions_af/`, so
+# both selected metadata columns must be populated for the full table, and at
+# least one path must prove that append-flow rows were included.
+transactions_table = (
+    f"{uc_catalog_name}.{bronze_schema}.transactions"
+    if uc_enabled
+    else f"{bronze_schema}.transactions"
+)
+metadata_stats = spark.sql(
+    f"""
+    SELECT
+      COUNT(*) AS total_rows,
+      COUNT(input_file_name) AS named_rows,
+      COUNT(input_file_path) AS pathed_rows,
+      SUM(
+        CASE WHEN input_file_path LIKE '%/transactions_af/%'
+          THEN 1 ELSE 0 END
+      ) AS append_rows
+    FROM {transactions_table}
+    """
+).collect()[0]
+log_list.append(
+    "Validating source metadata for bronze transaction append-flow rows."
+)
+try:
+    assert metadata_stats.total_rows == metadata_stats.named_rows
+    assert metadata_stats.total_rows == metadata_stats.pathed_rows
+    assert metadata_stats.append_rows > 0
+    log_list.append(
+        f"All {metadata_stats.total_rows} rows have file metadata; "
+        f"{metadata_stats.append_rows} rows came from transactions_af. Passed!"
+    )
+except AssertionError:
+    log_list.append(
+        "Append-flow metadata validation failed: "
+        f"total={metadata_stats.total_rows}, "
+        f"named={metadata_stats.named_rows}, "
+        f"pathed={metadata_stats.pathed_rows}, "
+        f"append={metadata_stats.append_rows}. Failed!"
+    )
+
+# Regression coverage for issue #445. The bronze custom transform adds
+# processing_ts to the primary source and every append source feeding the same
+# target. Before the fix, append-flow rows reached this table with a null value.
+transform_stats = spark.sql(
+    f"""
+    SELECT
+      COUNT(*) AS total_rows,
+      COUNT(processing_ts) AS transformed_rows
+    FROM {transactions_table}
+    """
+).collect()[0]
+log_list.append(
+    "Validating custom transform output for bronze append-flow rows."
+)
+try:
+    assert transform_stats.total_rows == transform_stats.transformed_rows
+    log_list.append(
+        f"processing_ts populated for all {transform_stats.total_rows} "
+        "primary and append-flow rows. Passed!"
+    )
+except AssertionError:
+    log_list.append(
+        "Append-flow custom transform validation failed: "
+        f"total={transform_stats.total_rows}, "
+        f"transformed={transform_stats.transformed_rows}. Failed!"
+    )
 
 # Row filter wiring assertion (UC only). The cloudfiles customers flow declares
 # bronze_row_filter / silver_row_filter on `operation` referencing the UDF

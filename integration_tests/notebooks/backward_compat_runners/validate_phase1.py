@@ -16,10 +16,14 @@ run_id = dbutils.widgets.get("run_id")
 uc_catalog_name = dbutils.widgets.get("uc_catalog_name")
 bronze_schema = dbutils.widgets.get("bronze_schema")
 silver_schema = dbutils.widgets.get("silver_schema")
+sdp_meta_schema = dbutils.widgets.get("sdp_meta_schema")
 output_file_path = dbutils.widgets.get("output_file_path")
+source_ref = dbutils.widgets.get("source_ref")
 log_list = []
 
-log_list.append("Backward-compat Phase 1 (v0.0.10 wheel) validation starting.")
+log_list.append(
+    f"Backward-compat Phase 1 ({source_ref} wheel) validation starting."
+)
 
 # Expected row counts after Phase 1 (A1 initial + A2 incremental). These
 # match ``cloudfile_runners/validate.py`` exactly: same seed data, same
@@ -37,6 +41,8 @@ phase1_counts = {}
 for table, expected in EXPECTED_COUNTS.items():
     actual = spark.sql(f"SELECT count(*) AS cnt FROM {table}").collect()[0].cnt
     phase1_counts[table] = int(actual)
+    # Validation contract: run_backward_compat_tests.py scans persisted report
+    # cells for the exact "Failed!" marker. Keep this status wording unchanged.
     status = "Passed" if int(actual) == expected else "Failed"
     log_list.append(
         f"Phase1 count {table}: expected={expected} actual={actual}. {status}!"
@@ -50,5 +56,28 @@ uc_volume_path = dbutils.widgets.get("uc_volume_path").rstrip("/")
 phase1_counts_dump = f"{uc_volume_path}/tmp/backward_compat_phase1_counts_{run_id}.json"
 dbutils.fs.put(phase1_counts_dump, json.dumps(phase1_counts), overwrite=True)
 log_list.append(f"Phase1 counts persisted -> {phase1_counts_dump}")
+
+phase1_spec_audit = {}
+for layer in ("bronze", "silver"):
+    table = (
+        f"{uc_catalog_name}.{sdp_meta_schema}.{layer}_dataflowspec"
+    )
+    row = (
+        spark.read.table(table)
+        .where("dataFlowId = '100'")
+        .select("createDate", "createdBy")
+        .first()
+    )
+    phase1_spec_audit[layer] = {
+        "createDate": row.createDate.isoformat(),
+        "createdBy": row.createdBy,
+    }
+phase1_audit_dump = (
+    f"{uc_volume_path}/tmp/backward_compat_phase1_spec_audit_{run_id}.json"
+)
+dbutils.fs.put(
+    phase1_audit_dump, json.dumps(phase1_spec_audit), overwrite=True
+)
+log_list.append(f"Phase1 spec audit persisted -> {phase1_audit_dump}")
 
 pd.DataFrame(log_list).to_csv(output_file_path)

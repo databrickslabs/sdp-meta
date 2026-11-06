@@ -852,6 +852,49 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
             expected_quarantine_table = f"{q_cl_name}{q_db}.{q_table_name}"
             self.assertEqual(quarantine_kwargs["name"], expected_quarantine_table)
 
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_quarantine_only_dqe_registers_main_and_failed_rows_tables(self, mock_dlt):
+        """A quarantine-only DQE must declare both outputs (issue #496)."""
+        expectations = {"customer_id_missing": "customer_id IS NULL"}
+        spec_map = copy.deepcopy(self.bronze_dataflow_spec_map)
+        spec_map["dataQualityExpectations"] = json.dumps(
+            {"expect_or_quarantine": expectations}
+        )
+        spec = BronzeDataflowSpec(**spec_map)
+        pipeline = DataflowPipeline(self.spark, spec, "customer_inputview")
+        mock_dlt.table.side_effect = lambda reader, **kwargs: reader
+        mock_dlt.expect_all_or_drop.side_effect = lambda rules: lambda reader: reader
+
+        pipeline.write_layer_with_dqe()
+
+        self.assertEqual(mock_dlt.table.call_count, 2)
+        main_call, quarantine_call = mock_dlt.table.call_args_list
+        self.assertEqual(main_call.kwargs["name"], "bronze.customer")
+        self.assertEqual(quarantine_call.kwargs["name"], "bronze.customer_dqe")
+        mock_dlt.expect_all_or_drop.assert_called_once_with(expectations)
+        self.assertEqual(main_call.args[0], pipeline.write_to_delta)
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_empty_expect_with_quarantine_still_registers_main_table(self, mock_dlt):
+        """``{"expect": {}, "expect_or_quarantine": {...}}`` must still declare
+        the main table next to the quarantine table (PR #513 review)."""
+        expectations = {"customer_id_missing": "customer_id IS NULL"}
+        spec_map = copy.deepcopy(self.bronze_dataflow_spec_map)
+        spec_map["dataQualityExpectations"] = json.dumps(
+            {"expect": {}, "expect_or_quarantine": expectations}
+        )
+        spec = BronzeDataflowSpec(**spec_map)
+        pipeline = DataflowPipeline(self.spark, spec, "customer_inputview")
+        mock_dlt.table.side_effect = lambda reader, **kwargs: reader
+        mock_dlt.expect_all_or_drop.side_effect = lambda rules: lambda reader: reader
+
+        pipeline.write_layer_with_dqe()
+
+        self.assertEqual(mock_dlt.table.call_count, 2)
+        main_call, quarantine_call = mock_dlt.table.call_args_list
+        self.assertEqual(main_call.kwargs["name"], "bronze.customer")
+        self.assertEqual(quarantine_call.kwargs["name"], "bronze.customer_dqe")
+
     @patch.object(DataflowPipeline, 'get_silver_schema', new_callable=MagicMock)
     @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
     @patch.object(DataflowPipeline, "create_streaming_table", new_callable=MagicMock)
@@ -1197,6 +1240,46 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
         bronze_dataflowSpec_df.appendFlows = None
         with self.assertRaises(Exception):
             pipeline = DataflowPipeline(self.spark, bronze_dataflowSpec_df, view_name, None)
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_read_append_flows_applies_custom_transform(self, mock_dlt):
+        captured = {}
+        mock_dlt.temporary_view.side_effect = (
+            lambda view_factory, **kwargs: captured.setdefault(
+                kwargs["name"], view_factory
+            )
+        )
+        spec_map = copy.deepcopy(self.bronze_dataflow_spec_map)
+        spec_map["appendFlows"] = json.dumps([{
+            "name": "customers_append",
+            "create_streaming_table": False,
+            "source_format": "cloudFiles",
+            "source_details": {"path": "/tmp/customers_append"},
+        }])
+        spec = BronzeDataflowSpec(**spec_map)
+        transformed_df = MagicMock()
+        custom_transform = MagicMock(return_value=transformed_df)
+        pipeline = DataflowPipeline(
+            self.spark,
+            spec,
+            "customers_inputview",
+            custom_transform_func=custom_transform,
+        )
+        append_df = MagicMock()
+
+        def read_append_source():
+            return append_df
+
+        with patch(
+            "databricks.labs.sdp_meta.dataflow_pipeline.PipelineReaders"
+        ) as readers:
+            readers.return_value.read_dlt_cloud_files = read_append_source
+            pipeline.read_append_flows()
+
+        result = captured["customers_append_view"]()
+
+        custom_transform.assert_called_once_with(append_df, spec)
+        self.assertIs(result, transformed_df)
 
     def test_get_dq_expectations_with_expect_all(self):
         onboarding_params_map = copy.deepcopy(self.onboarding_bronze_silver_params_map)
@@ -1798,18 +1881,46 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
         self.assertTrue(pipeline.next_snapshot_and_version_from_source_view)
 
     def test_is_create_view_with_next_snapshot_and_version(self):
-        """Test is_create_view when next_snapshot_and_version is provided."""
+        """Test snapshot specs use the callback instead of creating a view."""
         def mock_next_snapshot():
             return {}
 
         bronze_spec_map = copy.deepcopy(DataflowPipelineTests.bronze_dataflow_spec_map)
+        bronze_spec_map["sourceFormat"] = "snapshot"
         bronze_dataflow_spec = BronzeDataflowSpec(**bronze_spec_map)
 
         pipeline = DataflowPipeline(self.spark, bronze_dataflow_spec, "test_view", None, None, mock_next_snapshot)
 
-        # Should return False when next_snapshot_and_version is provided
         result = pipeline.is_create_view()
         self.assertFalse(result)
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_snapshot_callback_does_not_skip_non_snapshot_view(self, mock_dp):
+        """Test a layer-level snapshot callback does not suppress other input views."""
+        next_snapshot_and_version = MagicMock()
+        snapshot_spec_map = copy.deepcopy(DataflowPipelineTests.bronze_dataflow_spec_map)
+        snapshot_spec_map["sourceFormat"] = "snapshot"
+        snapshot_spec = BronzeDataflowSpec(**snapshot_spec_map)
+
+        cloudfiles_spec_map = copy.deepcopy(DataflowPipelineTests.bronze_dataflow_spec_map)
+        cloudfiles_spec_map["sourceFormat"] = "cloudFiles"
+        cloudfiles_spec_map["targetDetails"]["table"] = "cloudfiles_customer"
+        cloudfiles_spec = BronzeDataflowSpec(**cloudfiles_spec_map)
+
+        snapshot_pipeline = DataflowPipeline(
+            self.spark, snapshot_spec, "snapshot_inputview",
+            next_snapshot_and_version=next_snapshot_and_version,
+        )
+        cloudfiles_pipeline = DataflowPipeline(
+            self.spark, cloudfiles_spec, "cloudfiles_inputview",
+            next_snapshot_and_version=next_snapshot_and_version,
+        )
+
+        snapshot_pipeline.read()
+        cloudfiles_pipeline.read()
+
+        mock_dp.temporary_view.assert_called_once()
+        self.assertEqual(mock_dp.temporary_view.call_args.kwargs["name"], "cloudfiles_inputview")
 
     def test_apply_where_clause_empty(self):
         """Test __apply_where_clause with empty where clause."""
@@ -2789,6 +2900,21 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
         self._assert_main_table_row_filter(mock_dlt, spec, self.ROW_FILTER_REGION)
 
     @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
+    def test_write_layer_with_dqe_empty_expect_still_declares_main_table(self, mock_dlt):
+        """An empty ``expect`` dict must not skip the main table declaration
+        or raise UnboundLocalError when an expect_or_fail family is present."""
+        mock_dlt.expect_all = MagicMock(return_value=lambda func: func)
+        mock_dlt.expect_all_or_drop = MagicMock(return_value=lambda func: func)
+        mock_dlt.expect_all_or_fail = MagicMock(return_value=lambda func: func)
+        mock_dlt.table = MagicMock(return_value=lambda func: func)
+
+        pipeline, spec = self._build_dqe_pipeline(
+            {"expect": {}, "expect_or_fail": {"valid_id": "id IS NOT NULL"}}
+        )
+        pipeline.write_layer_with_dqe()
+        self._assert_main_table_row_filter(mock_dlt, spec, self.ROW_FILTER_REGION)
+
+    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
     def test_write_layer_with_dqe_expect_all_or_drop_passes_row_filter(self, mock_dlt):
         """`expect_all_or_drop` branch (when expect_all and expect_all_or_fail
         are both absent) constructs dp.table itself and passes row_filter through."""
@@ -3066,6 +3192,66 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
         self.assertEqual(mock_dp.create_streaming_table.call_count, 1)
         self.assertEqual(mock_dp.create_auto_cdc_flow.call_count, 2)
         mock_dp.table.assert_not_called()
+
+    @patch("databricks.labs.sdp_meta.dataflow_pipeline.dp")
+    def test_cdc_apply_changes_flows_supports_non_quarantine_expectations(
+        self, mock_dp
+    ):
+        """Multi-source CDC delegates supported DQE actions to its target table."""
+        mock_dp.create_streaming_table = MagicMock()
+        mock_dp.create_auto_cdc_flow = MagicMock()
+        mock_dp.table = MagicMock(return_value=lambda func: func)
+        expectations = json.dumps(
+            {"expect_or_drop": {"amount_non_negative": "amount >= 0"}}
+        )
+        cases = (
+            ("bronze", BronzeDataflowSpec, self.bronze_dataflow_spec_map),
+            ("silver", SilverDataflowSpec, self.silver_dataflow_spec_map),
+        )
+
+        for layer, spec_type, spec_map in cases:
+            with self.subTest(layer=layer):
+                payload = copy.deepcopy(spec_map)
+                payload["cdcApplyChanges"] = None
+                payload["cdcApplyChangesFlows"] = self._bronze_cdc_flows_payload()
+                payload["dataQualityExpectations"] = expectations
+                spec = spec_type(**payload)
+                pipeline = DataflowPipeline(
+                    self.spark,
+                    spec,
+                    f"{spec.targetDetails['table']}_inputview",
+                    None,
+                )
+
+                pipeline.write_layer_table()
+
+                self.assertEqual(mock_dp.create_streaming_table.call_count, 1)
+                self.assertEqual(mock_dp.create_auto_cdc_flow.call_count, 2)
+                self.assertEqual(
+                    mock_dp.create_streaming_table.call_args.kwargs[
+                        "expect_all_or_drop"
+                    ],
+                    {"amount_non_negative": "amount >= 0"},
+                )
+                mock_dp.table.assert_not_called()
+                mock_dp.reset_mock()
+
+    def test_cdc_apply_changes_flows_rejects_quarantine_expectations(self):
+        """Multi-source CDC must fail clearly until quarantine routing exists."""
+        payload = copy.deepcopy(self.bronze_dataflow_spec_map)
+        payload["cdcApplyChanges"] = None
+        payload["cdcApplyChangesFlows"] = self._bronze_cdc_flows_payload()
+        payload["dataQualityExpectations"] = json.dumps(
+            {"expect_or_quarantine": {"amount_non_negative": "amount >= 0"}}
+        )
+
+        with self.assertRaisesRegex(ValueError, "does not support expect_or_quarantine"):
+            DataflowPipeline(
+                self.spark,
+                BronzeDataflowSpec(**payload),
+                "customer_inputview",
+                None,
+            )
 
     # ------------------------------------------------------------------
     # row_filter coverage on multi-source CDC + snapshot CDC paths

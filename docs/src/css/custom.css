@@ -151,6 +151,100 @@
   color: var(--ifm-color-emphasis-700);
 }
 
+/* Databricks App deployment choices */
+.deploy-path-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0 2rem;
+}
+
+.deploy-path-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1.25rem;
+  border: 1px solid var(--ifm-color-emphasis-300);
+  border-top: 4px solid #00A972;
+  border-radius: 8px;
+  background: var(--ifm-background-surface-color);
+}
+
+.deploy-path-card h3,
+.deploy-path-card p {
+  margin: 0;
+}
+
+.deploy-path-card__badge {
+  align-self: flex-start;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  background: var(--ifm-color-emphasis-200);
+  color: var(--ifm-color-emphasis-800);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.deploy-path-card > code {
+  display: block;
+  padding: 0.75rem;
+  border: 1px solid var(--ifm-color-emphasis-200);
+  border-radius: 6px;
+  background: var(--ifm-code-background);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.deploy-path-card > a {
+  margin-top: auto;
+  font-weight: 600;
+}
+
+/* Compact highlights for migration notices and featured examples. */
+.doc-highlight-card {
+  margin: 1.5rem 0;
+  padding: 1.25rem 1.5rem;
+  border: 1px solid var(--ifm-color-emphasis-300);
+  border-left-width: 4px;
+  border-radius: 8px;
+  background: var(--ifm-background-surface-color);
+}
+
+.doc-highlight-card--migration {
+  border-left-color: #c92a1b;
+}
+
+.doc-highlight-card--example {
+  border-left-color: #007a52;
+}
+
+.doc-highlight-card__badge {
+  display: inline-block;
+  margin-bottom: 0.4rem;
+  color: var(--ifm-color-emphasis-700);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.doc-highlight-card h3 {
+  margin: 0 0 0.65rem;
+}
+
+.doc-highlight-card p {
+  margin-bottom: 0.75rem;
+}
+
+.doc-highlight-card p:last-child {
+  margin-bottom: 0;
+  font-weight: 600;
+}
+
 /* Admonitions */
 .alert--tip {
   border-left-color: #00A972;
@@ -162,10 +256,49 @@ table {
   width: 100%;
 }
 
+@media (max-width: 768px) {
+  .theme-doc-markdown table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+}
+
+/* Make links in documentation prose visibly distinguishable from body text. */
+.theme-doc-markdown p a,
+.theme-doc-markdown li a,
+.theme-doc-markdown td a {
+  text-decoration: underline;
+  text-decoration-thickness: 0.08em;
+  text-underline-offset: 0.15em;
+}
+
+.theme-doc-markdown p a:hover,
+.theme-doc-markdown li a:hover,
+.theme-doc-markdown td a:hover {
+  text-decoration-thickness: 0.14em;
+}
+
 /* Quickstart code block */
 .quickstart-block {
   background: #1B3139;
   border-radius: 8px;
   padding: 1.5rem;
   margin: 1.5rem 0;
+}
+
+/* Preserve readable labels in the wide CI/CD architecture diagram. */
+.ci-cd-flow-diagram {
+  overflow-x: auto;
+  margin: 1.5rem 0;
+}
+
+.ci-cd-flow-diagram .docusaurus-mermaid-container {
+  min-width: 1400px;
+}
+
+.ci-cd-flow-diagram .docusaurus-mermaid-container > svg.flowchart {
+  max-width: none !important;
+  width: 1400px;
+  height: auto;
 }

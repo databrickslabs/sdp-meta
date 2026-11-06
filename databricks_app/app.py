@@ -30,9 +30,10 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 import subprocess  # noqa: F401 \u2014 re-exported below so tests can mock subprocess.Popen
 
-from flask import Flask, jsonify
+from flask import Flask, g, jsonify, request
 from werkzeug.exceptions import HTTPException
 
 # ── Logging ──────────────────────────────────────────────────────────────────
@@ -61,6 +62,14 @@ app = Flask(__name__)
 
 
 # ── Global JSON error handler ────────────────────────────────────────────────
+def _safe_error_details(request_id: str, status: int) -> dict[str, object]:
+    """Return the only diagnostics exposed for an error response."""
+    return {
+        'request_id': request_id,
+        'status': status,
+    }
+
+
 # Flask returns HTML for unhandled exceptions by default. Override to
 # return JSON so the frontend never receives an HTML page it can't
 # parse. Standard HTTP errors (404, 405, etc.) are passed through
@@ -68,15 +77,21 @@ app = Flask(__name__)
 # logging them as application errors.
 @app.errorhandler(Exception)
 def handle_exception(exc):
+    request_id = uuid.uuid4().hex[:12]
     if isinstance(exc, HTTPException):
-        return jsonify({'error': exc.description or str(exc)}), exc.code
-    logger.exception("Unhandled exception in route: %s", exc)
+        message = exc.description or str(exc)
+        return jsonify({
+            'error': message,
+            'details': _safe_error_details(request_id, exc.code),
+        }), exc.code
+    logger.exception(
+        "Unhandled exception in route (request_id=%s)",
+        request_id,
+    )
+    g.unhandled_exception_logged = True
     return jsonify({
-        'error': str(exc),
-        'stdout': '',
-        'stderr': '',
-        'returncode': -1,
-        'modal_content': None,
+        'error': _friendly_server_error_message(),
+        'details': _safe_error_details(request_id, 500),
     }), 500
 
 
@@ -121,9 +136,80 @@ def _inject_app_version():
 
 
 # ── Security headers ─────────────────────────────────────────────────────────
+def _friendly_server_error_message():
+    """Return an actionable headline without exposing SDK exception text."""
+    path = request.path
+    if path.startswith('/api/metadata/workspace-'):
+        return (
+            'The app could not access the requested workspace file. Verify '
+            'the path and the App service principal workspace permissions.'
+        )
+    if path.startswith('/api/metadata/'):
+        return (
+            'The app could not access Unity Catalog. Verify that the App '
+            'service principal has USE CATALOG, USE SCHEMA, and the required '
+            'table privileges.'
+        )
+    if path.startswith('/api/warehouse'):
+        return (
+            'The app could not access the SQL warehouse. Verify that the App '
+            'service principal has CAN USE permission on the warehouse.'
+        )
+    if path.startswith('/api/pipelines'):
+        return (
+            'The app could not complete the pipeline request. Verify the '
+            'pipeline exists and the App service principal can manage it.'
+        )
+    return (
+        'The app could not complete this request. '
+        'Expand Technical details for diagnostics.'
+    )
+
+
 @app.after_request
 def add_security_headers(response):
-    """Attach HTTP security headers to every response (fix M4)."""
+    """Normalize JSON errors and attach HTTP security headers."""
+    if response.status_code >= 400 and response.is_json:
+        payload = response.get_json(silent=True)
+        if isinstance(payload, dict) and payload.get('error'):
+            if response.status_code >= 500:
+                original_error = str(payload['error'])
+                details = payload.get('details')
+                request_id = (
+                    details.get('request_id')
+                    if isinstance(details, dict) and isinstance(details.get('request_id'), str)
+                    else uuid.uuid4().hex[:12]
+                )
+                stdout = payload.pop('stdout', None)
+                stderr = payload.pop('stderr', None)
+                payload.pop('returncode', None)
+                payload.pop('modal_content', None)
+                if stdout or stderr:
+                    logger.error(
+                        "Server command output (request_id=%s): stdout=%r stderr=%r",
+                        request_id,
+                        stdout,
+                        stderr,
+                    )
+                if not getattr(g, 'unhandled_exception_logged', False):
+                    logger.error(
+                        "Server error response (request_id=%s): %s",
+                        request_id,
+                        original_error,
+                    )
+                payload['error'] = _friendly_server_error_message()
+                payload['details'] = _safe_error_details(request_id, response.status_code)
+            elif response.status_code in (401, 403):
+                payload['error'] = (
+                    'The Databricks App service principal does not have '
+                    'permission to complete this request. Ask a catalog or '
+                    'workspace administrator to grant the required access.'
+                )
+                payload.pop('details', None)
+            else:
+                payload.pop('details', None)
+            response.set_data(app.json.dumps(payload))
+
     response.headers['Content-Security-Policy'] = (
         "default-src 'self'; "
         "script-src 'self' 'unsafe-inline'; "

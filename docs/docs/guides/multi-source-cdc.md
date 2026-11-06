@@ -182,6 +182,14 @@ Use `bronze_cdc_apply_changes_flows` (or `silver_cdc_apply_changes_flows` at the
 `bronze_cdc_apply_changes_flows` and `bronze_cdc_apply_changes` are mutually exclusive on the same onboarding row. Similarly for `silver_cdc_apply_changes_flows` and `silver_cdc_apply_changes`.
 :::
 
+:::caution
+Multi-source Auto CDC flows do not support `expect_or_quarantine` rules.
+Use `expect`, `expect_or_drop`, or `expect_or_fail` instead. SDP-META rejects
+an onboarding configuration that combines `expect_or_quarantine` with
+`bronze_cdc_apply_changes_flows` or `silver_cdc_apply_changes_flows`, because
+quarantine routing is not implemented for this flow type.
+:::
+
 ## Pipeline diagram
 
 ![Multi-source CDC silver pipeline](/img/multi-source-cdc-silver.png)

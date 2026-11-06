@@ -24,6 +24,9 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEMO_DIR = REPO_ROOT / "demo" / "dab_template_demo"
@@ -322,7 +325,14 @@ class LauncherRegistryTests(unittest.TestCase):
     def test_scenarios_registered(self):
         self.assertEqual(
             set(self.module.SCENARIOS.keys()),
-            {"cloudfiles", "cloudfiles_combined", "kafka", "eventhub", "delta"},
+            {
+                "cloudfiles",
+                "cloudfiles_combined",
+                "multi_pipeline_cloudfiles",
+                "kafka",
+                "eventhub",
+                "delta",
+            },
         )
 
     def test_cloudfiles_scenario_set_matches_registry(self):
@@ -332,7 +342,11 @@ class LauncherRegistryTests(unittest.TestCase):
         them, and the recipe will crash with `FileNotFoundError`."""
         self.assertEqual(
             self.module._CLOUDFILES_SCENARIO_NAMES,
-            {"cloudfiles", "cloudfiles_combined"},
+            {
+                "cloudfiles",
+                "cloudfiles_combined",
+                "multi_pipeline_cloudfiles",
+            },
         )
 
     def test_cloudfiles_combined_uses_combined_pipeline_mode(self):
@@ -348,7 +362,135 @@ class LauncherRegistryTests(unittest.TestCase):
         split = self.module.SCENARIOS["cloudfiles"]
         self.assertEqual(scenario.extra_flows_csv, split.extra_flows_csv)
         self.assertEqual(scenario.recipe_name, split.recipe_name)
-        self.assertEqual(scenario.recipe_args_template, split.recipe_args_template)
+        self.assertEqual(
+            scenario.recipe_args_template, split.recipe_args_template
+        )
+
+    def test_duplicate_ownership_stage_rejects_without_writing(self):
+        import tempfile
+
+        scenario = self.module.SCENARIOS["multi_pipeline_cloudfiles"]
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle_dir = Path(tmp)
+            (bundle_dir / "resources").mkdir()
+            (bundle_dir / "conf").mkdir()
+            tracked = bundle_dir / "resources" / "pipelines.yml"
+            tracked.write_text("unchanged\n")
+
+            def reject(command, *, output):
+                print(
+                    "ERROR: Duplicate bronze ownership for dataflow group "
+                    "'dab_demo_cf_group'",
+                    file=output,
+                )
+                self.assertEqual(
+                    command.pipeline.dataflow_group,
+                    "dab_demo_cf_group",
+                )
+                return 2
+
+            with patch.object(
+                self.module,
+                "bundle_add_pipeline",
+                side_effect=reject,
+            ):
+                self.module.stage_assert_duplicate_pipeline_rejected(
+                    scenario,
+                    bundle_dir,
+                    uc_schema="ownership_it",
+                )
+
+            self.assertEqual(tracked.read_text(), "unchanged\n")
+
+    def test_duplicate_ownership_stage_detects_rejected_write(self):
+        import tempfile
+
+        scenario = self.module.SCENARIOS["multi_pipeline_cloudfiles"]
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle_dir = Path(tmp)
+            (bundle_dir / "resources").mkdir()
+            (bundle_dir / "conf").mkdir()
+            tracked = bundle_dir / "README.md"
+            tracked.write_text("before\n")
+
+            def reject_after_write(_command, *, output):
+                tracked.write_text("after\n")
+                print(
+                    "ERROR: Duplicate bronze ownership",
+                    file=output,
+                )
+                return 2
+
+            with (
+                patch.object(
+                    self.module,
+                    "bundle_add_pipeline",
+                    side_effect=reject_after_write,
+                ),
+                self.assertRaisesRegex(SystemExit, "modified bundle file"),
+            ):
+                self.module.stage_assert_duplicate_pipeline_rejected(
+                    scenario,
+                    bundle_dir,
+                    uc_schema="ownership_it",
+                )
+
+    def test_set_onboarding_file_path_updates_named_parameter(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "onboarding.yml"
+            path.write_text(yaml.safe_dump({
+                "resources": {
+                    "jobs": {
+                        "onboarding": {
+                            "tasks": [{
+                                "task_key": "onboard_dataflowspecs",
+                                "python_wheel_task": {
+                                    "named_parameters": {
+                                        "onboarding_file_path": "old",
+                                    },
+                                },
+                            }],
+                        },
+                    },
+                },
+            }, sort_keys=False))
+
+            self.module._set_onboarding_file_path(
+                path,
+                "/Volumes/catalog/schema/volume/conf/onboarding.yml",
+            )
+
+            doc = yaml.safe_load(path.read_text())
+            params = doc["resources"]["jobs"]["onboarding"]["tasks"][0][
+                "python_wheel_task"
+            ]["named_parameters"]
+            self.assertEqual(
+                params["onboarding_file_path"],
+                "/Volumes/catalog/schema/volume/conf/onboarding.yml",
+            )
+
+    def test_set_onboarding_file_path_reports_missing_task(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "onboarding.yml"
+            path.write_text(yaml.safe_dump({
+                "resources": {
+                    "jobs": {
+                        "onboarding": {
+                            "tasks": [],
+                        },
+                    },
+                },
+            }))
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "missing task `onboard_dataflowspecs`",
+            ):
+                self.module._set_onboarding_file_path(path, "/new/path")
 
     def test_delta_scenario_marked_as_workspace_required(self):
         delta = self.module.SCENARIOS["delta"]
@@ -438,8 +580,7 @@ class CloudfilesDatasetReuseTests(unittest.TestCase):
     def test_materialize_csv_substitutes_demo_data_volume_path(self):
         """`_materialize_csv` swaps the placeholder when the path is provided."""
         import tempfile
-        from launch_dab_template_demo_reuse import SCENARIOS as SCN
-        scenario = SCN["cloudfiles"]
+        scenario = self.module.SCENARIOS["cloudfiles"]
         with tempfile.TemporaryDirectory() as tmp:
             out = self.module._materialize_csv(
                 scenario, "cat", Path(tmp),
@@ -453,8 +594,7 @@ class CloudfilesDatasetReuseTests(unittest.TestCase):
     def test_materialize_csv_uses_safe_placeholder_when_path_missing(self):
         """Without --apply-prepare-wheel, the CSV still renders (offline-safe)."""
         import tempfile
-        from launch_dab_template_demo_reuse import SCENARIOS as SCN
-        scenario = SCN["cloudfiles"]
+        scenario = self.module.SCENARIOS["cloudfiles"]
         with tempfile.TemporaryDirectory() as tmp:
             out = self.module._materialize_csv(
                 scenario, "cat", Path(tmp),
@@ -912,6 +1052,245 @@ class StageBundleInitCleanupTests(unittest.TestCase):
             result_dir, bundle_dir = self._invoke(Path(tmp), clean=False, pre_create=False)
             self.assertEqual(result_dir, bundle_dir)
             self.assertTrue((bundle_dir / "fresh.txt").exists())
+
+
+class CustomizedBundleValidationStageTests(unittest.TestCase):
+    """Offline coverage for the customized-bundle validation stage."""
+
+    @classmethod
+    def setUpClass(cls):
+        launcher = REPO_ROOT / "demo" / "launch_dab_template_demo.py"
+        spec = importlib.util.spec_from_file_location(
+            "launch_dab_template_demo_customized_validation",
+            launcher,
+        )
+        cls.module = importlib.util.module_from_spec(spec)
+        sys.modules[
+            "launch_dab_template_demo_customized_validation"
+        ] = cls.module
+        spec.loader.exec_module(cls.module)
+
+    @staticmethod
+    def _pipeline(layer: str, group: str) -> dict:
+        config = {
+            "layer": layer,
+            "sdp_meta_dependency": "${var.sdp_meta_dependency}",
+        }
+        if layer in ("bronze", "bronze_silver"):
+            config.update({
+                "bronze.dataflowspecTable": "cat.meta.bronze_specs",
+                "bronze.group": group,
+            })
+        if layer in ("silver", "bronze_silver"):
+            config.update({
+                "silver.dataflowspecTable": "cat.meta.silver_specs",
+                "silver.group": group,
+            })
+        return {"schema": "cat.target", "configuration": config}
+
+    def _write_bundle(self, root: Path) -> None:
+        import yaml
+
+        (root / "resources").mkdir(parents=True)
+        (root / "conf").mkdir()
+        (root / "databricks.yml").write_text(yaml.safe_dump({
+            "bundle": {"name": "customized_validation_it"},
+            "targets": {
+                "dev": {"default": True, "variables": {}},
+                "prod": {"variables": {}},
+            },
+        }))
+        (root / "resources" / "variables.yml").write_text(
+            yaml.safe_dump({
+                "variables": {
+                    "layer": {"default": "bronze_silver"},
+                    "pipeline_mode": {"default": "split"},
+                    "dataflow_group": {"default": "primary_group"},
+                    "onboarding_file_name": {"default": "onboarding.yml"},
+                    "wheel_source": {"default": "pypi"},
+                    "sdp_meta_dependency": {
+                        "default": "databricks-labs-sdp-meta==0.1.1"
+                    },
+                }
+            })
+        )
+        (root / "conf" / "onboarding.yml").write_text(yaml.safe_dump([
+            {
+                "data_flow_id": "1",
+                "data_flow_group": "primary_group",
+                "bronze_database_dev": "cat.bronze",
+                "bronze_table": "orders_bronze",
+                "silver_database_dev": "cat.silver",
+                "silver_table": "orders",
+            },
+            {
+                "data_flow_id": "2",
+                "data_flow_group": "secondary_group",
+                "bronze_database_dev": "cat.bronze_secondary",
+                "bronze_table": "customers_bronze",
+                "silver_database_dev": "cat.silver_secondary",
+                "silver_table": "customers",
+            },
+        ]))
+        (root / "resources" / "sdp_meta_pipelines.yml").write_text(
+            yaml.safe_dump({
+                "resources": {
+                    "pipelines": {
+                        "bronze": self._pipeline(
+                            "bronze",
+                            "${var.dataflow_group}",
+                        ),
+                        "silver": self._pipeline(
+                            "silver",
+                            "${var.dataflow_group}",
+                        ),
+                        "secondary": self._pipeline(
+                            "bronze_silver",
+                            "secondary_group",
+                        ),
+                    },
+                    "jobs": {
+                        "pipelines": {
+                            "tasks": [
+                                {
+                                    "task_key": "bronze",
+                                    "pipeline_task": {
+                                        "pipeline_id": (
+                                            "${resources.pipelines.bronze.id}"
+                                        )
+                                    },
+                                },
+                                {
+                                    "task_key": "silver",
+                                    "pipeline_task": {
+                                        "pipeline_id": (
+                                            "${resources.pipelines.silver.id}"
+                                        )
+                                    },
+                                    "depends_on": [{"task_key": "bronze"}],
+                                },
+                                {
+                                    "task_key": "secondary",
+                                    "pipeline_task": {
+                                        "pipeline_id": (
+                                            "${resources.pipelines.secondary.id}"
+                                        )
+                                    },
+                                },
+                            ]
+                        }
+                    },
+                }
+            })
+        )
+        (root / "resources" / "sdp_meta_onboarding_job.yml").write_text(
+            yaml.safe_dump({
+                "resources": {
+                    "jobs": {
+                        "onboarding": {
+                            "tasks": [{
+                                "task_key": "onboard_dataflowspecs",
+                                "python_wheel_task": {
+                                    "named_parameters": {
+                                        "onboard_layer": "${var.layer}",
+                                        "bronze_dataflowspec_table": (
+                                            "bronze_specs"
+                                        ),
+                                        "silver_dataflowspec_table": (
+                                            "silver_specs"
+                                        ),
+                                    }
+                                },
+                            }]
+                        }
+                    }
+                }
+            })
+        )
+
+    def test_stage_exercises_target_environment_and_transitive_wiring(self):
+        import os
+        import tempfile
+        import yaml
+        from unittest.mock import patch
+
+        observed_environments = []
+
+        def fake_validate(_command):
+            observed_environments.append((
+                os.environ.get("DATABRICKS_BUNDLE_TARGET"),
+                os.environ.get("DATABRICKS_BUNDLE_ENV"),
+            ))
+            return 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle_dir = Path(tmp) / "bundle"
+            bundle_dir.mkdir()
+            self._write_bundle(bundle_dir)
+            scenario = self.module.SCENARIOS["multi_pipeline_cloudfiles"]
+            with patch.dict(
+                os.environ,
+                {
+                    "DATABRICKS_BUNDLE_TARGET": "original_target",
+                    "DATABRICKS_BUNDLE_ENV": "original_env",
+                },
+                clear=False,
+            ), patch.object(
+                self.module,
+                "bundle_validate",
+                side_effect=fake_validate,
+            ):
+                self.module.stage_assert_customized_bundle_validation(
+                    scenario,
+                    bundle_dir,
+                    profile="fevm",
+                )
+                self.assertEqual(
+                    os.environ["DATABRICKS_BUNDLE_TARGET"],
+                    "original_target",
+                )
+                self.assertEqual(
+                    os.environ["DATABRICKS_BUNDLE_ENV"],
+                    "original_env",
+                )
+
+            self.assertEqual(
+                observed_environments,
+                [
+                    (None, None),
+                    ("prod", None),
+                    (None, "prod"),
+                ],
+            )
+            pipelines_doc = yaml.safe_load(
+                (
+                    bundle_dir
+                    / "resources"
+                    / "sdp_meta_pipelines.yml"
+                ).read_text()
+            )
+            tasks = {
+                task["task_key"]: task
+                for task in pipelines_doc["resources"]["jobs"][
+                    "pipelines"
+                ]["tasks"]
+            }
+            self.assertEqual(
+                tasks["secondary"]["depends_on"],
+                [{"task_key": "bronze"}],
+            )
+            self.assertEqual(
+                tasks["silver"]["depends_on"],
+                [{"task_key": "secondary"}],
+            )
+
+    def test_stage_skips_non_multi_pipeline_scenarios(self):
+        scenario = self.module.SCENARIOS["cloudfiles"]
+        self.module.stage_assert_customized_bundle_validation(
+            scenario,
+            Path("/does/not/exist"),
+            profile=None,
+        )
 
 
 if __name__ == "__main__":

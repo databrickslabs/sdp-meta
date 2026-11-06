@@ -1,10 +1,14 @@
 from abc import abstractmethod
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import Any, Generic, Optional, TypeVar
 from databricks.sdk.core import Config
 from .__about__ import __version__
 from databricks.sdk import WorkspaceClient
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -73,6 +77,13 @@ class ConnectConfig:
 
 # Used to set the right expectation about configuration file schema
 _CONFIG_VERSION = 1
+
+_LEGACY_WORKSPACE_CONFIG_KEYS = {
+    "dlt_meta_operation": "sdp_meta_operation",
+    "dlt_meta_schema": "sdp_meta_schema",
+    "dlt_meta_layer": "sdp_meta_layer",
+    "dlt_meta_onboard_group": "sdp_meta_onboard_group",
+}
 
 T = TypeVar("T")
 
@@ -170,7 +181,30 @@ class WorkspaceConfig(_Config["WorkspaceConfig"]):
 
     @classmethod
     def from_dict(cls, raw: dict):
+        # Config deserialization must not consume fields from the caller's
+        # dictionary. This is especially important while normalizing legacy
+        # files because callers may retain the parsed payload for diagnostics.
+        raw = dict(raw)
         cls._verify_version(raw)
+        for legacy_key, current_key in _LEGACY_WORKSPACE_CONFIG_KEYS.items():
+            if legacy_key not in raw:
+                continue
+            if current_key in raw:
+                logger.warning(
+                    "Ignoring deprecated workspace config key %r because %r "
+                    "is also present; the current key takes precedence.",
+                    legacy_key,
+                    current_key,
+                )
+            else:
+                logger.warning(
+                    "Migrating deprecated workspace config key %r to %r; "
+                    "update config.json before v0.2.0.",
+                    legacy_key,
+                    current_key,
+                )
+                raw[current_key] = raw[legacy_key]
+            del raw[legacy_key]
         connect = ConnectConfig.from_dict(raw.pop("connect", {}))
         return cls(connect=connect, **raw)
 

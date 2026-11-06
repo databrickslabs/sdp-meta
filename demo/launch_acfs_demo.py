@@ -31,6 +31,7 @@ class ApplyChangesFromSnapshotDemo(SDPMETARunner):
         except Exception as e:
             print(e)
             traceback.print_exc()
+            raise
         # finally:
         #     self.clean_up(runner_conf)
 
@@ -60,7 +61,11 @@ class ApplyChangesFromSnapshotDemo(SDPMETARunner):
 
     def launch_workflow(self, runner_conf: SDPMetaRunnerConf):
         created_job = self.create_workflow_spec(runner_conf)
-        self.open_job_url(runner_conf, created_job)
+        self.open_job_url(
+            runner_conf,
+            created_job,
+            wait_for_completion=True,
+        )
 
 
 def main():

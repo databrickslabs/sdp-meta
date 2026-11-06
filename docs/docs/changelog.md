@@ -8,6 +8,56 @@ sidebar_position: 99
 
 ---
 
+## v0.1.1
+
+### New Features
+
+- **Multiple pipeline topologies per DAB bundle** — `bundle-add-pipeline` adds independently configured bronze, silver, split, or combined pipelines with their own data-flow groups and target schemas. `bundle-validate` validates each pipeline and its job wiring independently. ([Issue #446](https://github.com/databrickslabs/sdp-meta/issues/446))
+- **Auto Loader schema-evolution demos** — focused and at-scale demos exercise additive schema evolution, strict-mode failure behavior, and multi-table onboarding from Unity Catalog Volumes. ([PR #490](https://github.com/databrickslabs/sdp-meta/pull/490))
+
+### Fixes
+
+- **Databricks SDK compatibility floor** — runtime and App dependencies now require `databricks-sdk>=0.138.0,<1`, and CI tests serverless onboarding environment models against exactly that minimum. ([Issue #457](https://github.com/databrickslabs/sdp-meta/issues/457))
+- **[Databricks App] Asynchronous demos and safe concurrent progress tracking** — onboarding, pipeline deployment, and demo workflows now run asynchronously, including the featured 100-table Auto Loader demo. Multiple runs can be tracked from one browser session, with retained completion status and curated Databricks job or pipeline links. Bundled onboarding entries launch their supported demo workflow when available, while unsupported bundles continue with standard onboarding. Browser responses no longer expose raw backend exception or subprocess details. ([Issue #491](https://github.com/databrickslabs/sdp-meta/issues/491), [Issue #508](https://github.com/databrickslabs/sdp-meta/issues/508))
+- **Quarantine-only DQE flows** — bronze and silver primary targets are now declared when a flow contains only `expect_or_quarantine` rules, allowing primary and quarantine outputs to be created and validated correctly. ([Issue #496](https://github.com/databrickslabs/sdp-meta/issues/496))
+- **Multi-source Auto CDC expectations** — `expect`, `expect_or_drop`, and `expect_or_fail` flows now create their streaming target correctly. Unsupported `expect_or_quarantine` together with `cdc_apply_changes_flows` now fails early with an actionable validation error rather than failing while the pipeline runs. ([Issue #503](https://github.com/databrickslabs/sdp-meta/issues/503))
+- **Documentation dependency security** — upgraded Docusaurus and remediated high and critical npm findings in the documentation build dependency graph.
+- **Data-quality expectations without quarantine targets** — bronze and silver flows can apply DQ expectations when no quarantine table is configured, without referencing a missing quarantine target. ([PR #487](https://github.com/databrickslabs/sdp-meta/pull/487))
+- **Databricks App deployment packaging** — deployment staging now includes the `examples/` wheel-build inputs on both macOS/Linux and Windows, preventing remote App startup failures while building the SDP-META wheel.
+- **DAB pipeline group ownership** — `bundle-add-pipeline` and `bundle-validate` reject duplicate ownership of the same data-flow group and layer, including conflicts introduced through target overrides. ([Issue #458](https://github.com/databrickslabs/sdp-meta/issues/458))
+- **Customized DAB validation** — `bundle-validate` now honors default and environment-selected targets, accepts transitive bronze-to-silver task dependencies, and reports malformed targets or dependency cycles cleanly. ([Issue #459](https://github.com/databrickslabs/sdp-meta/issues/459))
+- **Mixed snapshot and non-snapshot pipelines** — a layer-level snapshot callback no longer suppresses input views for CloudFiles and other non-snapshot specs. ([Issue #443](https://github.com/databrickslabs/sdp-meta/issues/443))
+- **Append-flow source metadata** — CloudFiles append flows now serialize and select source metadata correctly. ([Issue #444](https://github.com/databrickslabs/sdp-meta/issues/444))
+- **Append-flow custom transformations** — custom transformation functions now run for append-flow inputs as well as primary inputs. ([Issue #445](https://github.com/databrickslabs/sdp-meta/issues/445))
+- **Legacy dataflow-spec schema evolution** — append onboarding adds current bronze and silver fields to v0.0.10 Delta spec tables before merging, preserving existing rows and audit fields. ([Issue #460](https://github.com/databrickslabs/sdp-meta/issues/460))
+- **Legacy Python wheel task entry point** — the `dlt-meta` compatibility package restores the `group_1:run` entry point used by v0.0.10 Databricks Python wheel tasks. ([Issue #455](https://github.com/databrickslabs/sdp-meta/issues/455))
+- **Legacy workspace configuration keys** — v0.0.10 `dlt_meta_*` workspace keys migrate to their `sdp_meta_*` equivalents with deprecation warnings and deterministic precedence. ([Issue #456](https://github.com/databrickslabs/sdp-meta/issues/456))
+- **Compat shim startup** — importing the `dlt-meta` compatibility package no longer prints startup tracebacks or fails immediately on environments without pyspark; unavailable runtime dependencies now produce an actionable error only when SDP-META functionality is accessed.
+- **Onboarding PyPI dependency** — `databricks labs sdp-meta onboard` now installs the published `databricks-labs-sdp-meta` package instead of the nonexistent `sdp-meta` package, preventing job-environment setup failures.
+- **DAB wheel packaging and quickstart onboarding** — installed wheels now include the full DAB template, generated bronze flows include required quarantine defaults when DQE is configured, and serverless runners force a clean dependency reinstall.
+
+### Compatibility warning
+
+- **Python 3.10 is now the minimum supported interpreter** — the required
+  `databricks-sdk>=0.138.0` supports Python 3.10 and newer. Upgrade Python 3.8
+  and 3.9 environments before installing either v0.1.1 distribution.
+- **Append-flow transforms now run on every input** — v0.1.1 applies
+  `bronze_custom_transform_func` and `silver_custom_transform_func` separately
+  to primary and append-flow DataFrames. This is the intended fix for
+  [Issue #445](https://github.com/databrickslabs/sdp-meta/issues/445), but
+  transforms that assume primary-only columns can fail or change append-flow
+  output. Validate every append source and normalize all inputs to one
+  target-compatible schema before upgrading.
+- **Use the official persisted-spec readers during upgrades** —
+  `DataflowSpecUtils.get_bronze_dataflow_spec()` and
+  `DataflowSpecUtils.get_silver_dataflow_spec()` backfill the registered
+  compatibility fields added since legacy schema versions. Direct dataclass
+  construction from legacy Spark rows does not. See the
+  [v0.1.1 migration guidance](./operations/migration#v011-compatibility-boundaries)
+  and [upgrade checklist](./operations/migration#v011-upgrade-checklist).
+
+---
+
 ## v0.1.0
 
 ### New Features

@@ -33,3 +33,6 @@ env:
   # (Warehouse button in the top bar → enter an existing ID or create a new serverless one).
   - name: DATABRICKS_SQL_WAREHOUSE_ID
     value: ""
+  # Maximum demo launcher subprocesses allowed at the same time.
+  - name: SDP_META_MAX_ACTIVE_DEMOS
+    value: "8"

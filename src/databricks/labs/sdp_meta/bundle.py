@@ -1,6 +1,6 @@
 """CLI helpers that expose sdp-meta as a Declarative Automation Bundle.
 
-The three entry points consumed by the `databricks labs sdp-meta bundle ...`
+The entry points consumed by the `databricks labs sdp-meta bundle-*`
 commands are module-level functions:
 
 - :func:`bundle_init` — scaffold a new bundle from the packaged template.
@@ -8,14 +8,19 @@ commands are module-level functions:
   to a UC volume for use as the bundle's ``sdp_meta_dependency``.
 - :func:`bundle_validate` — run ``databricks bundle validate`` plus
   sdp-meta-specific sanity checks on a rendered bundle.
+- :func:`bundle_add_flow` — append validated flows to onboarding config.
+- :func:`bundle_add_pipeline` — add an independent pipeline topology and
+  wire it into the bundle's pipelines job.
 
-All three shell out to the Databricks CLI for bundle-level work. Everything
-else is deliberately thin so behavior is easy to audit and mock in tests.
+Only operations that need Databricks bundle functionality shell out to the
+Databricks CLI; local mutation commands edit the rendered YAML/JSON directly.
+Everything else is deliberately thin so behavior is easy to audit and mock.
 """
 
 from __future__ import annotations
 
 import csv
+import copy
 import json
 import logging
 import os
@@ -25,7 +30,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TextIO, Tuple
+from typing import Any, Dict, List, Optional, Set, TextIO, Tuple
 
 import yaml
 
@@ -435,6 +440,17 @@ def _load_yaml_or_json(path: Path):
     return json.loads(text)
 
 
+def _load_yaml_mapping(path: Path) -> Dict[str, Any]:
+    """Load a YAML document and require a top-level mapping."""
+    doc = yaml.safe_load(path.read_text()) or {}
+    if not isinstance(doc, dict):
+        raise ValueError(
+            f"{path.name}: expected a top-level mapping, "
+            f"got {type(doc).__name__}"
+        )
+    return doc
+
+
 # Matches the convention used by every seeded onboarding placeholder
 # (e.g. `<your-kafka-host>`, `<your-secret-name>`, `<your-eventhub-namespace>`).
 # Validates only on the well-known prefix `your-` so it can't false-positive
@@ -502,7 +518,502 @@ def _find_yaml_placeholders(doc: Any) -> List[Tuple[str, str]]:
     return hits
 
 
-def _sdp_meta_sanity_checks(bundle_dir: Path) -> List[str]:
+_VARIABLE_REF_RE = re.compile(r"^\$\{var\.([A-Za-z0-9_]+)\}$")
+_PIPELINE_REF_RE = re.compile(
+    r"^\$\{resources\.pipelines\.([A-Za-z0-9_-]+)\.id\}$"
+)
+
+
+def _pipeline_reference(task: Dict[str, Any]) -> Optional[str]:
+    """Return the resource key referenced by a pipeline job task."""
+    pipeline_task = task.get("pipeline_task")
+    if not isinstance(pipeline_task, dict):
+        return None
+    pipeline_id = pipeline_task.get("pipeline_id")
+    match = (
+        _PIPELINE_REF_RE.fullmatch(pipeline_id)
+        if isinstance(pipeline_id, str)
+        else None
+    )
+    return match.group(1) if match else None
+
+
+def _resolved_variable(
+    variables: Dict[str, Any],
+    databricks_doc: Dict[str, Any],
+    name: str,
+    target: Optional[str],
+) -> Any:
+    """Resolve a bundle variable default with an optional target override."""
+    node = variables.get(name) or {}
+    value = node.get("default") if isinstance(node, dict) else None
+    if target:
+        targets = databricks_doc.get("targets") or {}
+        if not isinstance(targets, dict):
+            targets = {}
+        target_doc = targets.get(target) or {}
+        if not isinstance(target_doc, dict):
+            target_doc = {}
+        overrides = target_doc.get("variables") or {}
+        if not isinstance(overrides, dict):
+            overrides = {}
+        if name in overrides:
+            override = overrides[name]
+            if isinstance(override, dict):
+                value = override.get(
+                    "value",
+                    override.get("default", override),
+                )
+            else:
+                value = override
+    return value
+
+
+def _resolve_bundle_reference(
+    value: Any,
+    variables: Dict[str, Any],
+    databricks_doc: Dict[str, Any],
+    target: Optional[str],
+) -> Any:
+    """Resolve a lone ``${var.name}`` reference for static sanity checks."""
+    if not isinstance(value, str):
+        return value
+    match = _VARIABLE_REF_RE.fullmatch(value)
+    if not match:
+        return value
+    return _resolved_variable(variables, databricks_doc, match.group(1), target)
+
+
+def _legacy_topology_errors(
+    layer: Optional[str],
+    pipeline_mode: str,
+    pipes: Dict[str, Any],
+) -> List[str]:
+    """Validate pre-#446 resource stubs that do not expose configuration."""
+    errors: List[str] = []
+    has_bronze = "bronze" in pipes
+    has_silver = "silver" in pipes
+    has_combined = "bronze_silver" in pipes
+    if layer == "bronze" and (not has_bronze or has_silver or has_combined):
+        errors.append(
+            "layer=bronze but sdp_meta_pipelines.yml has "
+            f"{'bronze' if has_bronze else 'no bronze'}, "
+            f"{'silver' if has_silver else 'no silver'}, "
+            f"{'bronze_silver' if has_combined else 'no bronze_silver'} pipelines"
+        )
+    elif layer == "silver" and (has_bronze or not has_silver or has_combined):
+        errors.append(
+            "layer=silver but sdp_meta_pipelines.yml has "
+            f"{'bronze' if has_bronze else 'no bronze'}, "
+            f"{'silver' if has_silver else 'no silver'}, "
+            f"{'bronze_silver' if has_combined else 'no bronze_silver'} pipelines"
+        )
+    elif layer == "bronze_silver":
+        if pipeline_mode == "combined" and (
+            not has_combined or has_bronze or has_silver
+        ):
+            errors.append(
+                "layer=bronze_silver, pipeline_mode=combined expects exactly "
+                "one `bronze_silver` pipeline; got "
+                f"bronze={has_bronze}, silver={has_silver}, "
+                f"bronze_silver={has_combined}"
+            )
+        elif pipeline_mode != "combined" and (
+            not (has_bronze and has_silver) or has_combined
+        ):
+            errors.append(
+                "layer=bronze_silver, pipeline_mode=split expects both `bronze` "
+                "and `silver` pipelines and no `bronze_silver` pipeline; got "
+                f"bronze={has_bronze}, silver={has_silver}, "
+                f"bronze_silver={has_combined}"
+            )
+    return errors
+
+
+def _transitive_dependencies(
+    task_key: str,
+    task_by_key: Dict[str, Dict[str, Any]],
+) -> Tuple[set[str], List[List[str]]]:
+    """Return reachable dependencies and dependency cycles for a job task."""
+    visited: set[str] = set()
+    cycles: List[List[str]] = []
+
+    def _dependency_keys(current: str) -> List[str]:
+        task = task_by_key.get(current) or {}
+        return [
+            dependency_key
+            for dependency in (task.get("depends_on") or [])
+            if isinstance(dependency, dict)
+            for dependency_key in [dependency.get("task_key")]
+            if dependency_key
+        ]
+
+    path = [task_key]
+    path_indexes = {task_key: 0}
+    stack = [(task_key, iter(_dependency_keys(task_key)))]
+    while stack:
+        _, dependencies = stack[-1]
+        try:
+            dependency_key = next(dependencies)
+        except StopIteration:
+            completed, _ = stack.pop()
+            path_indexes.pop(completed, None)
+            path.pop()
+            continue
+
+        if dependency_key in path_indexes:
+            cycle = path[path_indexes[dependency_key]:] + [dependency_key]
+            if cycle not in cycles:
+                cycles.append(cycle)
+            continue
+
+        if dependency_key in visited:
+            continue
+
+        visited.add(dependency_key)
+        if dependency_key in task_by_key:
+            path_indexes[dependency_key] = len(path)
+            path.append(dependency_key)
+            stack.append((
+                dependency_key,
+                iter(_dependency_keys(dependency_key)),
+            ))
+
+    return visited, cycles
+
+
+def _pipeline_configuration(spec: Any) -> Dict[str, Any]:
+    """Return a pipeline's ``configuration`` mapping, or ``{}`` if absent/malformed.
+
+    Hand-edited bundles can leave ``configuration`` as ``None`` or a scalar;
+    those are reported by ``bundle-validate``, so callers must not crash on them.
+    """
+    config = spec.get("configuration") if isinstance(spec, dict) else None
+    return config if isinstance(config, dict) else {}
+
+
+def _pipeline_ownership_errors(
+    configured: Dict[str, Dict[str, Any]],
+    variables: Dict[str, Any],
+    databricks_doc: Dict[str, Any],
+    target: Optional[str] = None,
+) -> List[str]:
+    """Reject multiple pipelines owning the same group/layer pair."""
+    owners: Dict[Tuple[str, str], List[Tuple[str, Any]]] = {}
+    for key, spec in configured.items():
+        # Malformed entries (e.g. a body-less ``extra:`` key) are reported by
+        # the sanity checks that own them; skip them here instead of crashing.
+        if not isinstance(spec, dict):
+            continue
+        config = _pipeline_configuration(spec)
+        pipeline_layer = config.get("layer")
+        if pipeline_layer not in ("bronze", "silver", "bronze_silver"):
+            continue
+        layers = (
+            ("bronze", "silver")
+            if pipeline_layer == "bronze_silver"
+            else (pipeline_layer,)
+        )
+        for layer in layers:
+            group = _resolve_bundle_reference(
+                config.get(f"{layer}.group"),
+                variables,
+                databricks_doc,
+                target,
+            )
+            if group is None or not str(group).strip():
+                continue
+            schema = _resolve_bundle_reference(
+                config.get(
+                    f"sdp_meta.{layer}TargetSchema",
+                    spec.get("schema"),
+                ),
+                variables,
+                databricks_doc,
+                target,
+            )
+            owners.setdefault((layer, str(group)), []).append(
+                (key, schema)
+            )
+
+    errors = []
+    for (layer, group), layer_owners in sorted(owners.items()):
+        if len(layer_owners) < 2:
+            continue
+        descriptions = ", ".join(
+            f"`{key}` (target schema {schema!r})"
+            for key, schema in layer_owners
+        )
+        errors.append(
+            f"Duplicate {layer} ownership for dataflow group {group!r}: "
+            f"{descriptions}. Each group/layer pair must be owned by exactly "
+            "one pipeline; an intentional split may use one bronze owner and "
+            "one silver owner."
+        )
+    return errors
+
+
+def _deep_merge_mapping(
+    base: Dict[str, Any],
+    override: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Recursively merge a bundle target override onto a base mapping."""
+    merged = copy.deepcopy(base)
+    for key, value in override.items():
+        if isinstance(merged.get(key), dict) and isinstance(value, dict):
+            merged[key] = _deep_merge_mapping(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _effective_pipeline_resources(
+    pipelines: Dict[str, Any],
+    databricks_doc: Dict[str, Any],
+    target: Optional[str],
+) -> Dict[str, Any]:
+    """Return base pipelines with target resource overrides applied."""
+    if target is None:
+        return pipelines
+    targets = databricks_doc.get("targets") or {}
+    if not isinstance(targets, dict):
+        return pipelines
+    target_doc = targets.get(target) or {}
+    if not isinstance(target_doc, dict):
+        return pipelines
+    target_resources = target_doc.get("resources") or {}
+    target_pipelines = (
+        target_resources.get("pipelines")
+        if isinstance(target_resources, dict)
+        else None
+    )
+    if not isinstance(target_pipelines, dict):
+        return pipelines
+    merged = copy.deepcopy(pipelines)
+    for key, override in target_pipelines.items():
+        if isinstance(merged.get(key), dict) and isinstance(override, dict):
+            merged[key] = _deep_merge_mapping(merged[key], override)
+        else:
+            merged[key] = copy.deepcopy(override)
+    return merged
+
+
+def _pipeline_ownership_errors_across_targets(
+    configured: Dict[str, Dict[str, Any]],
+    variables: Dict[str, Any],
+    databricks_doc: Dict[str, Any],
+    target: Optional[str] = None,
+) -> List[str]:
+    """Validate ownership for one target, or defaults plus every target."""
+    raw_targets = databricks_doc.get("targets") or {}
+    if not isinstance(raw_targets, dict):
+        raw_targets = {}
+    targets = (
+        [target]
+        if target is not None
+        else [None] + list(raw_targets.keys())
+    )
+    contexts: Dict[str, List[Optional[str]]] = {}
+    for target_name in targets:
+        effective_pipelines = _effective_pipeline_resources(
+            configured,
+            databricks_doc,
+            target_name,
+        )
+        for error in _pipeline_ownership_errors(
+            effective_pipelines,
+            variables,
+            databricks_doc,
+            target_name,
+        ):
+            contexts.setdefault(error, []).append(target_name)
+
+    errors = []
+    for error, target_names in contexts.items():
+        if target is not None or None in target_names:
+            errors.append(error)
+            continue
+        labels = ", ".join(repr(name) for name in target_names)
+        errors.append(f"Target(s) {labels}: {error}")
+    return errors
+
+
+def _effective_pipeline_tasks(
+    tasks: List[Dict[str, Any]],
+    databricks_doc: Dict[str, Any],
+    target: Optional[str],
+) -> List[Dict[str, Any]]:
+    """Return target job tasks when explicitly overridden, otherwise base."""
+    if target is None:
+        return tasks
+    targets = databricks_doc.get("targets") or {}
+    if not isinstance(targets, dict):
+        return tasks
+    target_doc = targets.get(target) or {}
+    if not isinstance(target_doc, dict):
+        return tasks
+    target_resources = target_doc.get("resources") or {}
+    target_jobs = (
+        target_resources.get("jobs")
+        if isinstance(target_resources, dict)
+        else None
+    )
+    pipeline_job = (
+        target_jobs.get("pipelines")
+        if isinstance(target_jobs, dict)
+        else None
+    )
+    target_tasks = (
+        pipeline_job.get("tasks")
+        if isinstance(pipeline_job, dict)
+        else None
+    )
+    if not isinstance(target_tasks, list):
+        return tasks
+
+    merged = copy.deepcopy(tasks)
+    by_key = {
+        task.get("task_key"): index
+        for index, task in enumerate(merged)
+        if isinstance(task, dict) and task.get("task_key")
+    }
+    for override in target_tasks:
+        task_key = (
+            override.get("task_key")
+            if isinstance(override, dict)
+            else None
+        )
+        if task_key in by_key:
+            index = by_key[task_key]
+            merged[index] = _deep_merge_mapping(
+                merged[index],
+                override,
+            )
+        else:
+            merged.append(copy.deepcopy(override))
+            if task_key:
+                by_key[task_key] = len(merged) - 1
+    return merged
+
+
+def _split_dependency_errors(
+    pipelines: Dict[str, Any],
+    tasks: List[Dict[str, Any]],
+    variables: Dict[str, Any],
+    databricks_doc: Dict[str, Any],
+    target: Optional[str],
+) -> List[str]:
+    """Validate bronze-before-silver ordering for one effective target."""
+    effective_pipelines = _effective_pipeline_resources(
+        pipelines,
+        databricks_doc,
+        target,
+    )
+    effective_tasks = _effective_pipeline_tasks(
+        tasks,
+        databricks_doc,
+        target,
+    )
+    layers: Dict[str, str] = {}
+    groups: Dict[str, Any] = {}
+    for key, spec in effective_pipelines.items():
+        if not isinstance(spec, dict):
+            continue
+        config = _pipeline_configuration(spec)
+        layer = config.get("layer")
+        if layer not in ("bronze", "silver"):
+            continue
+        group = _resolve_bundle_reference(
+            config.get(f"{layer}.group"),
+            variables,
+            databricks_doc,
+            target,
+        )
+        if group is not None:
+            layers[key] = layer
+            groups[key] = group
+
+    task_by_key = {
+        task.get("task_key"): task
+        for task in effective_tasks
+        if isinstance(task, dict) and task.get("task_key")
+    }
+    refs: Dict[str, List[str]] = {}
+    for task_key, task in task_by_key.items():
+        pipeline_ref = _pipeline_reference(task)
+        if pipeline_ref:
+            refs.setdefault(pipeline_ref, []).append(task_key)
+
+    errors = []
+    for silver_key, layer in layers.items():
+        if layer != "silver":
+            continue
+        matching_bronze = {
+            key
+            for key, candidate_layer in layers.items()
+            if candidate_layer == "bronze"
+            and groups.get(key) == groups.get(silver_key)
+        }
+        if not matching_bronze or silver_key not in refs:
+            continue
+        dependencies, _ = _transitive_dependencies(
+            refs[silver_key][0], task_by_key
+        )
+        matching_tasks = {
+            task_key
+            for key in matching_bronze
+            for task_key in refs.get(key, [])
+        }
+        if not dependencies.intersection(matching_tasks):
+            errors.append(
+                f"Silver pipeline `{silver_key}` shares dataflow group "
+                f"{groups.get(silver_key)!r} with bronze pipeline(s) "
+                f"{sorted(matching_bronze)} but its job task does not depend "
+                "on a matching bronze task"
+            )
+    return errors
+
+
+def _split_dependency_errors_across_targets(
+    pipelines: Dict[str, Any],
+    tasks: List[Dict[str, Any]],
+    variables: Dict[str, Any],
+    databricks_doc: Dict[str, Any],
+    target: Optional[str],
+) -> List[str]:
+    """Validate split dependencies for one target or every target."""
+    raw_targets = databricks_doc.get("targets") or {}
+    if not isinstance(raw_targets, dict):
+        raw_targets = {}
+    targets = (
+        [target]
+        if target is not None
+        else [None] + list(raw_targets.keys())
+    )
+    contexts: Dict[str, List[Optional[str]]] = {}
+    for target_name in targets:
+        for error in _split_dependency_errors(
+            pipelines,
+            tasks,
+            variables,
+            databricks_doc,
+            target_name,
+        ):
+            contexts.setdefault(error, []).append(target_name)
+
+    errors = []
+    for error, target_names in contexts.items():
+        if target is not None or None in target_names:
+            errors.append(error)
+            continue
+        labels = ", ".join(repr(name) for name in target_names)
+        errors.append(f"Target(s) {labels}: {error}")
+    return errors
+
+
+def _sdp_meta_sanity_checks(
+    bundle_dir: Path, target: Optional[str] = None
+) -> List[str]:
     """sdp-meta-specific checks layered on top of `databricks bundle validate`.
 
     Returns a list of human-readable error strings (empty list = all good).
@@ -518,13 +1029,17 @@ def _sdp_meta_sanity_checks(bundle_dir: Path) -> List[str]:
     # comments at parse time, so this only fires once a user actually
     # uncomments and forgets to substitute their real value.
     databricks_yml = bundle_dir / "databricks.yml"
+    db_yml_doc: Dict[str, Any] = {}
     if databricks_yml.is_file():
         try:
-            db_yml_doc = yaml.safe_load(databricks_yml.read_text())
+            db_yml_doc = yaml.safe_load(databricks_yml.read_text()) or {}
         except yaml.YAMLError as exc:
             errors.append(f"databricks.yml: invalid YAML ({exc})")
-            db_yml_doc = None
-        if db_yml_doc is not None:
+            db_yml_doc = {}
+        if not isinstance(db_yml_doc, dict):
+            errors.append("databricks.yml: expected a mapping at the top level")
+            db_yml_doc = {}
+        if db_yml_doc:
             for dotted_field, value in _find_yaml_placeholders(db_yml_doc):
                 errors.append(
                     f"databricks.yml: field `{dotted_field}` is still the "
@@ -545,13 +1060,52 @@ def _sdp_meta_sanity_checks(bundle_dir: Path) -> List[str]:
         errors.append(f"{variables_yml.relative_to(bundle_dir)}: invalid YAML ({exc})")
         return errors
 
+    raw_targets = db_yml_doc.get("targets") or {}
+    if not isinstance(raw_targets, dict):
+        errors.append("databricks.yml: `targets` must be a mapping")
+        targets: Dict[str, Any] = {}
+    else:
+        targets = raw_targets
+        for target_name, target_doc in targets.items():
+            if not isinstance(target_doc, dict):
+                errors.append(
+                    f"databricks.yml: target `{target_name}` must be a mapping"
+                )
+
+    # Match Databricks bundle target precedence when --target is omitted:
+    # current/legacy environment selection, declared default, then an only
+    # configured target. Ownership and split-job checks still walk every
+    # target unless the caller selected one via `--target` or environment.
+    if target is None:
+        target = (
+            os.environ.get("DATABRICKS_BUNDLE_TARGET")
+            or os.environ.get("DATABRICKS_BUNDLE_ENV")
+        )
+    requested_target = target
+    if target is None:
+        default_targets = [
+            target_name
+            for target_name, target_doc in targets.items()
+            if isinstance(target_doc, dict) and target_doc.get("default") is True
+        ]
+        if len(default_targets) > 1:
+            errors.append(
+                "databricks.yml: multiple targets are marked `default: true`: "
+                f"{sorted(default_targets)}"
+            )
+        elif len(default_targets) == 1:
+            target = default_targets[0]
+        elif len(targets) == 1:
+            target = next(iter(targets))
+
     variables = variables_doc.get("variables", {}) or {}
 
     def _default(name: str):
-        node = variables.get(name) or {}
-        return node.get("default") if isinstance(node, dict) else None
+        return _resolved_variable(variables, db_yml_doc, name, target)
 
     onboarding_file_name = _default("onboarding_file_name")
+    groups_in_file = set()
+    onboarding_flows: List[Dict[str, Any]] = []
     if not onboarding_file_name:
         errors.append("variables.yml: `onboarding_file_name` has no default value")
     else:
@@ -578,20 +1132,14 @@ def _sdp_meta_sanity_checks(bundle_dir: Path) -> List[str]:
                         "of flow dicts at the top level"
                     )
                 else:
-                    dataflow_group = _default("dataflow_group")
+                    onboarding_flows = [
+                        flow for flow in onboarding_doc
+                        if isinstance(flow, dict)
+                    ]
                     groups_in_file = {
                         flow.get("data_flow_group")
-                        for flow in onboarding_doc
-                        if isinstance(flow, dict)
+                        for flow in onboarding_flows
                     }
-                    if dataflow_group and dataflow_group not in groups_in_file:
-                        errors.append(
-                            f"dataflow_group `{dataflow_group}` (from variables.yml) "
-                            f"is not used by any flow in "
-                            f"{onboarding_path.relative_to(bundle_dir)}; flows use: "
-                            f"{sorted(g for g in groups_in_file if g)}"
-                        )
-
                     placeholder_hits = _find_edit_me_placeholders(onboarding_doc)
                     rel = onboarding_path.relative_to(bundle_dir)
                     for flow_id, dotted_field, value in placeholder_hits:
@@ -608,7 +1156,7 @@ def _sdp_meta_sanity_checks(bundle_dir: Path) -> List[str]:
         errors.append(
             "variables.yml: `sdp_meta_dependency` is still the `__SET_ME__` "
             "sentinel. Replace it with either a PyPI coordinate (e.g. "
-            "`databricks-labs-sdp-meta==0.1.0`) or a UC-volume wheel path "
+            "`databricks-labs-sdp-meta==0.1.1`) or a UC-volume wheel path "
             "(produced by `databricks labs sdp-meta bundle-prepare-wheel`)."
         )
     elif wheel_source == "volume_path" and not sdp_meta_dep.startswith("/Volumes/"):
@@ -639,41 +1187,256 @@ def _sdp_meta_sanity_checks(bundle_dir: Path) -> List[str]:
             pipelines_doc = {}
 
         pipes = (pipelines_doc.get("resources", {}) or {}).get("pipelines", {}) or {}
-        has_bronze = "bronze" in pipes
-        has_silver = "silver" in pipes
-        has_combined = "bronze_silver" in pipes
+        configured = {
+            key: spec
+            for key, spec in pipes.items()
+            if isinstance(spec, dict) and isinstance(spec.get("configuration"), dict)
+        }
+        if pipes and not configured:
+            # Keep compatibility with old/minimal bundles whose resource stubs
+            # predate per-pipeline configuration. Fully rendered #446 bundles
+            # use the configuration-driven validator below.
+            errors.extend(_legacy_topology_errors(layer, pipeline_mode, pipes))
+            dataflow_group = _default("dataflow_group")
+            if dataflow_group and dataflow_group not in groups_in_file:
+                errors.append(
+                    f"dataflow_group `{dataflow_group}` (from variables.yml) "
+                    "is not used by any onboarding flow; flows use: "
+                    f"{sorted(g for g in groups_in_file if g)}"
+                )
+        else:
+            if not pipes:
+                errors.append("sdp_meta_pipelines.yml defines no pipeline resources")
+            for key in sorted(set(pipes) - set(configured)):
+                errors.append(
+                    f"Pipeline `{key}` has no `configuration` mapping and cannot "
+                    "be validated as an sdp-meta pipeline"
+                )
 
-        if layer == "bronze":
-            if not has_bronze or has_silver or has_combined:
-                errors.append(
-                    "layer=bronze but sdp_meta_pipelines.yml has "
-                    f"{'bronze' if has_bronze else 'no bronze'}"
-                    f", {'silver' if has_silver else 'no silver'}"
-                    f", {'bronze_silver' if has_combined else 'no bronze_silver'} pipelines"
-                )
-        elif layer == "silver":
-            if has_bronze or not has_silver or has_combined:
-                errors.append(
-                    "layer=silver but sdp_meta_pipelines.yml has "
-                    f"{'bronze' if has_bronze else 'no bronze'}"
-                    f", {'silver' if has_silver else 'no silver'}"
-                    f", {'bronze_silver' if has_combined else 'no bronze_silver'} pipelines"
-                )
-        elif layer == "bronze_silver":
-            if pipeline_mode == "combined":
-                if not has_combined or has_bronze or has_silver:
+            pipeline_layers: Dict[str, str] = {}
+            for key, spec in configured.items():
+                config = spec["configuration"]
+                if not spec.get("schema"):
                     errors.append(
-                        "layer=bronze_silver, pipeline_mode=combined expects exactly "
-                        "one `bronze_silver` pipeline; got "
-                        f"bronze={has_bronze}, silver={has_silver}, bronze_silver={has_combined}"
+                        f"Pipeline `{key}` is missing its target `schema`"
                     )
+                if not config.get("sdp_meta_dependency"):
+                    errors.append(
+                        f"Pipeline `{key}` is missing configuration "
+                        "`sdp_meta_dependency`"
+                    )
+                pipeline_layer = config.get("layer")
+                if pipeline_layer not in ("bronze", "silver", "bronze_silver"):
+                    errors.append(
+                        f"Pipeline `{key}` configuration.layer must be one of "
+                        "bronze, silver, bronze_silver"
+                    )
+                    continue
+                pipeline_layers[key] = pipeline_layer
+                required_prefixes = (
+                    ("bronze", "silver")
+                    if pipeline_layer == "bronze_silver"
+                    else (pipeline_layer,)
+                )
+                resolved_groups = []
+                for prefix in required_prefixes:
+                    table_key = f"{prefix}.dataflowspecTable"
+                    group_key = f"{prefix}.group"
+                    if not config.get(table_key):
+                        errors.append(
+                            f"Pipeline `{key}` ({pipeline_layer}) is missing "
+                            f"configuration `{table_key}`"
+                        )
+                    raw_group = config.get(group_key)
+                    if not raw_group:
+                        errors.append(
+                            f"Pipeline `{key}` ({pipeline_layer}) is missing "
+                            f"configuration `{group_key}`"
+                        )
+                        continue
+                    group = _resolve_bundle_reference(
+                        raw_group, variables, db_yml_doc, target
+                    )
+                    resolved_groups.append(group)
+                    if group not in groups_in_file:
+                        errors.append(
+                            f"Pipeline `{key}` references {group_key}={group!r}, "
+                            "which is not used by any onboarding flow; flows use: "
+                            f"{sorted(g for g in groups_in_file if g)}"
+                        )
+                    has_layer_row = any(
+                        flow.get("data_flow_group") == group
+                        and any(
+                            field.startswith(f"{prefix}_database_")
+                            and not field.startswith(
+                                f"{prefix}_database_quarantine_"
+                            )
+                            and value
+                            for field, value in flow.items()
+                        )
+                        and flow.get(f"{prefix}_table")
+                        for flow in onboarding_flows
+                    )
+                    if group in groups_in_file and not has_layer_row:
+                        errors.append(
+                            f"Pipeline `{key}` references {group_key}={group!r}, "
+                            f"but that group has no {prefix} onboarding row with "
+                            f"`{prefix}_database_<environment>` and "
+                            f"`{prefix}_table`"
+                        )
+                if len(set(resolved_groups)) > 1:
+                    errors.append(
+                        f"Pipeline `{key}` uses different bronze/silver groups "
+                        f"{resolved_groups}; a combined pipeline must use one group"
+                    )
+            errors.extend(
+                _pipeline_ownership_errors_across_targets(
+                    pipes, variables, db_yml_doc, requested_target
+                )
+            )
+
+            required_onboarding_layers = set()
+            for pipeline_layer in pipeline_layers.values():
+                if pipeline_layer == "bronze_silver":
+                    required_onboarding_layers.update(("bronze", "silver"))
+                else:
+                    required_onboarding_layers.add(pipeline_layer)
+            configured_onboarding_layers = (
+                {"bronze", "silver"}
+                if layer == "bronze_silver"
+                else {layer} if layer in ("bronze", "silver") else set()
+            )
+            missing_onboarding_layers = (
+                required_onboarding_layers - configured_onboarding_layers
+            )
+            if missing_onboarding_layers:
+                errors.append(
+                    f"Onboarding layer={layer!r} does not cover pipeline layer(s) "
+                    f"{sorted(missing_onboarding_layers)}"
+                )
+
+            onboarding_job_yml = (
+                resources_dir / "sdp_meta_onboarding_job.yml"
+            )
+            if not onboarding_job_yml.is_file():
+                errors.append(
+                    f"Missing {onboarding_job_yml.relative_to(bundle_dir)}"
+                )
             else:
-                if not (has_bronze and has_silver) or has_combined:
-                    errors.append(
-                        "layer=bronze_silver, pipeline_mode=split expects both `bronze` "
-                        "and `silver` pipelines and no `bronze_silver` pipeline; got "
-                        f"bronze={has_bronze}, silver={has_silver}, bronze_silver={has_combined}"
+                try:
+                    onboarding_job_doc = (
+                        yaml.safe_load(onboarding_job_yml.read_text()) or {}
                     )
+                except yaml.YAMLError as exc:
+                    errors.append(
+                        f"{onboarding_job_yml.relative_to(bundle_dir)}: "
+                        f"invalid YAML ({exc})"
+                    )
+                    onboarding_job_doc = {}
+                onboarding_tasks = (
+                    (((onboarding_job_doc.get("resources") or {}).get("jobs") or {})
+                     .get("onboarding") or {}).get("tasks") or []
+                )
+                onboard_task = next(
+                    (
+                        task for task in onboarding_tasks
+                        if isinstance(task, dict)
+                        and task.get("task_key") == "onboard_dataflowspecs"
+                    ),
+                    {},
+                )
+                named_parameters = (
+                    (onboard_task.get("python_wheel_task") or {})
+                    .get("named_parameters") or {}
+                )
+                for required_layer in required_onboarding_layers:
+                    parameter = f"{required_layer}_dataflowspec_table"
+                    if not named_parameters.get(parameter):
+                        errors.append(
+                            "Onboarding task `onboard_dataflowspecs` is missing "
+                            f"named parameter `{parameter}` required by configured "
+                            "pipelines"
+                        )
+
+            jobs = (pipelines_doc.get("resources", {}) or {}).get("jobs", {}) or {}
+            pipeline_job = jobs.get("pipelines") or {}
+            tasks = pipeline_job.get("tasks") or []
+            if configured and not isinstance(tasks, list):
+                errors.append("Job `pipelines.tasks` must be a list")
+                tasks = []
+            task_by_key = {
+                task.get("task_key"): task
+                for task in tasks
+                if isinstance(task, dict) and task.get("task_key")
+            }
+            refs: Dict[str, List[str]] = {}
+            for task_key, task in task_by_key.items():
+                pipeline_task = task.get("pipeline_task")
+                if "pipeline_task" in task and not isinstance(pipeline_task, dict):
+                    errors.append(
+                        f"Job task `{task_key}` has malformed `pipeline_task`; "
+                        "expected a mapping"
+                    )
+                elif isinstance(pipeline_task, dict):
+                    ref = _pipeline_reference(task)
+                    if not ref:
+                        errors.append(
+                            f"Job task `{task_key}` must reference a pipeline as "
+                            "`${resources.pipelines.<key>.id}`"
+                        )
+                    else:
+                        refs.setdefault(ref, []).append(task_key)
+                        if ref not in configured:
+                            errors.append(
+                                f"Job task `{task_key}` references unknown pipeline `{ref}`"
+                            )
+                dependencies = {
+                    dep.get("task_key")
+                    for dep in (task.get("depends_on") or [])
+                    if isinstance(dep, dict)
+                }
+                unknown_dependencies = dependencies - set(task_by_key)
+                if unknown_dependencies:
+                    errors.append(
+                        f"Job task `{task_key}` depends on unknown task(s) "
+                        f"{sorted(unknown_dependencies)}"
+                    )
+
+            reported_cycles: set[Tuple[str, ...]] = set()
+            for task_key in task_by_key:
+                _, cycles = _transitive_dependencies(task_key, task_by_key)
+                for cycle in cycles:
+                    cycle_nodes = cycle[:-1]
+                    rotations = [
+                        tuple(cycle_nodes[i:] + cycle_nodes[:i])
+                        for i in range(len(cycle_nodes))
+                    ]
+                    canonical = min(rotations)
+                    if canonical in reported_cycles:
+                        continue
+                    reported_cycles.add(canonical)
+                    errors.append(
+                        "Job `pipelines` contains a dependency cycle: "
+                        + " -> ".join(cycle)
+                    )
+
+            for key in configured:
+                count = len(refs.get(key, []))
+                if count != 1:
+                    errors.append(
+                        f"Pipeline `{key}` must be referenced by exactly one task "
+                        f"in job `pipelines`; found {count}"
+                    )
+
+            errors.extend(
+                _split_dependency_errors_across_targets(
+                    pipes,
+                    tasks,
+                    variables,
+                    db_yml_doc,
+                    requested_target,
+                )
+            )
 
     return errors
 
@@ -695,7 +1458,7 @@ def bundle_validate(
         )
         return 2
 
-    errors = _sdp_meta_sanity_checks(bundle_dir)
+    errors = _sdp_meta_sanity_checks(bundle_dir, target=cmd.target)
     if errors:
         print("sdp-meta sanity checks FAILED:", file=output)
         for err in errors:
@@ -727,6 +1490,602 @@ def bundle_validate(
 
 
 # ---------------------------------------------------------------------------
+# bundle add-pipeline
+# ---------------------------------------------------------------------------
+
+_BUNDLE_RESOURCE_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+
+
+@dataclass
+class PipelineSpec:
+    """One independently configured sdp-meta pipeline topology."""
+
+    name: str
+    layer: str
+    dataflow_group: str
+    pipeline_mode: str = "split"
+    bronze_target_schema: Optional[str] = None
+    silver_target_schema: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if not _BUNDLE_RESOURCE_KEY_RE.fullmatch(self.name):
+            raise ValueError(
+                "pipeline name must start with a letter and contain only "
+                "letters, numbers, and underscores"
+            )
+        if self.layer not in ("bronze", "silver", "bronze_silver"):
+            raise ValueError("layer must be one of: bronze, silver, bronze_silver")
+        if self.pipeline_mode not in ("split", "combined"):
+            raise ValueError("pipeline_mode must be one of: split, combined")
+        if self.layer != "bronze_silver" and self.pipeline_mode != "split":
+            raise ValueError(
+                "pipeline_mode=combined is only valid with layer=bronze_silver"
+            )
+        if not str(self.dataflow_group).strip():
+            raise ValueError("dataflow_group must be non-empty")
+        if self.bronze_target_schema:
+            validate_uc_identifier(
+                self.bronze_target_schema, kind="bronze_target_schema"
+            )
+        if self.silver_target_schema:
+            validate_uc_identifier(
+                self.silver_target_schema, kind="silver_target_schema"
+            )
+
+
+@dataclass
+class BundleAddPipelineCommand:
+    """Parameters for `databricks labs sdp-meta bundle-add-pipeline`."""
+
+    bundle_dir: str = "."
+    pipeline: Optional[PipelineSpec] = None
+    dry_run: bool = False
+
+
+def _pipeline_resource(
+    *,
+    display_name: str,
+    layer: str,
+    group: str,
+    schema: str,
+    bronze_target_schema: Optional[str] = None,
+    silver_target_schema: Optional[str] = None,
+) -> Dict[str, Any]:
+    config: Dict[str, Any] = {
+        "layer": layer,
+        "sdp_meta_dependency": "${var.sdp_meta_dependency}",
+    }
+    if layer in ("bronze", "bronze_silver"):
+        config.update({
+            "bronze.dataflowspecTable": (
+                "${var.uc_catalog_name}.${var.sdp_meta_schema}."
+                "${var.bronze_dataflowspec_table}"
+            ),
+            "bronze.group": group,
+        })
+    if layer in ("silver", "bronze_silver"):
+        config.update({
+            "silver.dataflowspecTable": (
+                "${var.uc_catalog_name}.${var.sdp_meta_schema}."
+                "${var.silver_dataflowspec_table}"
+            ),
+            "silver.group": group,
+        })
+    if bronze_target_schema:
+        config["sdp_meta.bronzeTargetSchema"] = bronze_target_schema
+    if silver_target_schema:
+        config["sdp_meta.silverTargetSchema"] = silver_target_schema
+    return {
+        "name": f"${{bundle.name}} - {display_name}",
+        "tags": {"sdp_meta": "${var.sdp_meta_version}"},
+        "catalog": "${var.uc_catalog_name}",
+        "schema": schema,
+        "development": "${var.development_enabled}",
+        "photon": "${var.photon_enabled}",
+        "serverless": "${var.serverless}",
+        "libraries": [{
+            "notebook": {
+                "path": "${workspace.file_path}/notebooks/init_sdp_meta_pipeline"
+            }
+        }],
+        "configuration": config,
+    }
+
+
+def _pipeline_entries(spec: PipelineSpec) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    bronze_schema = spec.bronze_target_schema or "${var.bronze_target_schema}"
+    silver_schema = spec.silver_target_schema or "${var.silver_target_schema}"
+    resources: Dict[str, Any] = {}
+    tasks: List[Dict[str, Any]] = []
+
+    def add(layer: str, schema: str, depends_on: Optional[str] = None) -> str:
+        key = f"{spec.name}_{layer}"
+        resources[key] = _pipeline_resource(
+            display_name=f"{spec.name} - {layer.replace('_', '+')}",
+            layer=layer,
+            group=spec.dataflow_group,
+            schema=schema,
+            bronze_target_schema=(
+                bronze_schema if layer in ("bronze", "bronze_silver") else None
+            ),
+            silver_target_schema=(
+                silver_schema if layer in ("silver", "bronze_silver") else None
+            ),
+        )
+        task: Dict[str, Any] = {
+            "task_key": key,
+            "pipeline_task": {
+                "pipeline_id": f"${{resources.pipelines.{key}.id}}",
+                "full_refresh": False,
+            },
+        }
+        if depends_on:
+            task["depends_on"] = [{"task_key": depends_on}]
+        tasks.append(task)
+        return key
+
+    if spec.layer == "bronze":
+        add("bronze", bronze_schema)
+    elif spec.layer == "silver":
+        add("silver", silver_schema)
+    elif spec.pipeline_mode == "combined":
+        add("bronze_silver", bronze_schema)
+    else:
+        bronze_key = add("bronze", bronze_schema)
+        add("silver", silver_schema, depends_on=bronze_key)
+    return resources, tasks
+
+
+def _wire_split_pipeline_dependencies(
+    pipelines: Dict[str, Any],
+    tasks: List[Dict[str, Any]],
+    new_pipeline_keys: Set[str],
+    variables: Dict[str, Any],
+    databricks_doc: Dict[str, Any],
+) -> None:
+    """Wire intentional same-group bronze/silver owners in execution order."""
+    tasks_by_pipeline = {}
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        pipeline_ref = _pipeline_reference(task)
+        if pipeline_ref:
+            tasks_by_pipeline[pipeline_ref] = task
+
+    split_pairs = set()
+    target_names = [None] + list(
+        (databricks_doc.get("targets") or {}).keys()
+    )
+    for target_name in target_names:
+        owners: Dict[Tuple[str, str], str] = {}
+        effective_pipelines = _effective_pipeline_resources(
+            pipelines,
+            databricks_doc,
+            target_name,
+        )
+        for key, spec in effective_pipelines.items():
+            if not isinstance(spec, dict):
+                continue
+            config = _pipeline_configuration(spec)
+            layer = config.get("layer")
+            if layer not in ("bronze", "silver"):
+                continue
+            group = _resolve_bundle_reference(
+                config.get(f"{layer}.group"),
+                variables,
+                databricks_doc,
+                target_name,
+            )
+            if group:
+                owners[(layer, str(group))] = key
+        for group in {group for _layer, group in owners}:
+            bronze_key = owners.get(("bronze", group))
+            silver_key = owners.get(("silver", group))
+            if bronze_key and silver_key:
+                split_pairs.add((bronze_key, silver_key))
+
+    for bronze_key, silver_key in sorted(split_pairs):
+        if (
+            not {bronze_key, silver_key}.intersection(new_pipeline_keys)
+        ):
+            continue
+        bronze_task = tasks_by_pipeline.get(bronze_key)
+        silver_task = tasks_by_pipeline.get(silver_key)
+        if not bronze_task or not silver_task:
+            continue
+        bronze_task_key = bronze_task.get("task_key")
+        dependencies = silver_task.get("depends_on")
+        if dependencies is None:
+            dependencies = []
+            silver_task["depends_on"] = dependencies
+        elif not isinstance(dependencies, list):
+            raise ValueError(
+                f"Job task {silver_task.get('task_key')!r} has malformed "
+                "`depends_on`; expected a list"
+            )
+        if bronze_task_key and not any(
+            isinstance(dep, dict)
+            and dep.get("task_key") == bronze_task_key
+            for dep in dependencies
+        ):
+            dependencies.append({"task_key": bronze_task_key})
+
+
+def _onboarding_layer_updates(
+    bundle_dir: Path,
+    pipelines: Dict[str, Any],
+    pipeline_spec: PipelineSpec,
+) -> List[Tuple[Path, str]]:
+    """Prepare variables/job updates so onboarding covers all pipeline layers."""
+    variables_path = bundle_dir / "resources" / "variables.yml"
+    onboarding_job_path = (
+        bundle_dir / "resources" / "sdp_meta_onboarding_job.yml"
+    )
+    if not variables_path.is_file() or not onboarding_job_path.is_file():
+        raise FileNotFoundError(
+            "resources/variables.yml and resources/sdp_meta_onboarding_job.yml "
+            "are required to add a pipeline"
+        )
+
+    variables_doc = yaml.safe_load(variables_path.read_text()) or {}
+    variables = variables_doc.get("variables") or {}
+    current_layer = _var_default(variables, "layer")
+    required = set()
+    if current_layer == "bronze_silver":
+        required.update(("bronze", "silver"))
+    elif current_layer in ("bronze", "silver"):
+        required.add(current_layer)
+    for pipeline in pipelines.values():
+        if not isinstance(pipeline, dict):
+            continue
+        pipeline_layer = _pipeline_configuration(pipeline).get("layer")
+        if pipeline_layer == "bronze_silver":
+            required.update(("bronze", "silver"))
+        elif pipeline_layer in ("bronze", "silver"):
+            required.add(pipeline_layer)
+    onboarding_layer = (
+        "bronze_silver" if required == {"bronze", "silver"}
+        else next(iter(required), current_layer)
+    )
+    layer_node = variables.get("layer")
+    if not isinstance(layer_node, dict):
+        raise ValueError("resources/variables.yml: variable `layer` is missing")
+    layer_node["default"] = onboarding_layer
+
+    job_doc = yaml.safe_load(onboarding_job_path.read_text()) or {}
+    jobs = (job_doc.get("resources") or {}).get("jobs") or {}
+    tasks = (jobs.get("onboarding") or {}).get("tasks") or []
+    onboard_task = next(
+        (
+            task for task in tasks
+            if isinstance(task, dict)
+            and task.get("task_key") == "onboard_dataflowspecs"
+        ),
+        None,
+    )
+    if onboard_task is None:
+        raise ValueError(
+            "resources/sdp_meta_onboarding_job.yml is missing task "
+            "`onboard_dataflowspecs`"
+        )
+    named_parameters = (
+        onboard_task.setdefault("python_wheel_task", {})
+        .setdefault("named_parameters", {})
+    )
+    named_parameters["onboard_layer"] = "${var.layer}"
+    if "bronze" in required:
+        named_parameters["bronze_dataflowspec_table"] = (
+            "${var.bronze_dataflowspec_table}"
+        )
+    if "silver" in required:
+        named_parameters["silver_dataflowspec_table"] = (
+            "${var.silver_dataflowspec_table}"
+        )
+    updates = [
+        (variables_path, yaml.safe_dump(variables_doc, sort_keys=False)),
+        (onboarding_job_path, yaml.safe_dump(job_doc, sort_keys=False)),
+    ]
+    onboarding_path = _resolve_onboarding_path(bundle_dir, None, variables)
+    onboarding_rows = _load_existing_flows(onboarding_path)
+    catalog = _var_default(variables, "uc_catalog_name") or "main"
+    bronze_schema = (
+        pipeline_spec.bronze_target_schema
+        or _var_default(variables, "bronze_target_schema")
+        or "sdp_meta_bronze"
+    )
+    silver_schema = (
+        pipeline_spec.silver_target_schema
+        or _var_default(variables, "silver_target_schema")
+        or "sdp_meta_silver"
+    )
+    onboarding_ext = (
+        "yml"
+        if onboarding_path.suffix.lower() in (".yml", ".yaml")
+        else "json"
+    )
+    changed = False
+    silver_tables = []
+    matched_rows = 0
+    for row in onboarding_rows:
+        if (
+            not isinstance(row, dict)
+            or row.get("data_flow_group") != pipeline_spec.dataflow_group
+        ):
+            continue
+        matched_rows += 1
+        original_row = dict(row)
+        if pipeline_spec.layer in ("bronze", "bronze_silver"):
+            bronze_table = (
+                row.get("bronze_table")
+                or row.get("silver_table")
+                or (row.get("source_details") or {}).get("source_table")
+            )
+            if not bronze_table:
+                raise ValueError(
+                    f"Cannot add bronze pipeline for data_flow_group="
+                    f"{pipeline_spec.dataflow_group!r}: flow "
+                    f"{row.get('data_flow_id')!r} has no bronze_table, "
+                    "silver_table, or source_details.source_table to use"
+                )
+            row.setdefault("bronze_table", bronze_table)
+            row.setdefault("bronze_reader_options", {})
+            row.setdefault("bronze_table_path_dev", "")
+            row.setdefault("bronze_partition_columns", "")
+            target = f"{catalog}.{bronze_schema}"
+            previous_main = row.get("bronze_database_dev")
+            if previous_main != target:
+                row["bronze_database_dev"] = target
+                changed = True
+            if "bronze_database_quarantine_dev" in row:
+                # Only follow the main schema when quarantine rows were still
+                # routed alongside it; keep a user-isolated quarantine schema.
+                current_quarantine = row.get("bronze_database_quarantine_dev")
+                if not current_quarantine or current_quarantine == previous_main:
+                    row["bronze_database_quarantine_dev"] = target
+        if pipeline_spec.layer in ("silver", "bronze_silver"):
+            silver_table = (
+                row.get("silver_table")
+                or row.get("bronze_table")
+                or (row.get("source_details") or {}).get("source_table")
+            )
+            if not silver_table:
+                raise ValueError(
+                    f"Cannot add silver pipeline for data_flow_group="
+                    f"{pipeline_spec.dataflow_group!r}: flow "
+                    f"{row.get('data_flow_id')!r} has no silver_table, "
+                    "bronze_table, or source_details.source_table to use"
+                )
+            row.setdefault("silver_table", silver_table)
+            row.setdefault("silver_table_path_dev", "")
+            row.setdefault("silver_partition_columns", "")
+            row.setdefault(
+                "silver_transformation_json_dev",
+                (
+                    "${workspace.file_path}/conf/"
+                    f"silver_transformations.{onboarding_ext}"
+                ),
+            )
+            if silver_table not in silver_tables:
+                silver_tables.append(silver_table)
+            target = f"{catalog}.{silver_schema}"
+            previous_main = row.get("silver_database_dev")
+            if previous_main != target:
+                row["silver_database_dev"] = target
+                changed = True
+            if "silver_database_quarantine_dev" in row:
+                current_quarantine = row.get("silver_database_quarantine_dev")
+                if not current_quarantine or current_quarantine == previous_main:
+                    row["silver_database_quarantine_dev"] = target
+        if row != original_row:
+            changed = True
+    if matched_rows == 0:
+        raise ValueError(
+            "Cannot add pipeline for data_flow_group="
+            f"{pipeline_spec.dataflow_group!r}: the onboarding file "
+            f"{onboarding_path.name!r} contains no matching rows"
+        )
+    if changed:
+        if onboarding_path.suffix.lower() in (".yml", ".yaml"):
+            onboarding_text = yaml.safe_dump(onboarding_rows, sort_keys=False)
+        else:
+            onboarding_text = json.dumps(onboarding_rows, indent=2)
+        updates.append((onboarding_path, onboarding_text))
+    if silver_tables:
+        transformations_path = (
+            bundle_dir / "conf" / f"silver_transformations.{onboarding_ext}"
+        )
+        if transformations_path.is_file():
+            transformations = _load_yaml_or_json(transformations_path) or []
+        else:
+            transformations = []
+        if not isinstance(transformations, list):
+            raise ValueError(
+                f"{transformations_path.name}: expected a top-level list"
+            )
+        existing_tables = {
+            row.get("target_table")
+            for row in transformations
+            if isinstance(row, dict)
+        }
+        for table in silver_tables:
+            if table not in existing_tables:
+                transformations.append({
+                    "target_table": table,
+                    "select_exp": ["*"],
+                })
+        if onboarding_ext == "yml":
+            transformations_text = yaml.safe_dump(
+                transformations, sort_keys=False
+            )
+        else:
+            transformations_text = json.dumps(transformations, indent=2)
+        updates.append((transformations_path, transformations_text))
+    return updates
+
+
+def bundle_add_pipeline(
+    cmd: BundleAddPipelineCommand, *, output: Optional[TextIO] = None
+) -> int:
+    """Add one independently configured topology and its job task wiring."""
+    bundle_dir = Path(cmd.bundle_dir).resolve()
+    if not (bundle_dir / "databricks.yml").is_file():
+        print(
+            f"ERROR: {bundle_dir} does not look like a bundle (no databricks.yml)",
+            file=output,
+        )
+        return 2
+    if cmd.pipeline is None:
+        print("ERROR: pipeline specification is required", file=output)
+        return 2
+
+    pipelines_path = bundle_dir / "resources" / "sdp_meta_pipelines.yml"
+    if not pipelines_path.is_file():
+        print(
+            "ERROR: resources/sdp_meta_pipelines.yml not found; run this command "
+            "from a bundle scaffolded by bundle-init",
+            file=output,
+        )
+        return 2
+    try:
+        doc = _load_yaml_mapping(pipelines_path)
+        resources_doc = doc.setdefault("resources", {})
+        if not isinstance(resources_doc, dict):
+            raise ValueError(
+                "sdp_meta_pipelines.yml: `resources` must be a mapping"
+            )
+        pipelines = resources_doc.setdefault("pipelines", {})
+        jobs = resources_doc.setdefault("jobs", {})
+        if not isinstance(pipelines, dict) or not isinstance(jobs, dict):
+            raise ValueError(
+                "sdp_meta_pipelines.yml: `resources.pipelines` and "
+                "`resources.jobs` must be mappings"
+            )
+        pipeline_job = jobs.setdefault(
+            "pipelines",
+            {
+                "name": "${bundle.name} - run pipelines",
+                "description": (
+                    "Runs the sdp-meta SDP Pipeline(s) end-to-end."
+                ),
+                "tasks": [],
+            },
+        )
+        if not isinstance(pipeline_job, dict):
+            raise ValueError(
+                "sdp_meta_pipelines.yml: `resources.jobs.pipelines` "
+                "must be a mapping"
+            )
+        tasks = pipeline_job.setdefault("tasks", [])
+        if not isinstance(tasks, list):
+            raise ValueError(
+                "sdp_meta_pipelines.yml: "
+                "`resources.jobs.pipelines.tasks` must be a list"
+            )
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        print(
+            f"ERROR: {exc}",
+            file=output,
+        )
+        return 2
+
+    new_resources, new_tasks = _pipeline_entries(cmd.pipeline)
+    collisions = sorted(set(pipelines).intersection(new_resources))
+    existing_task_keys = {
+        task.get("task_key") for task in tasks if isinstance(task, dict)
+    }
+    task_collisions = sorted(
+        task["task_key"] for task in new_tasks
+        if task["task_key"] in existing_task_keys
+    )
+    if collisions or task_collisions:
+        print(
+            "ERROR: pipeline topology already exists; resource collisions="
+            f"{collisions}, task collisions={task_collisions}",
+            file=output,
+        )
+        return 2
+
+    keys = list(new_resources)
+    merged_pipelines = {**pipelines, **new_resources}
+    try:
+        variables_path = bundle_dir / "resources" / "variables.yml"
+        variables_doc = _load_yaml_mapping(variables_path)
+        variables = variables_doc.get("variables") or {}
+        if not isinstance(variables, dict):
+            raise ValueError(
+                "variables.yml: `variables` must be a mapping"
+            )
+        databricks_doc = _load_yaml_mapping(
+            bundle_dir / "databricks.yml"
+        )
+        # Fail closed on the entire merged topology, including every target
+        # override. A pre-existing conflict must be repaired before another
+        # pipeline can be added; otherwise this command would preserve an
+        # already ambiguous ownership map.
+        ownership_errors = _pipeline_ownership_errors_across_targets(
+            merged_pipelines, variables, databricks_doc
+        )
+        if ownership_errors:
+            for error in ownership_errors:
+                print(
+                    "ERROR: merged pipeline topology is invalid: "
+                    f"{error}",
+                    file=output,
+                )
+            return 2
+        pending_tasks = tasks + new_tasks
+        _wire_split_pipeline_dependencies(
+            merged_pipelines,
+            pending_tasks,
+            set(new_resources),
+            variables,
+            databricks_doc,
+        )
+        dependency_errors = _split_dependency_errors_across_targets(
+            merged_pipelines,
+            pending_tasks,
+            variables,
+            databricks_doc,
+            None,
+        )
+        if dependency_errors:
+            for error in dependency_errors:
+                print(
+                    "ERROR: merged pipeline topology is invalid: "
+                    f"{error}",
+                    file=output,
+                )
+            return 2
+        onboarding_updates = _onboarding_layer_updates(
+            bundle_dir, merged_pipelines, cmd.pipeline
+        )
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        print(f"ERROR: {exc}", file=output)
+        return 2
+
+    if cmd.dry_run:
+        print(
+            f"Would add pipeline resource(s) {keys} for group "
+            f"{cmd.pipeline.dataflow_group!r}; no files changed.",
+            file=output,
+        )
+        return 0
+
+    pipelines.update(new_resources)
+    tasks.extend(new_tasks)
+    pipelines_path.write_text(yaml.safe_dump(doc, sort_keys=False))
+    for path, text in onboarding_updates:
+        path.write_text(text)
+    print(
+        f"Added pipeline resource(s) {keys} and {len(new_tasks)} job task(s) "
+        f"for dataflow_group={cmd.pipeline.dataflow_group!r}. "
+        "Run `databricks labs sdp-meta bundle-validate` to confirm.",
+        file=output,
+    )
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # bundle add-flow
 # ---------------------------------------------------------------------------
 
@@ -742,6 +2101,9 @@ _CSV_FIELD_ALIASES = {
     "kafka_topic": ["kafka_topic", "subscribe", "topic"],
     "bronze_table": ["bronze_table"],
     "silver_table": ["silver_table"],
+    "layer": ["layer"],
+    "bronze_target_schema": ["bronze_target_schema"],
+    "silver_target_schema": ["silver_target_schema"],
     "data_flow_id": ["data_flow_id", "id"],
     "data_flow_group": ["data_flow_group", "group"],
     "source_system": ["source_system"],
@@ -769,6 +2131,9 @@ class FlowSpec:
     snapshot_format: str = "delta"
     bronze_table: Optional[str] = None
     silver_table: Optional[str] = None
+    layer: Optional[str] = None
+    bronze_target_schema: Optional[str] = None
+    silver_target_schema: Optional[str] = None
     data_flow_id: str = "auto"
     data_flow_group: Optional[str] = None
     source_system: str = "auto_added"
@@ -776,6 +2141,25 @@ class FlowSpec:
     # "cloudFiles"). Defaults to "json" so existing CSVs that omit this column
     # behave identically to before.
     cloudfiles_format: str = "json"
+
+    def __post_init__(self) -> None:
+        # Interactive and CSV callers represent an omitted schema override as
+        # an empty string. Normalize that form so pipeline defaults still win
+        # over the broader variables.yml fallback.
+        if self.bronze_target_schema == "":
+            self.bronze_target_schema = None
+        if self.silver_target_schema == "":
+            self.silver_target_schema = None
+        if self.layer and self.layer not in ("bronze", "silver", "bronze_silver"):
+            raise ValueError("layer must be one of: bronze, silver, bronze_silver")
+        if self.bronze_target_schema:
+            validate_uc_identifier(
+                self.bronze_target_schema, kind="bronze_target_schema"
+            )
+        if self.silver_target_schema:
+            validate_uc_identifier(
+                self.silver_target_schema, kind="silver_target_schema"
+            )
 
 
 @dataclass
@@ -874,11 +2258,21 @@ def _flow_to_dict(spec: FlowSpec, variables: Dict[str, Any], assigned_id: str) -
     # validator just accepted.
     spec.source_format = validate_source_format(spec.source_format)
 
-    layer = (_var_default(variables, "layer") or "bronze_silver").lower()
+    layer = (
+        spec.layer or _var_default(variables, "layer") or "bronze_silver"
+    ).lower()
     onboarding_format = (_var_default(variables, "onboarding_file_format") or "yaml").lower()
     catalog = _var_default(variables, "uc_catalog_name") or "main"
-    bronze_schema = _var_default(variables, "bronze_target_schema") or "sdp_meta_bronze"
-    silver_schema = _var_default(variables, "silver_target_schema") or "sdp_meta_silver"
+    bronze_schema = (
+        spec.bronze_target_schema
+        or _var_default(variables, "bronze_target_schema")
+        or "sdp_meta_bronze"
+    )
+    silver_schema = (
+        spec.silver_target_schema
+        or _var_default(variables, "silver_target_schema")
+        or "sdp_meta_silver"
+    )
     bundle_group = _var_default(variables, "dataflow_group")
 
     # Validate any UC identifiers we read out of the bundle's
@@ -1066,6 +2460,120 @@ def _flows_from_csv(csv_path: Path) -> List[FlowSpec]:
     return flows
 
 
+def _load_pipeline_resources(bundle_dir: Path) -> Dict[str, Any]:
+    """Load ``resources.pipelines`` from ``sdp_meta_pipelines.yml``.
+
+    Returns an empty mapping when the file is absent. Raises ``ValueError`` or
+    ``yaml.YAMLError`` when the document is present but malformed; callers such
+    as ``bundle_add_flow`` catch those and surface ``ERROR:`` + exit 2.
+    """
+    pipelines_path = bundle_dir / "resources" / "sdp_meta_pipelines.yml"
+    if not pipelines_path.is_file():
+        return {}
+    doc = yaml.safe_load(pipelines_path.read_text())
+    if doc is None:
+        return {}
+    if not isinstance(doc, dict):
+        raise ValueError(
+            f"{pipelines_path.name}: document root must be a mapping"
+        )
+    resources = doc.get("resources")
+    if resources is None:
+        return {}
+    if not isinstance(resources, dict):
+        raise ValueError(
+            f"{pipelines_path.name}: `resources` must be a mapping"
+        )
+    pipelines = resources.get("pipelines")
+    if pipelines is None:
+        return {}
+    if not isinstance(pipelines, dict):
+        raise ValueError(
+            f"{pipelines_path.name}: `resources.pipelines` must be a mapping"
+        )
+    return pipelines
+
+
+def _apply_pipeline_defaults(
+    variables: Dict[str, Any],
+    spec: FlowSpec,
+    pipelines: Dict[str, Any],
+) -> None:
+    """Fill a flow's layer/schemas from the pipeline serving its group.
+
+    ``pipelines`` is the pre-loaded ``resources.pipelines`` mapping so a batch
+    of flows does not re-parse the YAML once per entry. Resolved target schemas
+    are validated with ``validate_uc_identifier`` before assignment, because
+    ``FlowSpec.__post_init__`` has already run by the time this helper fills
+    them in.
+    """
+    group = spec.data_flow_group or _var_default(variables, "dataflow_group")
+    if not group or not pipelines:
+        return
+    layers = set()
+    bronze_schemas = set()
+    silver_schemas = set()
+    for pipeline in pipelines.values():
+        if not isinstance(pipeline, dict):
+            continue
+        config = _pipeline_configuration(pipeline)
+        resolved_groups = set()
+        for key in ("bronze.group", "silver.group"):
+            raw_group = config.get(key)
+            if raw_group in (None, ""):
+                continue
+            if not isinstance(raw_group, str):
+                raise ValueError(
+                    f"pipeline configuration `{key}` must be a string"
+                )
+            match = _VARIABLE_REF_RE.fullmatch(raw_group)
+            resolved_group = (
+                _var_default(variables, match.group(1))
+                if match
+                else raw_group
+            )
+            if not isinstance(resolved_group, str):
+                raise ValueError(
+                    f"pipeline configuration `{key}` must resolve to a string"
+                )
+            resolved_groups.add(resolved_group)
+        if group not in resolved_groups:
+            continue
+        layer = config.get("layer")
+        if layer == "bronze_silver":
+            layers.update(("bronze", "silver"))
+        elif layer in ("bronze", "silver"):
+            layers.add(layer)
+        bronze_schema = config.get("sdp_meta.bronzeTargetSchema")
+        silver_schema = config.get("sdp_meta.silverTargetSchema")
+        # Validate after resolving: values copied into flow rows must be real
+        # UC identifiers, not an unresolved ``${var.x}_bronze`` fragment.
+        if spec.bronze_target_schema is None and bronze_schema:
+            bronze_schemas.add(validate_uc_identifier(
+                _resolve_bundle_reference(bronze_schema, variables, {}, None),
+                kind="bronze_target_schema",
+            ))
+        if spec.silver_target_schema is None and silver_schema:
+            silver_schemas.add(validate_uc_identifier(
+                _resolve_bundle_reference(silver_schema, variables, {}, None),
+                kind="silver_target_schema",
+            ))
+    if len(bronze_schemas) > 1 or len(silver_schemas) > 1:
+        raise ValueError(
+            f"data_flow_group={group!r} is served by pipelines with conflicting "
+            "target schemas; set flow schema overrides explicitly"
+        )
+    if spec.layer is None and layers:
+        spec.layer = (
+            "bronze_silver" if layers == {"bronze", "silver"}
+            else next(iter(layers))
+        )
+    if spec.bronze_target_schema is None and bronze_schemas:
+        spec.bronze_target_schema = next(iter(bronze_schemas))
+    if spec.silver_target_schema is None and silver_schemas:
+        spec.silver_target_schema = next(iter(silver_schemas))
+
+
 def bundle_add_flow(
     cmd: BundleAddFlowCommand, *, output: Optional[TextIO] = None
 ) -> int:
@@ -1086,6 +2594,19 @@ def bundle_add_flow(
 
     variables = _read_variables_yml(bundle_dir)
     onboarding_path = _resolve_onboarding_path(bundle_dir, cmd.onboarding_file, variables)
+    # The resolved onboarding file is authoritative for companion file
+    # references. This matters when --onboarding-file overrides the bundle
+    # default or variables.yml has drifted: add-flow and add-pipeline must
+    # update the same silver_transformations.{yml,json} file.
+    variables = dict(variables)
+    format_node = variables.get("onboarding_file_format")
+    format_node = dict(format_node) if isinstance(format_node, dict) else {}
+    format_node["default"] = (
+        "yaml"
+        if onboarding_path.suffix.lower() in (".yml", ".yaml")
+        else "json"
+    )
+    variables["onboarding_file_format"] = format_node
     existing = _load_existing_flows(onboarding_path)
 
     pending: List[FlowSpec] = list(cmd.flows)
@@ -1110,22 +2631,33 @@ def bundle_add_flow(
         if isinstance(flow, dict) and flow.get("data_flow_id") is not None
     }
 
+    try:
+        pipelines = _load_pipeline_resources(bundle_dir)
+    except (OSError, ValueError, yaml.YAMLError, AttributeError) as exc:
+        print(f"ERROR: {exc}", file=output)
+        return 2
+
     new_entries: List[Dict[str, Any]] = []
     for spec in pending:
-        if spec.data_flow_id == "auto":
-            assigned = str(next_id)
-            next_id += 1
-        else:
-            assigned = str(spec.data_flow_id)
-        if assigned in existing_ids:
-            print(
-                f"ERROR: data_flow_id={assigned!r} already exists in {onboarding_path.name}. "
-                "Pick a different id or use `auto`.",
-                file=output,
-            )
+        try:
+            _apply_pipeline_defaults(variables, spec, pipelines)
+            if spec.data_flow_id == "auto":
+                assigned = str(next_id)
+                next_id += 1
+            else:
+                assigned = str(spec.data_flow_id)
+            if assigned in existing_ids:
+                print(
+                    f"ERROR: data_flow_id={assigned!r} already exists in "
+                    f"{onboarding_path.name}. Pick a different id or use `auto`.",
+                    file=output,
+                )
+                return 2
+            existing_ids.add(assigned)
+            new_entries.append(_flow_to_dict(spec, variables, assigned))
+        except (ValueError, yaml.YAMLError, AttributeError) as exc:
+            print(f"ERROR: {exc}", file=output)
             return 2
-        existing_ids.add(assigned)
-        new_entries.append(_flow_to_dict(spec, variables, assigned))
 
     if cmd.dry_run:
         print(
@@ -1181,21 +2713,15 @@ def _ensure_silver_transformation_entries(
     appended onboarding row that has a `silver_table` and isn't already
     represented. Returns the number of rows appended.
 
-    No-op when the bundle's `layer` variable is `bronze` (no silver pipeline
-    so the file isn't read), when `new_entries` carry no `silver_table`, or
-    when the transformations file isn't present (the user may have replaced
-    it with a custom path). All other failures bubble up so users see them.
+    If the canonical transformations file does not exist, it is created with
+    the required defaults. Per-flow layer overrides take precedence over the
+    bundle's original global layer, so the entries themselves are the source
+    of truth. Returns without writing only when no new silver table needs an
+    entry; all other failures bubble up so users see them.
     """
-    layer = (_var_default(variables, "layer") or "bronze_silver").lower()
-    if layer == "bronze":
-        return 0
-
     onboarding_format = (_var_default(variables, "onboarding_file_format") or "yaml").lower()
     ext = "yml" if onboarding_format == "yaml" else "json"
     transformations_path = bundle_dir / "conf" / f"silver_transformations.{ext}"
-    if not transformations_path.is_file():
-        return 0
-
     silver_tables_to_add: List[str] = []
     for entry in new_entries:
         table = entry.get("silver_table")
@@ -1204,7 +2730,11 @@ def _ensure_silver_transformation_entries(
     if not silver_tables_to_add:
         return 0
 
-    text = transformations_path.read_text().strip()
+    text = (
+        transformations_path.read_text().strip()
+        if transformations_path.is_file()
+        else ""
+    )
     if not text:
         existing_rows: List[Dict[str, Any]] = []
     elif ext == "yml":
@@ -1445,6 +2975,45 @@ def _load_bundle_validate_config(wsi) -> BundleValidateCommand:
     )
 
 
+def _load_bundle_add_pipeline_config(wsi) -> BundleAddPipelineCommand:
+    """Interactive loader for `bundle-add-pipeline`."""
+    bundle_dir = wsi._question("Bundle directory", default=".")
+    name = wsi._question(
+        "Pipeline name (letters, numbers, underscores)", default="additional"
+    )
+    layer = wsi._choice("Layer", ["bronze", "silver", "bronze_silver"])
+    pipeline_mode = "split"
+    if layer == "bronze_silver":
+        pipeline_mode = wsi._choice("Pipeline mode", ["split", "combined"])
+    dataflow_group = wsi._question("data_flow_group", default="additional_group")
+    bronze_schema = None
+    silver_schema = None
+    if layer in ("bronze", "bronze_silver"):
+        bronze_schema = wsi._question(
+            "Bronze target schema (blank = bundle default)", default=""
+        ) or None
+    if layer in ("silver", "bronze_silver"):
+        silver_schema = wsi._question(
+            "Silver target schema (blank = bundle default)", default=""
+        ) or None
+    dry_run = (
+        wsi._choice("Dry run (preview only, no file write)?", ["False", "True"])
+        == "True"
+    )
+    return BundleAddPipelineCommand(
+        bundle_dir=bundle_dir,
+        pipeline=PipelineSpec(
+            name=name,
+            layer=layer,
+            pipeline_mode=pipeline_mode,
+            dataflow_group=dataflow_group,
+            bronze_target_schema=bronze_schema,
+            silver_target_schema=silver_schema,
+        ),
+        dry_run=dry_run,
+    )
+
+
 def _load_bundle_add_flow_config(wsi) -> BundleAddFlowCommand:
     """Interactive loader for `bundle-add-flow`.
 
@@ -1473,6 +3042,19 @@ def _load_bundle_add_flow_config(wsi) -> BundleAddFlowCommand:
     silver_table = wsi._question("Silver table name (blank = same as bronze)", default="")
     data_flow_id = wsi._question("data_flow_id (use `auto` to auto-increment)", default="auto")
     data_flow_group = wsi._question("data_flow_group (blank = use bundle default)", default="")
+    flow_layer = wsi._question(
+        "Flow layer (blank = use bundle default)", default=""
+    )
+    if flow_layer and flow_layer not in ("bronze", "silver", "bronze_silver"):
+        raise ValueError(
+            "Flow layer must be blank or one of: bronze, silver, bronze_silver"
+        )
+    bronze_target_schema = wsi._question(
+        "Bronze target schema (blank = use bundle default)", default=""
+    )
+    silver_target_schema = wsi._question(
+        "Silver target schema (blank = use bundle default)", default=""
+    )
 
     spec_kwargs: Dict[str, Any] = {
         "source_format": source_format,
@@ -1480,6 +3062,9 @@ def _load_bundle_add_flow_config(wsi) -> BundleAddFlowCommand:
         "silver_table": silver_table or None,
         "data_flow_id": data_flow_id,
         "data_flow_group": data_flow_group or None,
+        "layer": flow_layer or None,
+        "bronze_target_schema": bronze_target_schema or None,
+        "silver_target_schema": silver_target_schema or None,
     }
 
     if source_format == "cloudFiles":

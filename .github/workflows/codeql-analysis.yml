@@ -7,10 +7,11 @@
 name: "CodeQL"
 
 on:
+  workflow_dispatch:
   push:
     branches: [ main ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, v0.1.1 ]
   schedule:
     - cron: '0 12 * * 1'
 
@@ -20,7 +21,9 @@ permissions:
 jobs:
   analyze:
     name: Analyze
-    runs-on: ubuntu-latest
+    runs-on:
+      group: databrickslabs-protected-runner-group
+      labels: linux-ubuntu-latest
     permissions:
       contents: read
       security-events: write

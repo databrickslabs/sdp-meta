@@ -1,8 +1,10 @@
 """Unit tests for standard-compute legacy upgrade orchestration."""
 
+import json
 import os
 import tempfile
 import zipfile
+from io import BytesIO
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import MagicMock, call as mock_call, patch
@@ -14,6 +16,166 @@ from integration_tests.run_backward_compat_tests import (
     BackwardCompatRunner,
 )
 from integration_tests.version_profiles import CURRENT, LEGACY
+
+
+class BackwardCompatFixtureTests(TestCase):
+    def test_append_flow_metadata_is_removed_without_changing_top_level_metadata(self):
+        top_level_metadata = {"select_metadata_cols": {"name": "_metadata.file_name"}}
+        payload = [
+            {
+                "source_details": {"source_metadata": top_level_metadata},
+                "bronze_append_flows": [
+                    {
+                        "source_details": {
+                            "path": "/source",
+                            "source_metadata": {
+                                "select_metadata_cols": {
+                                    "path": "_metadata.file_path"
+                                }
+                            },
+                        }
+                    }
+                ],
+            }
+        ]
+
+        removed = BackwardCompatRunner._remove_append_flow_source_metadata(payload)
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(
+            payload[0]["source_details"]["source_metadata"], top_level_metadata
+        )
+        self.assertEqual(
+            payload[0]["bronze_append_flows"][0]["source_details"],
+            {"path": "/source"},
+        )
+
+    def test_row_filters_are_removed_from_compatibility_fixture(self):
+        payload = [
+            {
+                "bronze_row_filter": "ROW FILTER catalog.schema.fn ON (operation)",
+                "bronze_quarantine_row_filter": (
+                    "ROW FILTER catalog.schema.fn ON (operation)"
+                ),
+                "silver_row_filter": "ROW FILTER catalog.schema.fn ON (operation)",
+                "silver_quarantine_row_filter": (
+                    "ROW FILTER catalog.schema.fn ON (operation)"
+                ),
+                "bronze_table": "customers",
+            }
+        ]
+
+        removed = BackwardCompatRunner._remove_row_filter_configuration(payload)
+
+        self.assertEqual(removed, 4)
+        self.assertEqual(payload, [{"bronze_table": "customers"}])
+
+
+class CurrentUpgradeRunnerTests(TestCase):
+    def setUp(self):
+        self.ws = MagicMock()
+        self.runner = BackwardCompatRunner({}, self.ws)
+        self.conf = BCRunnerConf(
+            run_id="current-upgrade",
+            uc_catalog_name="catalog",
+            source_ref="v0.1.0",
+            target_ref="v0.1.1",
+            source_profile=CURRENT,
+            target_profile=CURRENT,
+            bronze_a1_pipeline_id="bronze-a1",
+            bronze_a2_pipeline_id="bronze-a2",
+            silver_pipeline_id="silver",
+            source_main_whl_remote="/Volumes/test/source-0.1.0.whl",
+            target_main_whl_remote="/Volumes/test/target-0.1.1.whl",
+        )
+
+    def test_current_upgrade_preserves_canonical_runner_and_wheel_key(self):
+        phase1 = self.runner._build_phase1_pipeline_config(
+            self.conf, "bronze", "A1"
+        )
+        phase2 = self.runner._build_phase2_pipeline_config(
+            self.conf, "bronze", "A1"
+        )
+
+        self.assertEqual(
+            self.runner._runner_notebook_filename(self.conf),
+            "init_sdp_meta_pipeline.py",
+        )
+        self.assertEqual(
+            phase1["sdp_meta_whl"], self.conf.source_main_whl_remote
+        )
+        self.assertEqual(
+            phase2["sdp_meta_whl"], self.conf.target_main_whl_remote
+        )
+        self.assertNotIn("dlt_meta_whl", phase1)
+        self.assertNotIn("dlt_meta_whl", phase2)
+
+    def test_current_upgrade_validator_receives_version_line_context(self):
+        self.runner.build_phase2_job(self.conf)
+
+        validate_task = next(
+            task
+            for task in self.ws.jobs.create.call_args.kwargs["tasks"]
+            if task.task_key == "phase2_validate"
+        )
+        parameters = validate_task.notebook_task.base_parameters
+        self.assertEqual(parameters["source_profile"], "current")
+        self.assertEqual(parameters["source_ref"], "v0.1.0")
+        self.assertEqual(parameters["target_ref"], "v0.1.1")
+        self.assertEqual(
+            parameters["phase2_legacy_entrypoint_onboarding"],
+            "False",
+        )
+
+    def test_v010_source_removes_unsupported_append_flow_metadata(self):
+        payload = [
+            {
+                "bronze_append_flows": [
+                    {"source_details": {"source_metadata": {"enabled": "true"}}}
+                ]
+            }
+        ]
+
+        removed_metadata, removed_row_filters = (
+            self.runner._normalize_source_baseline_fixture(self.conf, payload)
+        )
+
+        self.assertEqual((removed_metadata, removed_row_filters), (1, 0))
+        self.assertEqual(
+            payload[0]["bronze_append_flows"][0]["source_details"], {}
+        )
+
+    def test_capable_source_retains_append_metadata_but_removes_row_filter(self):
+        self.conf.source_ref = "v0.1.1"
+        metadata = {"select_metadata_cols": {"name": "_metadata.file_name"}}
+        payload = [
+            {
+                "bronze_row_filter": "ROW FILTER catalog.schema.fn ON (operation)",
+                "bronze_append_flows": [
+                    {"source_details": {"source_metadata": metadata}}
+                ],
+            }
+        ]
+
+        removed_metadata, removed_row_filters = (
+            self.runner._normalize_source_baseline_fixture(self.conf, payload)
+        )
+
+        self.assertEqual((removed_metadata, removed_row_filters), (0, 1))
+        self.assertEqual(
+            payload[0]["bronze_append_flows"][0]["source_details"][
+                "source_metadata"
+            ],
+            metadata,
+        )
+        self.assertNotIn("bronze_row_filter", payload[0])
+
+    def test_custom_current_source_defaults_to_latest_capabilities(self):
+        self.conf.source_ref = "feature/future-release"
+
+        self.assertTrue(
+            self.conf.source_supports_append_flow_source_metadata
+        )
 
 
 class StandardLegacyUpgradeRunnerTests(TestCase):
@@ -59,6 +221,11 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
         self.assertNotIn("schema", kwargs)
         self.assertEqual(kwargs["clusters"][0].label, "default")
         self.assertEqual(kwargs["clusters"][0].num_workers, 2)
+
+    def test_legacy_source_does_not_support_append_flow_metadata(self):
+        self.assertFalse(
+            self.conf.source_supports_append_flow_source_metadata
+        )
 
     def test_serverless_dpm_execution_kwargs_use_schema(self):
         self.conf.pipeline_mode = "serverless_dpm"
@@ -181,6 +348,187 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
         )
         self.assertEqual(config["dlt_meta_whl"], "dlt-meta==0.1.0")
 
+    def test_phase2_validator_receives_source_profile(self):
+        self.runner.build_phase2_job(self.conf)
+
+        validate_task = next(
+            task
+            for task in self.ws.jobs.create.call_args.kwargs["tasks"]
+            if task.task_key == "phase2_validate"
+        )
+        self.assertEqual(
+            validate_task.notebook_task.base_parameters["source_profile"],
+            "legacy",
+        )
+
+    def test_phase2_compat_surface_runs_legacy_wheel_entrypoint(self):
+        self.conf.target_install_surface = "compat_wheelhouse"
+        self.conf.target_main_whl_remote = "/Volumes/test/target/main.whl"
+        self.conf.target_compat_whl_remote = "/Volumes/test/target/compat.whl"
+        self.conf.uc_volume_path = "/Volumes/catalog/specs/volume/"
+        self.conf.a1_onboarding_file = "conf/a1.json"
+        self.conf.bronze_a1_pipeline_id = "bronze-a1"
+        self.conf.silver_pipeline_id = "silver"
+
+        self.runner.build_phase2_job(self.conf)
+
+        kwargs = self.ws.jobs.create.call_args.kwargs
+        environment = kwargs["environments"][0]
+        self.assertEqual(environment.spec.client, "2")
+        self.assertEqual(
+            environment.spec.dependencies,
+            [
+                "/Volumes/test/target/main.whl",
+                "/Volumes/test/target/compat.whl",
+            ],
+        )
+        tasks = {task.task_key: task for task in kwargs["tasks"]}
+        legacy_task = tasks["phase2_legacy_entrypoint_onboard"]
+        self.assertEqual(legacy_task.python_wheel_task.package_name, "dlt_meta")
+        self.assertEqual(legacy_task.python_wheel_task.entry_point, "run")
+        self.assertEqual(
+            legacy_task.python_wheel_task.named_parameters[
+                "onboarding_file_path"
+            ],
+            "/Volumes/catalog/specs/volume/conf/a1.json",
+        )
+        self.assertEqual(
+            tasks["phase2_bronze"].depends_on[0].task_key,
+            "phase2_legacy_entrypoint_onboard",
+        )
+        self.assertEqual(
+            tasks["phase2_validate"].notebook_task.base_parameters[
+                "phase2_legacy_entrypoint_onboarding"
+            ],
+            "True",
+        )
+
+    def test_phase2_primary_surface_keeps_existing_pipeline_only_flow(self):
+        self.conf.bronze_a1_pipeline_id = "bronze-a1"
+        self.conf.silver_pipeline_id = "silver"
+
+        self.runner.build_phase2_job(self.conf)
+
+        kwargs = self.ws.jobs.create.call_args.kwargs
+        self.assertIsNone(kwargs["environments"])
+        task_keys = [task.task_key for task in kwargs["tasks"]]
+        self.assertNotIn("phase2_legacy_entrypoint_onboard", task_keys)
+        phase2_bronze = next(
+            task for task in kwargs["tasks"]
+            if task.task_key == "phase2_bronze"
+        )
+        self.assertEqual(
+            phase2_bronze.depends_on[0].task_key,
+            "phase2_add_incremental",
+        )
+
+    @patch("integration_tests.run_backward_compat_tests.os.walk")
+    def test_upload_compat_wheelhouse_retains_project_wheel_paths(
+        self, walk
+    ):
+        walk.return_value = []
+        self.conf.target_install_surface = "compat_wheelhouse"
+        self.conf.source_main_whl_local = "/tmp/source.whl"
+        self.conf.target_main_whl_local = "/tmp/target.whl"
+        self.conf.target_compat_whl_local = "/tmp/compat.whl"
+        self.conf.target_dependency_whls_local = [
+            "/tmp/sdk.whl",
+            "/tmp/yaml.whl",
+        ]
+        self.conf.uc_volume_path = "/Volumes/catalog/specs/volume/"
+        self.runner.upload_runner_notebooks = MagicMock()
+
+        def remote_path(_conf, local_path, destination):
+            return f"/Volumes/uploaded/{destination}/{os.path.basename(local_path)}"
+
+        self.runner.upload_wheel = MagicMock(side_effect=remote_path)
+
+        self.runner.upload_files(self.conf)
+
+        self.assertEqual(
+            self.conf.target_main_whl_remote,
+            "/Volumes/uploaded/target/wheelhouse/target.whl",
+        )
+        self.assertEqual(
+            self.conf.target_compat_whl_remote,
+            "/Volumes/uploaded/target/wheelhouse/compat.whl",
+        )
+
+    def test_phase2_append_onboarding_runs_twice_before_pipelines(self):
+        self.conf.phase2_append_onboarding = True
+        self.conf.phase2_onboarding_file = "conf/phase2.json"
+        self.conf.uc_volume_path = "/Volumes/catalog/specs/volume/"
+        self.conf.bronze_a1_pipeline_id = "bronze-a1"
+        self.conf.silver_pipeline_id = "silver"
+
+        self.runner.build_phase2_job(self.conf)
+
+        kwargs = self.ws.jobs.create.call_args.kwargs
+        self.assertEqual(
+            kwargs["environments"][0].spec.dependencies,
+            ["/Volumes/test/target.whl"],
+        )
+        tasks = {task.task_key: task for task in kwargs["tasks"]}
+        first = tasks["phase2_append_onboarding"]
+        repeat = tasks["phase2_append_onboarding_idempotency"]
+        self.assertEqual(
+            first.python_wheel_task.named_parameters["overwrite"],
+            "False",
+        )
+        self.assertEqual(
+            first.python_wheel_task.named_parameters[
+                "onboarding_file_path"
+            ],
+            "/Volumes/catalog/specs/volume/conf/phase2.json",
+        )
+        self.assertEqual(
+            repeat.depends_on[0].task_key,
+            "phase2_append_onboarding",
+        )
+        self.assertEqual(
+            tasks["phase2_bronze"].depends_on[0].task_key,
+            "phase2_append_onboarding_idempotency",
+        )
+        self.assertEqual(
+            tasks["phase2_validate"].notebook_task.base_parameters[
+                "phase2_append_onboarding"
+            ],
+            "True",
+        )
+
+    def test_phase2_append_onboarding_fixture_has_current_fields_and_new_row(
+        self,
+    ):
+        self.conf.phase2_append_onboarding = True
+        self.conf.uc_volume_path = "/Volumes/catalog/specs/volume/"
+        self.conf.uc_catalog_name = "catalog"
+        self.conf.bronze_schema = "bronze"
+        self.conf.silver_schema = "silver"
+        with tempfile.TemporaryDirectory() as tmp:
+            self.conf.a1_onboarding_file = os.path.join(tmp, "a1.json")
+            self.conf.a2_onboarding_file = os.path.join(tmp, "a2.json")
+            self.conf.phase2_onboarding_file = os.path.join(
+                tmp, "phase2.json"
+            )
+
+            self.runner.generate_onboarding_files(self.conf)
+
+            with open(
+                self.conf.phase2_onboarding_file, encoding="utf-8"
+            ) as fh:
+                payload = json.load(fh)
+
+        inserted = next(
+            row
+            for row in payload
+            if row["data_flow_id"] == "schema-evolution-new"
+        )
+        self.assertEqual(
+            inserted["data_flow_group"], "schema_evolution"
+        )
+        self.assertTrue(inserted["bronze_cluster_by_auto"])
+        self.assertTrue(inserted["silver_cluster_by_auto"])
+
     @patch.object(BackwardCompatRunner, "_download_compat_runtime_wheels")
     @patch("integration_tests.run_backward_compat_tests.GitRefWheelBuilder")
     def test_compat_wheelhouse_builds_primary_redirect_and_dependency_wheels(
@@ -254,6 +602,128 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
             phase2_upload.kwargs["content"],
         )
 
+    def test_upload_runner_notebooks_ignores_non_file_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runners = os.path.join(
+                tmp, "notebooks", "backward_compat_runners"
+            )
+            os.makedirs(os.path.join(runners, "__pycache__"))
+            notebook = os.path.join(runners, "validate.py")
+            with open(notebook, "wb") as fh:
+                fh.write(b"print('valid runner')\n")
+            self.conf.int_tests_dir = tmp
+
+            self.runner.upload_runner_notebooks(self.conf)
+
+        self.ws.workspace.upload.assert_called_once()
+        upload = self.ws.workspace.upload.call_args.kwargs
+        self.assertTrue(upload["path"].endswith("/validate.py"))
+        self.assertEqual(upload["content"], b"print('valid runner')\n")
+
+    def test_pypi_phase2_rewrites_runner_with_force_reinstall(self):
+        self.conf.install_mode = "pypi"
+        source = (
+            b"dlt_meta_whl = spark.conf.get('dlt_meta_whl')\n"
+            b"%pip install $dlt_meta_whl\n"
+        )
+
+        rendered = self.runner._notebook_source_for_upload(
+            self.conf, "init_dlt_meta_pipeline.py", source
+        )
+
+        self.assertIn(
+            b"%pip install --force-reinstall $dlt_meta_whl",
+            rendered,
+        )
+
+    def test_pypi_run_reuploads_phase2_runner(self):
+        self.conf.install_mode = "pypi"
+        self.runner._build_runner_conf = MagicMock(return_value=self.conf)
+        for method_name in (
+            "build_wheels",
+            "initialize_uc_resources",
+            "generate_onboarding_files",
+            "upload_files",
+            "create_all_pipelines",
+            "launch_job",
+            "download_phase_output",
+            "swap_pipelines_to_target",
+        ):
+            setattr(self.runner, method_name, MagicMock())
+        self.runner.build_phase1_job = MagicMock(
+            return_value=SimpleNamespace(job_id=1)
+        )
+        self.runner.build_phase2_job = MagicMock(
+            return_value=SimpleNamespace(job_id=2)
+        )
+        self.runner.upload_runner_notebooks = MagicMock()
+
+        self.assertEqual(self.runner.run(), 0)
+
+        self.runner.upload_runner_notebooks.assert_called_once_with(
+            self.conf, phase2=True
+        )
+
+    def test_download_phase_output_rejects_failed_assertions(self):
+        self.ws.workspace.download.return_value = BytesIO(
+            b',0\n0,"A compatibility invariant. Failed!"\n'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            output = os.path.join(tmp, "phase2.csv")
+
+            with self.assertRaisesRegex(
+                AssertionError, "compatibility invariant"
+            ):
+                self.runner.download_phase_output("/Workspace/phase2.csv", output)
+
+    def test_download_phase_output_accepts_passing_report(self):
+        self.ws.workspace.download.return_value = BytesIO(
+            b',0\n0,"A compatibility invariant. Passed!"\n'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            output = os.path.join(tmp, "phase2.csv")
+
+            self.assertEqual(
+                self.runner.download_phase_output("/Workspace/phase2.csv", output),
+                output,
+            )
+
+    @patch("integration_tests.run_backward_compat_tests.time.sleep")
+    def test_download_phase_output_retries_transient_download_failure(
+        self, sleep
+    ):
+        self.ws.workspace.download.side_effect = [
+            OSError("temporary workspace error"),
+            BytesIO(b',0\n0,"A compatibility invariant. Passed!"\n'),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = os.path.join(tmp, "phase2.csv")
+
+            self.assertEqual(
+                self.runner.download_phase_output("/Workspace/phase2.csv", output),
+                output,
+            )
+
+        self.assertEqual(self.ws.workspace.download.call_count, 2)
+        sleep.assert_called_once_with(2)
+
+    @patch("integration_tests.run_backward_compat_tests.time.sleep")
+    def test_download_phase_output_reports_exhausted_retries(self, sleep):
+        self.ws.workspace.download.side_effect = OSError(
+            "temporary workspace error"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            output = os.path.join(tmp, "phase2.csv")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "after 3 attempts; validation status is unavailable",
+            ):
+                self.runner.download_phase_output("/Workspace/phase2.csv", output)
+
+        self.assertEqual(self.ws.workspace.download.call_count, 3)
+        self.assertEqual(sleep.call_args_list, [mock_call(2), mock_call(4)])
+
     def test_compat_wheelhouse_requires_local_cross_namespace_upgrade(self):
         self.ws.current_user.me.return_value = SimpleNamespace(
             user_name="test@example.com"
@@ -281,6 +751,24 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
         with self.assertRaisesRegex(ValueError, "legacy-to-current"):
             same_namespace_runner._build_runner_conf()
 
+    def test_phase2_append_onboarding_rejects_compat_wheelhouse(self):
+        self.ws.current_user.me.return_value = SimpleNamespace(
+            user_name="test@example.com"
+        )
+        runner = BackwardCompatRunner(
+            {
+                "uc_catalog_name": "catalog",
+                "target_install_surface": "compat_wheelhouse",
+                "phase2_append_onboarding": True,
+            },
+            self.ws,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "requires --target_install_surface=primary_wheel"
+        ):
+            runner._build_runner_conf()
+
     def test_compat_python_version_must_be_major_minor(self):
         self.ws.current_user.me.return_value = SimpleNamespace(
             user_name="test@example.com"
@@ -300,6 +788,43 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
         self.assertEqual(
             ok_runner._build_runner_conf().compat_python_version, "3.11"
         )
+
+    def test_pypi_mode_derives_source_and_target_package_versions(self):
+        self.ws.current_user.me.return_value = SimpleNamespace(
+            user_name="test@example.com"
+        )
+        runner = BackwardCompatRunner(
+            {
+                "uc_catalog_name": "catalog",
+                "install_mode": "pypi",
+                "source_version": "v0.0.10",
+                "target_version": "v0.1.0",
+            },
+            self.ws,
+        )
+
+        conf = runner._build_runner_conf()
+
+        self.assertEqual(conf.source_package_version, "0.0.10")
+        self.assertEqual(conf.target_package_version, "0.1.0")
+        self.assertEqual(runner.install_spec_source_main(conf), "dlt-meta==0.0.10")
+        self.assertEqual(runner.install_spec_target_main(conf), "dlt-meta==0.1.0")
+
+    def test_pypi_mode_rejects_invalid_source_package_version(self):
+        self.ws.current_user.me.return_value = SimpleNamespace(
+            user_name="test@example.com"
+        )
+        runner = BackwardCompatRunner(
+            {
+                "uc_catalog_name": "catalog",
+                "install_mode": "pypi",
+                "source_package_version": "0.0.10 --pre",
+            },
+            self.ws,
+        )
+
+        with self.assertRaisesRegex(ValueError, "source_package_version"):
+            runner._build_runner_conf()
 
 
 class CompatWheelhouseVersionTests(TestCase):
@@ -380,7 +905,7 @@ class CompatWheelhouseVersionTests(TestCase):
             wheel = self._make_primary_wheel(
                 tmp,
                 [
-                    "databricks-sdk>=0.20,<1",
+                    "databricks-sdk>=0.138.0,<1",
                     "PyYAML>=6.0,<7",
                     'pytest; extra == "dev"',
                     'tomli; python_version < "3.11"',
@@ -394,7 +919,7 @@ class CompatWheelhouseVersionTests(TestCase):
     def test_assert_wheelhouse_complete_passes_when_deps_present(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.conf.target_main_whl_local = self._make_primary_wheel(
-                tmp, ["databricks-sdk>=0.20,<1", "PyYAML>=6.0,<7"]
+                tmp, ["databricks-sdk>=0.138.0,<1", "PyYAML>=6.0,<7"]
             )
             self.conf.target_dependency_whls_local = [
                 "/tmp/wh/databricks_sdk-0.30.0-py3-none-any.whl",
@@ -406,7 +931,7 @@ class CompatWheelhouseVersionTests(TestCase):
     def test_assert_wheelhouse_complete_flags_missing_dep(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.conf.target_main_whl_local = self._make_primary_wheel(
-                tmp, ["databricks-sdk>=0.20,<1", "PyYAML>=6.0,<7"]
+                tmp, ["databricks-sdk>=0.138.0,<1", "PyYAML>=6.0,<7"]
             )
             self.conf.target_dependency_whls_local = [
                 "/tmp/wh/databricks_sdk-0.30.0-py3-none-any.whl",
