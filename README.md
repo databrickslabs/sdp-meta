@@ -76,6 +76,7 @@
 | [SDP-META CLI](https://databrickslabs.github.io/sdp-meta/docs/getting-started/cli) | `databricks labs sdp-meta onboard` · `deploy` · `bundle-*` |
 | [SDP-META App](https://databrickslabs.github.io/sdp-meta/docs/getting-started/app) | Browser-based UI for onboarding, deployment, and pipeline monitoring |
 | [MCP Server](https://databrickslabs.github.io/sdp-meta/docs/getting-started/mcp) | AI-assisted pipeline scaffolding via MCP-capable AI tools (Claude Code, Cursor, Claude Desktop, and others) |
+| [Agent Skill](https://databrickslabs.github.io/sdp-meta/docs/getting-started/agent-skill) | Portable workflow guidance for SDP-META-aware coding agents |
 
 ## Getting Started
 
@@ -104,8 +105,9 @@ See the **[DLT-META → SDP-META migration guide](https://databrickslabs.github.
 ## Resources
 
 - [Documentation](https://databrickslabs.github.io/sdp-meta/)
-- [Video: SDP-Meta Deep-Dive](https://youtu.be/Z0CYboIzp9M)
 - [FAQ](https://databrickslabs.github.io/sdp-meta/docs/faq)
+- [Video: SDP-Meta Deep-Dive](https://youtu.be/Z0CYboIzp9M)
+- [CI/CD Automation](https://databrickslabs.github.io/sdp-meta/docs/operations/ci-cd)
 - [Migration Guide](https://databrickslabs.github.io/sdp-meta/docs/operations/migration)
 - [Release Notes](CHANGELOG.md)
 - [GitHub Issues](https://github.com/databrickslabs/sdp-meta/issues)

@@ -12,11 +12,33 @@ deploying, and operating Lakeflow Spark Declarative Pipelines without using the
 CLI or hand-editing YAML. This page is the per-panel reference. For deploy /
 local-dev / auth, see the [databricks_app/README on GitHub](https://github.com/databrickslabs/sdp-meta/blob/main/databricks_app/README.md).
 
-:::tip Three supported deploy paths
-- **macOS / Linux / WSL:** `bash scripts/deploy_app.sh --profile <cli-profile> --app <app-name> --path /Workspace/Users/<you>/<app-folder>` stages the full repo and deploys in one command. See [databricks_app/README](https://github.com/databrickslabs/sdp-meta/blob/main/databricks_app/README.md).
-- **Windows (native PowerShell):** `.\scripts\deploy_app.ps1 -DatabricksProfile <cli-profile> -App <app-name> -Path /Workspace/Users/<you>/<app-folder>` — same flow using `robocopy`, no Git Bash / WSL required. Details in [WINDOWS_DEPLOY.md](https://github.com/databrickslabs/sdp-meta/blob/main/databricks_app/WINDOWS_DEPLOY.md).
-- **No CLI at all (Apps UI + Git folder):** create a Databricks Git folder pointing at this repo and aim the App at `<git-folder>/databricks_app/`. Walkthrough in [UI_GIT_DEPLOY.md](https://github.com/databrickslabs/sdp-meta/blob/main/databricks_app/UI_GIT_DEPLOY.md).
-:::
+## Choose a deployment path
+
+<div className="deploy-path-grid">
+  <section className="deploy-path-card">
+    <span className="deploy-path-card__badge">CLI</span>
+    <h3>macOS, Linux, or WSL</h3>
+    <p>Stage the full repository and deploy the App in one command.</p>
+    <code>bash scripts/deploy_app.sh --profile &lt;profile&gt; --app &lt;app-name&gt; --path /Workspace/Users/&lt;you&gt;/&lt;app-folder&gt;</code>
+    <a href="https://github.com/databrickslabs/sdp-meta/blob/main/databricks_app/README.md">Open deployment guide →</a>
+  </section>
+
+  <section className="deploy-path-card">
+    <span className="deploy-path-card__badge">PowerShell</span>
+    <h3>Native Windows</h3>
+    <p>Use the same deployment flow with <code>robocopy</code>; Git Bash and WSL are not required.</p>
+    <code>.\scripts\deploy_app.ps1 -DatabricksProfile &lt;profile&gt; -App &lt;app-name&gt; -Path /Workspace/Users/&lt;you&gt;/&lt;app-folder&gt;</code>
+    <a href="https://github.com/databrickslabs/sdp-meta/blob/main/databricks_app/WINDOWS_DEPLOY.md">Open Windows guide →</a>
+  </section>
+
+  <section className="deploy-path-card">
+    <span className="deploy-path-card__badge">No CLI</span>
+    <h3>Databricks Apps UI</h3>
+    <p>Create a Databricks Git folder for this repository, then point the App at:</p>
+    <code>&lt;git-folder&gt;/databricks_app/</code>
+    <a href="https://github.com/databrickslabs/sdp-meta/blob/main/databricks_app/UI_GIT_DEPLOY.md">Open UI walkthrough →</a>
+  </section>
+</div>
 
 ## Contents
 
@@ -36,14 +58,9 @@ local-dev / auth, see the [databricks_app/README on GitHub](https://github.com/d
 
 ## The flow
 
-```text
-Pipeline    Onboarding  →  DataflowSpecs  →  Deployment
-            Step 1          Step 2             Step 3
-
-Explore     Demos
-
-Operate     Monitor         Metadata
-```
+- **Build:** Onboarding → DataflowSpecs → Deployment
+- **Explore:** Demos
+- **Operate:** Monitor · Metadata
 
 Happy path is left-to-right. Each step **auto-fills the next**, so catalog /
 schema / table names are typed exactly once. Manual edits are never

@@ -6,7 +6,7 @@ sidebar_position: 7
 
 # Agent Skill
 
-SDP-META ships an **Agent Skill** — a portable, agent-facing operating manual that teaches an AI coding agent how to use SDP-META correctly: the onboarding metadata model, the `onboard` → `deploy` workflow, the DAB commands, and the common footguns. It is written in the [Agent Skills](https://docs.claude.com/en/docs/agents-and-tools/agent-skills) format (a `SKILL.md` file plus supporting references), which is portable across agents — not tied to any single tool.
+SDP-META ships an **Agent Skill** — a portable, agent-facing operating manual that teaches an AI coding agent how to use SDP-META correctly: the onboarding metadata model, the `onboard` → `deploy` workflow, DAB and CI/CD automation, and the common footguns. It is written in the [Agent Skills](https://docs.claude.com/en/docs/agents-and-tools/agent-skills) format (a `SKILL.md` file plus supporting references), which is portable across agents — not tied to any single tool.
 
 When the skill is available to an agent, the agent uses it to scaffold, validate, and deploy pipelines against your own data, following the same procedure every time.
 
@@ -19,6 +19,7 @@ skills/sdp-meta/
     ├── getting-started-walkthrough.md       # zero-to-running pipeline against your data
     ├── onboarding-spec.md                   # every dataflowspec field, DQ, CDC, formats
     ├── cli-and-bundles.md                   # onboard/deploy + DAB workflow + wheel flags
+    ├── ci-cd-automation.md                  # OAuth, GitOps, promotion, and rollback
     └── mcp-tools.md                         # the MCP tools + how to register the server
 ```
 
@@ -87,6 +88,7 @@ skill's description triggers on phrasing like:
 - "help me build an sdp-meta pipeline for these files"
 - "onboard a dataflowspec for my orders table"
 - "scaffold an sdp-meta bundle and add a silver flow"
+- "deploy my sdp-meta bundle from GitHub Actions"
 
 The agent loads the skill, then follows the
 [getting-started walkthrough](https://github.com/databrickslabs/sdp-meta/blob/main/skills/sdp-meta/references/getting-started-walkthrough.md)

@@ -106,6 +106,10 @@ databricks bundle run onboarding --target dev
 databricks bundle run pipelines --target dev
 ```
 
+For unattended deployments, service-principal authentication, GitHub Actions,
+Azure DevOps, production approvals, and rollback guidance, see
+[CI/CD Automation](../operations/ci-cd).
+
 After the onboarding job runs:
 
 ![DAB onboarding job](/img/dab_onboarding_job.png)

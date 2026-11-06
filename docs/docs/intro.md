@@ -8,11 +8,14 @@ sidebar_position: 1
 
 SDP-META is a metadata-driven framework for building automated Bronze and Silver data pipelines on [Databricks Lakeflow Spark Declarative Pipelines](https://www.databricks.com/product/data-engineering/spark-declarative-pipelines). Define your pipelines in a JSON or YAML onboarding file; a single generic Declarative Pipeline builds the full processing graph automatically.
 
-:::important Upgrading from DLT-META?
+<aside className="doc-highlight-card doc-highlight-card--migration">
+<span className="doc-highlight-card__badge">Migration</span>
+<h3>Upgrading from DLT-META?</h3>
+
 The v0.1.0 release renames DLT-META to SDP-META. Existing onboarding JSON/YAML files continue to work, but new installs should use `databricks-labs-sdp-meta`, `databricks labs sdp-meta`, and `databricks.labs.sdp_meta` imports.
 
-Start with the [DLT-META → SDP-META migration guide](./operations/migration.md) for the step-by-step upgrade plan and deprecation timeline.
-:::
+[Open the step-by-step migration guide →](./operations/migration.md)
+</aside>
 
 ## What is SDP-META?
 
@@ -22,11 +25,16 @@ Teams describe sources, targets, data quality rules, CDC behavior, transformatio
 
 Its primary value is reducing per-table pipeline code while giving teams consistent patterns, controls, and deployment options.
 
-:::tip See the metadata model at scale
+<aside className="doc-highlight-card doc-highlight-card--example">
+<span className="doc-highlight-card__badge">Runnable example</span>
+<h3>See the metadata model at scale</h3>
+
 The [At-Scale Auto Loader Demo](https://github.com/databrickslabs/sdp-meta/tree/main/demo#at-scale-auto-loader-demo) creates 100 Bronze and 100 Silver tables from one generated onboarding model. It validates schema inference, schema hints, explicit DDLs, additive evolution, rescued data, quarantine, table-specific Silver logic, and the handoff to Gold.
 
 This is the clearest runnable example of SDP-META's main advantage: adding standardized data flows through metadata instead of maintaining one pipeline implementation per table.
-:::
+
+[Open the At-Scale Auto Loader Demo →](https://github.com/databrickslabs/sdp-meta/tree/main/demo#at-scale-auto-loader-demo)
+</aside>
 
 ## Who is it for?
 

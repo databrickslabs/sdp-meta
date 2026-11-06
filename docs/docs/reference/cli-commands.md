@@ -123,10 +123,14 @@ overrides are resolved when `--target` is selected.
 databricks labs sdp-meta bundle-validate
 ```
 
-Returns a non-zero exit code on failure, suitable for CI pipelines.
+Returns a non-zero exit code when validation fails.
 
-:::tip
-Run `bundle-validate` in CI before every `databricks bundle deploy`.
+:::warning Interactive command
+`databricks labs sdp-meta bundle-validate` currently prompts for its bundle
+directory and target. Until non-interactive flags are available, CI should use
+`databricks bundle validate --target <target>` and run the SDP-META-specific
+validator locally before merging topology changes. See
+[CI/CD Automation](../operations/ci-cd).
 :::
 
 ## `mcp`
