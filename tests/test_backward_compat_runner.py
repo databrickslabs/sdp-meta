@@ -365,6 +365,8 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
         self.conf.target_install_surface = "compat_wheelhouse"
         self.conf.target_main_whl_remote = "/Volumes/test/target/main.whl"
         self.conf.target_compat_whl_remote = "/Volumes/test/target/compat.whl"
+        self.conf.target_wheelhouse_remote = "/Volumes/test/target/wheelhouse/"
+        self.conf.target_package_version = "0.1.1"
         self.conf.uc_volume_path = "/Volumes/catalog/specs/volume/"
         self.conf.a1_onboarding_file = "conf/a1.json"
         self.conf.bronze_a1_pipeline_id = "bronze-a1"
@@ -378,8 +380,9 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
         self.assertEqual(
             environment.spec.dependencies,
             [
-                "/Volumes/test/target/main.whl",
-                "/Volumes/test/target/compat.whl",
+                "--no-index",
+                "--find-links=/Volumes/test/target/wheelhouse/",
+                "dlt-meta==0.1.1",
             ],
         )
         tasks = {task.task_key: task for task in kwargs["tasks"]}

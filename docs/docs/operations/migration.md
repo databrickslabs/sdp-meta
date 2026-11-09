@@ -36,7 +36,10 @@ The project was renamed from **DLT-META** to **SDP-META** to align with current 
 
 The `dlt-meta` PyPI package continues to work as a compatibility wrapper:
 
-- `pip install dlt-meta` installs `databricks-labs-sdp-meta` as a dependency.
+- `pip install dlt-meta` installs `databricks-labs-sdp-meta` and directly
+  declares the same runtime dependencies. The direct declarations preserve the
+  single-package install contract in serverless Job Environment client 2,
+  where second-level transitive dependencies may not be exposed.
 - `from dlt_meta import ...` re-exports all symbols with a `DeprecationWarning`.
 - `databricks labs dlt-meta` CLI commands are forwarded to `sdp-meta` with a deprecation banner.
 - `DLTMeta` is aliased to `SDPMeta`; the legacy workspace config keys `dlt_meta_operation`, `dlt_meta_schema`, `dlt_meta_layer`, and `dlt_meta_onboard_group` are still read (migrated to their `sdp_meta_*` equivalents) with a logged warning.

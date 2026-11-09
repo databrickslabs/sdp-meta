@@ -14,6 +14,9 @@ import re
 import unittest
 from pathlib import Path
 
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PRIMARY_SETUP = REPO_ROOT / "setup.py"
 COMPAT_SETUP = REPO_ROOT / "compat" / "setup.py"
@@ -39,6 +42,49 @@ def _setup_kwargs(setup_py: Path) -> dict:
                     continue
             return kwargs
     raise AssertionError(f"no setup() call found in {setup_py}")
+
+
+def _literal_assignment(setup_py: Path, name: str):
+    """Return a top-level literal assignment without executing setup.py."""
+    tree = ast.parse(setup_py.read_text(encoding="utf-8"), str(setup_py))
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in node.targets
+        ):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"{name} assignment not found in {setup_py}")
+
+
+def _requirement_named(requirements, distribution: str) -> Requirement:
+    """Find one requirement by normalized distribution name."""
+    expected = canonicalize_name(distribution)
+    parsed = [Requirement(requirement) for requirement in requirements]
+    matches = [
+        requirement
+        for requirement in parsed
+        if canonicalize_name(requirement.name) == expected
+    ]
+    if len(matches) != 1:
+        raise AssertionError(
+            f"expected one {distribution!r} requirement, found {matches!r}"
+        )
+    return matches[0]
+
+
+def _normalized_requirements(requirements) -> set:
+    """Normalize equivalent requirement spellings for useful comparisons."""
+    return {
+        (
+            canonicalize_name(requirement.name),
+            str(requirement.specifier),
+            str(requirement.marker) if requirement.marker else "",
+        )
+        for raw_requirement in requirements
+        for requirement in (Requirement(raw_requirement),)
+    }
 
 
 class PythonSupportMetadataTests(unittest.TestCase):
@@ -128,13 +174,38 @@ class CompatibilityDependencyMetadataTests(unittest.TestCase):
     def test_compat_wrapper_is_bounded_to_legacy_compatible_release_series(self):
         compat = _setup_kwargs(COMPAT_SETUP)
         self.assertEqual(
-            compat.get("install_requires"),
-            ["databricks-labs-sdp-meta>=0.1.1,<0.2.0"],
+            str(
+                _requirement_named(
+                    compat.get("install_requires", []),
+                    "databricks-labs-sdp-meta",
+                ).specifier
+            ),
+            "<0.2.0,>=0.1.1",
             "dlt-meta 0.1.x must not resolve to a primary 0.2+ release after "
             "the legacy dlt_meta and src.* compatibility surfaces are removed, "
             "and must not resolve below 0.1.1 (the primary wheel carries the "
             "dlt_meta/src compat files, and pre-0.1.1 copies print a startup "
             "traceback on machines without pyspark)",
+        )
+
+    def test_compat_wrapper_copies_primary_runtime_dependencies(self):
+        primary_requirements = _normalized_requirements(
+            _literal_assignment(PRIMARY_SETUP, "INSTALL_REQUIRES")
+        )
+        compat_requirements = _normalized_requirements(
+            _setup_kwargs(COMPAT_SETUP).get("install_requires", [])
+        )
+        redirect_name = canonicalize_name("databricks-labs-sdp-meta")
+        compat_runtime_requirements = {
+            requirement
+            for requirement in compat_requirements
+            if requirement[0] != redirect_name
+        }
+        self.assertEqual(
+            compat_runtime_requirements,
+            primary_requirements,
+            "compat/setup.py runtime dependencies must exactly match root "
+            "INSTALL_REQUIRES for serverless Job Environment client 2",
         )
 
     def test_compat_wrapper_preserves_legacy_wheel_task_entrypoint(self):
@@ -150,13 +221,18 @@ class CompatibilityDependencyMetadataTests(unittest.TestCase):
 
     def test_primary_setup_documents_current_compat_requirement(self):
         setup_text = PRIMARY_SETUP.read_text(encoding="utf-8")
+        normalized_setup_text = " ".join(setup_text.split())
         self.assertIn(
-            'install_requires=["databricks-labs-sdp-meta>=0.1.1,<0.2.0"]',
-            setup_text,
+            "directly declares the primary package",
+            normalized_setup_text,
         )
-        self.assertNotIn(
-            'install_requires=["databricks-labs-sdp-meta>=0.1.0"]',
-            setup_text,
+        self.assertIn(
+            "and its runtime requirements",
+            normalized_setup_text,
+        )
+        self.assertIn(
+            "databricks-labs-sdp-meta>=0.1.1,<0.2.0",
+            normalized_setup_text,
         )
 
 
@@ -201,10 +277,6 @@ class VersionSynchronizationTests(unittest.TestCase):
     mis-released with only ``compat/setup.py`` bumped.
     """
 
-    _FLOOR_RE = re.compile(
-        r"^databricks-labs-sdp-meta>=(?P<floor>[0-9.]+),<(?P<ceiling>[0-9.]+)$"
-    )
-
     def setUp(self):
         self.primary = _setup_kwargs(PRIMARY_SETUP)
         self.compat = _setup_kwargs(COMPAT_SETUP)
@@ -227,13 +299,17 @@ class VersionSynchronizationTests(unittest.TestCase):
         )
 
     def test_compat_dependency_floor_is_current_primary_version(self):
-        (requirement,) = self.compat.get("install_requires")
-        match = self._FLOOR_RE.match(requirement)
-        self.assertIsNotNone(
-            match, f"unexpected requirement shape: {requirement!r}"
+        requirement = _requirement_named(
+            self.compat.get("install_requires", []),
+            "databricks-labs-sdp-meta",
         )
+        floors = [
+            specifier.version
+            for specifier in requirement.specifier
+            if specifier.operator == ">="
+        ]
         self.assertEqual(
-            match.group("floor"), self.primary.get("version"),
+            floors, [self.primary.get("version")],
             "the compat wrapper must require the primary release it ships "
             "with — an older primary wheel carries older compat files",
         )

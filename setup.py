@@ -35,10 +35,12 @@ hands the next cell back to the SAME interpreter, so the freshly-
 installed ``.pth`` is silently ignored. Resolving through a real
 package (``compat/src/``) sidesteps the ``.pth`` lifecycle entirely.
 
-The standalone ``compat/`` package remains as a no-op PyPI redirect
-(``install_requires=["databricks-labs-sdp-meta>=0.1.1,<0.2.0"]``) so
-``pip install dlt-meta`` keeps working from PyPI. The primary dependency owns
-the ``dlt_meta`` and ``src`` compatibility files.
+The standalone ``compat/`` package remains a no-op PyPI redirect that directly
+declares the primary package (``databricks-labs-sdp-meta>=0.1.1,<0.2.0``) and
+its runtime requirements, so ``pip install dlt-meta`` also works in serverless
+Job Environment client 2, which does not reliably expose second-level
+transitive dependencies. The primary dependency owns the ``dlt_meta`` and
+``src`` compatibility files.
 """
 from pathlib import Path
 import shutil

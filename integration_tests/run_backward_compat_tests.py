@@ -1212,11 +1212,9 @@ class BackwardCompatRunner:
                 # _notebook_source_for_upload), so the driving path is the
                 # wheelhouse DIRECTORY, not any individual wheel's remote
                 # path. We upload the primary, redirect, and dependency
-                # wheels into that one directory. Retain the two pure-Python
-                # project-wheel paths for the Phase 2 legacy entry-point
-                # JobEnvironment. Platform-specific transitive wheels remain
-                # isolated to the pipeline notebook's offline install because
-                # serverless Jobs and Pipelines may use different Python ABIs.
+                # wheels into that one directory. Both the pipeline notebook
+                # and the Phase 2 legacy-entrypoint Job Environment then
+                # resolve only ``dlt-meta==<version>`` from this directory.
                 conf.target_wheelhouse_remote = (
                     f"{conf.uc_volume_path}wheels/target/wheelhouse/"
                 )
@@ -1672,18 +1670,19 @@ class BackwardCompatRunner:
             return []
         if conf.target_install_surface == "compat_wheelhouse":
             required = {
-                "target primary wheel": conf.target_main_whl_remote,
-                "target compatibility wheel": conf.target_compat_whl_remote,
+                "target wheelhouse": conf.target_wheelhouse_remote,
+                "target package version": conf.target_package_version,
             }
-            missing = [name for name, path in required.items() if not path]
+            missing = [name for name, value in required.items() if not value]
             if missing:
                 raise ValueError(
                     "Cannot test the target dlt_meta wheel entry point; "
-                    f"missing uploaded {', '.join(missing)}"
+                    f"missing {', '.join(missing)}"
                 )
             return [
-                conf.target_main_whl_remote,
-                conf.target_compat_whl_remote,
+                "--no-index",
+                f"--find-links={conf.target_wheelhouse_remote}",
+                f"dlt-meta=={conf.target_package_version}",
             ]
         if conf.install_mode == "pypi":
             return [self.install_spec_target_main(conf)]

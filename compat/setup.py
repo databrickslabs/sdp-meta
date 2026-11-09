@@ -87,6 +87,13 @@ setup(
         # Keep this redirect on the release series that provides the legacy
         # dlt_meta and src.* compatibility surfaces.
         "databricks-labs-sdp-meta>=0.1.1,<0.2.0",
+        # Serverless Job Environment client 2 does not reliably expose
+        # second-level transitive dependencies. Keep these synchronized with
+        # INSTALL_REQUIRES in the repository's root setup.py so installing
+        # only dlt-meta remains sufficient.
+        "setuptools>=65,<85",
+        "databricks-sdk>=0.138.0,<1",
+        "PyYAML>=6.0,<7",
     ],
     author="Ravi Gawai",
     author_email="databrickslabs@databricks.com",
@@ -97,8 +104,9 @@ setup(
 
 **DEPRECATED**: This package is a compatibility wrapper for
 [databricks-labs-sdp-meta](https://pypi.org/project/databricks-labs-sdp-meta/)
-(DLT-META is now SDP-META). Installing it pulls in the new package and keeps
-existing `dlt_meta` / `src.*` imports working unchanged.
+(DLT-META is now SDP-META). Installing it pulls in the new package and directly
+declares the same runtime dependencies for Databricks serverless Job
+Environments. Existing `dlt_meta` / `src.*` imports keep working unchanged.
 
 ## Migration
 
