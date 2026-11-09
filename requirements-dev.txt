@@ -1,7 +1,8 @@
 # Development and test dependencies for databricks-labs-sdp-meta.
 #
-# Mirrors DEV_REQUIREMENTS, IT_REQUIREMENTS, and MCP_REQUIREMENTS in setup.py.
-# Keep this file in sync with setup.py.
+# Mirrors DEV_REQUIREMENTS, IT_REQUIREMENTS, and MCP_REQUIREMENTS in setup.py,
+# plus test/build infrastructure used directly by repository tests.
+# Keep overlapping entries in sync with setup.py.
 #
 # Usage:
 #   pip install -r requirements-dev.txt
@@ -19,6 +20,8 @@ delta-spark==3.0.0
 pytest>=9.1.1
 coverage>=7.16.1
 pyspark==3.5.5
+# Parse and compare wheel/setup requirement metadata in packaging tests.
+packaging>=24.0,<27
 
 # Integration-test CLI (IT_REQUIREMENTS in setup.py)
 typer[all]==0.27.2
