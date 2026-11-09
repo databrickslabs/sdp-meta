@@ -243,6 +243,9 @@ export FLASK_DEBUG=true
 # Optional: pick a non-default profile (matches the Apps "--profile" semantic)
 # export DATABRICKS_CONFIG_PROFILE=<name>
 
+# Optional: concurrent demo launch limit (default: 8)
+# export SDP_META_MAX_ACTIVE_DEMOS=8
+
 flask --app databricks_app/app.py run --host 127.0.0.1 --port 8000
 ```
 

@@ -28,6 +28,8 @@
 
 **When it's not the best fit:** one or two simple pipelines, Gold-layer business modeling, tables that each need unique application logic, a managed connector and downstream logic that already satisfy the complete Bronze/Silver requirement, or a need for a formal support SLA (SDP-META is a Databricks Labs project). See the [Introduction](https://databrickslabs.github.io/sdp-meta/docs/intro) for the full positioning.
 
+> **See the core value at scale:** the [At-Scale Auto Loader Demo](demo/README.md#at-scale-auto-loader-demo) generates 100 metadata-driven Bronze and Silver flows from one onboarding model. It compares inferred, hinted, and explicit schemas and validates evolution, rescued data, DQ quarantine, table-specific Silver logic, and the handoff to Gold—without writing 100 pipelines.
+
 ### Components
 
 #### Metadata Interface
@@ -74,6 +76,7 @@
 | [SDP-META CLI](https://databrickslabs.github.io/sdp-meta/docs/getting-started/cli) | `databricks labs sdp-meta onboard` · `deploy` · `bundle-*` |
 | [SDP-META App](https://databrickslabs.github.io/sdp-meta/docs/getting-started/app) | Browser-based UI for onboarding, deployment, and pipeline monitoring |
 | [MCP Server](https://databrickslabs.github.io/sdp-meta/docs/getting-started/mcp) | AI-assisted pipeline scaffolding via MCP-capable AI tools (Claude Code, Cursor, Claude Desktop, and others) |
+| [Agent Skill](https://databrickslabs.github.io/sdp-meta/docs/getting-started/agent-skill) | Portable workflow guidance for SDP-META-aware coding agents |
 
 ## Getting Started
 
@@ -102,8 +105,9 @@ See the **[DLT-META → SDP-META migration guide](https://databrickslabs.github.
 ## Resources
 
 - [Documentation](https://databrickslabs.github.io/sdp-meta/)
-- [Video: SDP-Meta Deep-Dive](https://youtu.be/Z0CYboIzp9M)
 - [FAQ](https://databrickslabs.github.io/sdp-meta/docs/faq)
+- [Video: SDP-Meta Deep-Dive](https://youtu.be/Z0CYboIzp9M)
+- [CI/CD Automation](https://databrickslabs.github.io/sdp-meta/docs/operations/ci-cd)
 - [Migration Guide](https://databrickslabs.github.io/sdp-meta/docs/operations/migration)
 - [Release Notes](CHANGELOG.md)
 - [GitHub Issues](https://github.com/databrickslabs/sdp-meta/issues)

@@ -84,7 +84,7 @@ jobs:
       - name: Build primary package (databricks-labs-sdp-meta)
         run: python -m build --no-isolation --outdir dist/primary
 
-      - name: Verify MCP server and examples are packaged
+      - name: Verify primary wheel assets and import
         run: |
           wheel="$(printf '%s\n' dist/primary/databricks_labs_sdp_meta-*.whl)"
           python - <<'PY'
@@ -99,6 +99,8 @@ jobs:
               "databricks/labs/sdp_meta/mcp_server.py",
               "databricks/labs/sdp_meta/_packaged_examples/json/cloudfiles-onboarding.template",
               "databricks/labs/sdp_meta/_packaged_examples/yml/cloudfiles-onboarding.template.yml",
+              "databricks/labs/sdp_meta/templates/dab/databricks_template_schema.json",
+              "databricks/labs/sdp_meta/templates/dab/template/{{.bundle_name}}/README.md.tmpl",
           }
           missing = required - names
           if missing:
@@ -113,6 +115,7 @@ jobs:
             cd /tmp
             "${verify_env}/bin/python" - <<'PY'
           from importlib.resources import files
+          import databricks.labs.sdp_meta
           import databricks.labs.sdp_meta._packaged_examples
 
           root = files("databricks.labs.sdp_meta._packaged_examples")
@@ -126,12 +129,40 @@ jobs:
               raise SystemExit(
                   f"Installed MCP package exposes {len(templates)} templates, expected 34"
               )
+          print("primary wheel import and packaged assets verified")
           PY
           )
 
       - name: Build compat redirect (dlt-meta)
         working-directory: compat
         run: python -m build --no-isolation --outdir ../dist/compat
+
+      - name: Verify compatibility wheel import and startup
+        run: |
+          verify_env="$(mktemp -d)"
+          python -m venv "${verify_env}"
+          "${verify_env}/bin/python" -m pip install --no-deps \
+            dist/primary/databricks_labs_sdp_meta-*.whl \
+            dist/compat/dlt_meta-*.whl
+          err=$("${verify_env}/bin/python" -c "print('ok')" 2>&1 >/dev/null)
+          if [[ -n "${err}" ]]; then
+            echo "python startup wrote to stderr after wheel installation:"
+            echo "${err}"
+            exit 1
+          fi
+          (
+            cd /tmp
+            "${verify_env}/bin/python" - <<'PY'
+          import warnings
+          warnings.simplefilter("ignore", DeprecationWarning)
+
+          import databricks.labs.sdp_meta
+          import dlt_meta
+          import src.dataflow_pipeline
+
+          print("primary and compatibility wheel imports verified")
+          PY
+          )
 
       # A tag is the only thing that names the release, but the versions live
       # in setup.py. Without this, tagging v0.2.0 would happily publish 0.1.0.

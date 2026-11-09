@@ -1,6 +1,7 @@
 """DataflowPipeline provide generic code using dataflowspec."""
 import json
 import logging
+from functools import wraps
 from typing import Callable, Optional
 import ast
 from pyspark import pipelines as dp
@@ -130,6 +131,12 @@ class DataflowPipeline:
             self.cdcApplyChangesFlows = DataflowSpecUtils.get_cdc_apply_changes_flows(
                 dataflow_spec.cdcApplyChangesFlows
             )
+            if self._has_quarantine_expectations():
+                raise ValueError(
+                    "cdcApplyChangesFlows does not support "
+                    "expect_or_quarantine expectations. Use expect, "
+                    "expect_or_drop, or expect_or_fail instead."
+                )
         else:
             self.cdcApplyChangesFlows = None
         if dataflow_spec.appendFlows:
@@ -197,12 +204,17 @@ class DataflowPipeline:
             bool: True if a view should be created, False otherwise.
         """
         # if sourceDetails is provided and snapshot_format is delta, then create a view
-        # if next_snapshot_and_version is provided, then do not create a view
+        # if a snapshot spec uses next_snapshot_and_version, then do not create a view
         # otherwise create a view
         if (self.dataflowSpec.sourceDetails and self.dataflowSpec.sourceDetails.get("snapshot_format") == "delta"):
             self.next_snapshot_and_version_from_source_view = True
             return True
-        elif self.next_snapshot_and_version:
+        source_format = getattr(self.dataflowSpec, "sourceFormat", None)
+        if (
+            self.next_snapshot_and_version
+            and isinstance(source_format, str)
+            and source_format.lower() == "snapshot"
+        ):
             return False
         return True
 
@@ -253,22 +265,31 @@ class DataflowPipeline:
                     json.loads(flow_schema) if flow_schema else None
                 )
                 if append_flow.source_format == "cloudFiles":
-                    dp.temporary_view(pipeline_reader.read_dlt_cloud_files,
-                                      name=f"{append_flow.name}_view",
-                                      comment=f"append flow input dataset view for {append_flow.name}_view"
-                                      )
+                    reader = pipeline_reader.read_dlt_cloud_files
                 elif append_flow.source_format == "delta":
-                    dp.temporary_view(pipeline_reader.read_dlt_delta,
-                                      name=f"{append_flow.name}_view",
-                                      comment=f"append flow input dataset view for {append_flow.name}_view"
-                                      )
+                    reader = pipeline_reader.read_dlt_delta
                 elif append_flow.source_format == "eventhub" or append_flow.source_format == "kafka":
-                    dp.temporary_view(pipeline_reader.read_kafka,
-                                      name=f"{append_flow.name}_view",
-                                      comment=f"append flow input dataset view for {append_flow.name}_view"
-                                      )
+                    reader = pipeline_reader.read_kafka
+                else:
+                    continue
+                dp.temporary_view(
+                    self._append_flow_view_factory(reader),
+                    name=f"{append_flow.name}_view",
+                    comment=(
+                        f"append flow input dataset view for "
+                        f"{append_flow.name}_view"
+                    ),
+                )
         else:
             raise Exception(f"Append Flows not found for dataflowSpec={self.dataflowSpec}")
+
+    def _append_flow_view_factory(self, reader):
+        """Apply the parent flow's custom transform to an append source."""
+        @wraps(reader)
+        def transformed_reader():
+            return self.apply_custom_transform_fun(reader())
+
+        return transformed_reader
 
     def read_cdc_flows(self):
         """Create a DLT temporary view per CDC flow (issue #294).
@@ -419,7 +440,7 @@ class DataflowPipeline:
                 self._handle_append_flows()
                 return
             # Handle data quality expectations for bronze
-            if bronze_spec.dataQualityExpectations:
+            if bronze_spec.dataQualityExpectations and not self.cdcApplyChangesFlows:
                 self.write_layer_with_dqe()
                 self._handle_append_flows()
                 return
@@ -431,7 +452,7 @@ class DataflowPipeline:
                 self._handle_append_flows()
                 return
             # Handle data quality expectations for silver
-            if silver_spec.dataQualityExpectations:
+            if silver_spec.dataQualityExpectations and not self.cdcApplyChangesFlows:
                 self.write_layer_with_dqe()
                 self._handle_append_flows()
                 return
@@ -454,6 +475,15 @@ class DataflowPipeline:
         """Handle append flows if they exist."""
         if self.dataflowSpec.appendFlows:
             self.write_append_flows()
+
+    def _has_quarantine_expectations(self) -> bool:
+        """Return whether this spec declares non-empty quarantine expectations."""
+        if not self.dataflowSpec.dataQualityExpectations:
+            return False
+        expectations = json.loads(self.dataflowSpec.dataQualityExpectations)
+        return isinstance(expectations, dict) and bool(
+            expectations.get("expect_or_quarantine")
+        )
 
     def write_bronze(self):
         """Write Bronze tables."""
@@ -615,7 +645,6 @@ class DataflowPipeline:
         is_bronze = isinstance(self.dataflowSpec, BronzeDataflowSpec)
         data_quality_expectations_json = json.loads(self.dataflowSpec.dataQualityExpectations)
 
-        dlt_table_with_expectation = None
         expect_or_quarantine_dict = None
         expect_all_dict, expect_all_or_drop_dict, expect_all_or_fail_dict = self.get_dq_expectations()
         # Both bronze and silver layers support quarantine tables
@@ -634,7 +663,6 @@ class DataflowPipeline:
                 and self.dataflowSpec.clusterByAuto is not None
                 else False
             )
-
             # Create base table with expectations
             if expect_all_dict:
                 dlt_table_with_expectation = dp.expect_all(expect_all_dict)(
@@ -651,7 +679,7 @@ class DataflowPipeline:
                     )
                 )
             if expect_all_or_fail_dict:
-                if expect_all_dict is None:
+                if not expect_all_dict:
                     dlt_table_with_expectation = dp.expect_all_or_fail(expect_all_or_fail_dict)(
                         dp.table(
                             self.write_to_delta,
@@ -669,7 +697,7 @@ class DataflowPipeline:
                     dlt_table_with_expectation = dp.expect_all_or_fail(expect_all_or_fail_dict)(
                         dlt_table_with_expectation)
             if expect_all_or_drop_dict:
-                if expect_all_dict is None and expect_all_or_fail_dict is None:
+                if not expect_all_dict and not expect_all_or_fail_dict:
                     dlt_table_with_expectation = dp.expect_all_or_drop(expect_all_or_drop_dict)(
                         dp.table(
                             self.write_to_delta,
@@ -686,6 +714,26 @@ class DataflowPipeline:
                 else:
                     dlt_table_with_expectation = dp.expect_all_or_drop(expect_all_or_drop_dict)(
                         dlt_table_with_expectation)
+            if (
+                not expect_all_dict
+                and not expect_all_or_fail_dict
+                and not expect_all_or_drop_dict
+            ):
+                # ``expect_or_quarantine`` must still declare the primary
+                # output. Keep its existing row-routing semantics unchanged;
+                # the separately registered quarantine table below handles
+                # the configured quarantine predicate.
+                dlt_table_with_expectation = dp.table(
+                    self.write_to_delta,
+                    name=f"{target_table}",
+                    table_properties=self.dataflowSpec.tableProperties,
+                    partition_cols=DataflowSpecUtils.get_partition_cols(self.dataflowSpec.partitionColumns),
+                    cluster_by=DataflowSpecUtils.get_partition_cols(self.dataflowSpec.clusterBy),
+                    cluster_by_auto=cluster_by_auto,
+                    path=target_path,
+                    comment=target_comment,
+                    row_filter=self._get_row_filter(),
+                )
             # Handle quarantine table (Bronze and Silver layers)
         if expect_or_quarantine_dict:
             q_partition_cols = None

@@ -105,7 +105,22 @@ def get_dataflowspecs():
                         f"Run onboarding first to create the DataflowSpec tables."
                     )
                     return {'columns': [], 'rows': [], 'groups': [], 'error': friendly, 'not_found': True}
-                return {'columns': [], 'rows': [], 'groups': [], 'error': msg}
+                logger.error(
+                    "DataflowSpec query did not succeed for %s.%s.%s: %s",
+                    catalog,
+                    schema,
+                    table_name,
+                    msg,
+                )
+                return {
+                    'columns': [],
+                    'rows': [],
+                    'groups': [],
+                    'error': (
+                        'The app could not read this DataflowSpec table. Verify '
+                        'the SQL warehouse and App service principal permissions.'
+                    ),
+                }
 
             schema_obj = result.manifest.schema if result.manifest else None
             columns = [c.name for c in (schema_obj.columns if schema_obj else [])]
@@ -126,9 +141,17 @@ def get_dataflowspecs():
                     groups.append(g)
 
             return {'columns': columns, 'rows': rows, 'groups': groups, 'error': None}
-        except Exception as exc:
+        except Exception:
             logger.exception("DataflowSpec query failed for %s.%s.%s", catalog, schema, table_name)
-            return {'columns': [], 'rows': [], 'groups': [], 'error': str(exc)}
+            return {
+                'columns': [],
+                'rows': [],
+                'groups': [],
+                'error': (
+                    'The app could not read this DataflowSpec table. Verify '
+                    'the table name, SQL warehouse, and App service principal permissions.'
+                ),
+            }
 
     bronze_result = _run_query(bronze_table)
     silver_result = _run_query(silver_table)

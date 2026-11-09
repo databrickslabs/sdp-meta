@@ -1,9 +1,82 @@
 """Test for MetastoreOps class."""
+from datetime import datetime, timedelta
+
 from tests.utils import SDPFrameworkTestCase
 
 
 class MetastoreOpsTests(SDPFrameworkTestCase):
     """Test for MetastoreOps class."""
+
+    def _assert_additive_spec_merge(
+        self, table, layer_field, layer_value, path=None
+    ):
+        table_name = f"ravi_dlt_demo.{table}"
+        original_created = datetime(2026, 1, 1)
+        original_updated = datetime(2026, 1, 2)
+        source_updated = original_updated + timedelta(days=1)
+        target = self.spark.createDataFrame([
+            {
+                "dataFlowId": "existing",
+                "payload": "before",
+                "createDate": original_created,
+                "createdBy": "original-author",
+                "updateDate": original_updated,
+                "updatedBy": "original-author",
+            }
+        ])
+        if path is None:
+            target.write.format("delta").saveAsTable(table_name)
+        else:
+            target.write.format("delta").save(path)
+            self.deltaPipelinesMetaStoreOps.register_table_in_metastore(
+                "ravi_dlt_demo", table, path
+            )
+
+        source_rows = []
+        for data_flow_id, payload in (
+            ("existing", "updated"),
+            ("new", "inserted"),
+        ):
+            row = {
+                "dataFlowId": data_flow_id,
+                "payload": payload,
+                "createDate": source_updated,
+                "createdBy": "new-author",
+                "updateDate": source_updated,
+                "updatedBy": "new-author",
+                "clusterByAuto": True,
+                "rowFilter": "ROW FILTER main.security.fn ON (tenant_id)",
+                layer_field: layer_value,
+            }
+            source_rows.append(row)
+        source = self.spark.createDataFrame(source_rows)
+
+        for _ in range(2):
+            self.deltaPipelinesInternalTableOps.merge(
+                source,
+                table_name,
+                ["dataFlowId"],
+                target.columns,
+            )
+
+        evolved = self.spark.table(table_name)
+        self.assertIn("clusterByAuto", evolved.columns)
+        self.assertIn("rowFilter", evolved.columns)
+        self.assertIn(layer_field, evolved.columns)
+        rows = {
+            row["dataFlowId"]: row.asDict()
+            for row in evolved.collect()
+        }
+        self.assertEqual(set(rows), {"existing", "new"})
+        self.assertEqual(rows["existing"]["payload"], "updated")
+        self.assertEqual(
+            rows["existing"]["createDate"], original_created
+        )
+        self.assertEqual(
+            rows["existing"]["createdBy"], "original-author"
+        )
+        self.assertTrue(rows["new"]["clusterByAuto"])
+        self.assertEqual(rows["new"][layer_field], layer_value)
 
     def test_createDatabase(self):
         """Test create database."""
@@ -114,3 +187,39 @@ class MetastoreOpsTests(SDPFrameworkTestCase):
         self.deltaPipelinesMetaStoreOps.register_table_in_metastore(db_name, table, path)
         location = self.deltaPipelinesMetaStoreOps.get_table_location(db_name, table)
         self.assertEqual(location, f"file:{path}")
+
+    def test_merge_evolves_managed_legacy_bronze_spec_schema(self):
+        self._assert_additive_spec_merge(
+            "legacy_bronze_spec",
+            "cdcApplyChangesFlowsSchemas",
+            {"events": "id INT"},
+        )
+
+    def test_merge_evolves_path_backed_legacy_silver_spec_schema(self):
+        self._assert_additive_spec_merge(
+            "legacy_silver_spec",
+            "cdcApplyChangesFlows",
+            '{"keys":["id"],"flows":[]}',
+            path=f"{self.temp_delta_tables_path}/legacy_silver_spec",
+        )
+
+    def test_merge_rejects_incompatible_existing_column_types(self):
+        table_name = "ravi_dlt_demo.incompatible_spec"
+        target = self.spark.createDataFrame(
+            [{"dataFlowId": "1", "payload": "before"}]
+        )
+        target.write.format("delta").saveAsTable(table_name)
+        source = self.spark.createDataFrame(
+            [{"dataFlowId": 1, "payload": "after"}]
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"dataFlowId \(target=string, source=bigint\)",
+        ):
+            self.deltaPipelinesInternalTableOps.merge(
+                source,
+                table_name,
+                ["dataFlowId"],
+                target.columns,
+            )

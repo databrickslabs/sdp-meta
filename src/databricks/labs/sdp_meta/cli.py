@@ -255,7 +255,7 @@ def _path_to_file_uri(local_path: str) -> str:
 
 # Runner notebook template for the SDP/DLT pipeline. The ``{dependency}``
 # placeholder is replaced at deploy time with either:
-#   * a PyPI spec, e.g. ``databricks-labs-sdp-meta==0.1.0``
+#   * a PyPI spec, e.g. ``databricks-labs-sdp-meta==0.1.1``
 #   * a UC Volumes wheel path, e.g.
 #     ``/Volumes/<catalog>/<schema>/<volume>/databricks_labs_sdp_meta-<ver>-py3-none-any.whl``
 # The latter is the recommended path for air-gapped workspaces / private
@@ -722,7 +722,11 @@ class SDPMeta:
                 }
             )
         named_parameters = self._get_onboarding_named_parameters(cmd)
-        sdp_meta_dependency = cmd.sdp_meta_dependency or f"sdp-meta=={self.version}"
+        # Default to the PyPI *distribution* name (databricks-labs-sdp-meta),
+        # not the labs project name (sdp-meta) — the latter does not exist on
+        # PyPI and fails at job run time during environment install. Must
+        # stay in sync with the deploy fallback in _create_sdp_meta_pipeline.
+        sdp_meta_dependency = cmd.sdp_meta_dependency or f"databricks-labs-sdp-meta=={self.version}"
         sdp_meta_environments = [
             jobs.JobEnvironment(
                 environment_key="sdp_meta_cli_env",
@@ -1743,7 +1747,7 @@ def _is_truthy_flag(value) -> bool:
 # them through SDPMeta keeps the dispatcher's signature uniform with the
 # legacy commands.
 #
-# These four entries MUST stay in lock-step with `labs.yml commands:` and
+# These entries MUST stay in lock-step with `labs.yml commands:` and
 # the `MAPPING` dict below. The `tests/test_cli.py::CliCommandWiringTests`
 # regression test enforces both.
 # ---------------------------------------------------------------------------
@@ -1789,7 +1793,11 @@ def bundle_init(sdp_meta: SDPMeta, flags: dict = None):
         cfg_dir = Path(output_dir).resolve()
         cfg_dir.mkdir(parents=True, exist_ok=True)
         cfg_path = write_quickstart_config_file(cfg_dir)
-        cmd = BundleInitCommand(output_dir=output_dir, config_file=str(cfg_path))
+        cmd = BundleInitCommand(
+            output_dir=output_dir,
+            config_file=str(cfg_path),
+            profile=flags.get("profile") or None,
+        )
     else:
         logger.info("Scaffolding a new sdp-meta DAB from the packaged template.")
         cmd = _load_bundle_init_config(sdp_meta._wsi)
@@ -1797,18 +1805,21 @@ def bundle_init(sdp_meta: SDPMeta, flags: dict = None):
         # since the user explicitly typed it on the command line.
         if flags.get("output-dir") or flags.get("output_dir"):
             cmd.output_dir = output_dir
+        if flags.get("profile"):
+            cmd.profile = flags["profile"]
     _run(cmd)
 
 
 def bundle_prepare_wheel(sdp_meta: SDPMeta, flags: dict = None):
-    # `flags` is accepted for dispatcher uniformity (see main()) but unused.
-    del flags
     logger.info("Building the sdp-meta wheel and uploading it to a UC volume.")
     from databricks.labs.sdp_meta.bundle import (
         _load_bundle_prepare_wheel_config,
         bundle_prepare_wheel as _run,
     )
-    _run(_load_bundle_prepare_wheel_config(sdp_meta._wsi))
+    cmd = _load_bundle_prepare_wheel_config(sdp_meta._wsi)
+    if flags and flags.get("profile"):
+        cmd.profile = flags["profile"]
+    _run(cmd)
 
 
 def _flag_value(flags: dict, *names: str):
@@ -1843,13 +1854,15 @@ def _split_flag_values(value):
 
 
 def bundle_validate(sdp_meta: SDPMeta, flags: dict = None):
-    del flags
     logger.info("Validating the sdp-meta DAB (databricks bundle validate + sanity checks).")
     from databricks.labs.sdp_meta.bundle import (
         _load_bundle_validate_config,
         bundle_validate as _run,
     )
-    rc = _run(_load_bundle_validate_config(sdp_meta._wsi))
+    cmd = _load_bundle_validate_config(sdp_meta._wsi)
+    if flags and flags.get("profile"):
+        cmd.profile = flags["profile"]
+    rc = _run(cmd)
     if rc != 0:
         sys.exit(rc)
 
@@ -1862,6 +1875,18 @@ def bundle_add_flow(sdp_meta: SDPMeta, flags: dict = None):
         bundle_add_flow as _run,
     )
     rc = _run(_load_bundle_add_flow_config(sdp_meta._wsi))
+    if rc != 0:
+        sys.exit(rc)
+
+
+def bundle_add_pipeline(sdp_meta: SDPMeta, flags: dict = None):
+    del flags
+    logger.info("Adding an independently configured pipeline to the bundle.")
+    from databricks.labs.sdp_meta.bundle import (
+        _load_bundle_add_pipeline_config,
+        bundle_add_pipeline as _run,
+    )
+    rc = _run(_load_bundle_add_pipeline_config(sdp_meta._wsi))
     if rc != 0:
         sys.exit(rc)
 
@@ -1902,6 +1927,7 @@ MAPPING = {
     "bundle-prepare-wheel": bundle_prepare_wheel,
     "bundle-validate": bundle_validate,
     "bundle-add-flow": bundle_add_flow,
+    "bundle-add-pipeline": bundle_add_pipeline,
     "mcp": mcp,
 }
 

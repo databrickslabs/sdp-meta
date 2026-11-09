@@ -190,6 +190,45 @@ class CliTests(unittest.TestCase):
         )
 
     @patch("databricks.labs.sdp_meta.cli.WorkspaceClient")
+    def test_create_onboarding_job_defaults_to_pypi_distribution_name(
+        self, mock_workspace_client
+    ):
+        # Regression guard: with no explicit dependency, the onboarding job
+        # must default to the PyPI *distribution* name
+        # (databricks-labs-sdp-meta), never the labs project name (sdp-meta),
+        # which does not exist on PyPI and fails at environment-install time.
+        mock_workspace_client.jobs.create.return_value = MagicMock(job_id="job_id")
+        sdp_meta = SDPMeta(mock_workspace_client)
+        cmd = OnboardCommand(
+            onboarding_file_path=self.onboarding_file_path,
+            onboarding_files_dir_path="tests/resources/",
+            onboard_layer="bronze",
+            env="dev",
+            import_author="John Doe",
+            version="1.0",
+            cloud="aws",
+            sdp_meta_schema="sdp_meta",
+            bronze_dataflowspec_path="tests/resources/bronze_dataflowspec",
+            silver_dataflowspec_path="tests/resources/silver_dataflowspec",
+            uc_enabled=True,
+            uc_catalog_name="uc_catalog",
+            uc_volume_path="/Volumes/uc_catalog/sdp_meta/files",
+            overwrite=True,
+            bronze_dataflowspec_table="bronze_dataflowspec",
+            silver_dataflowspec_table="silver_dataflowspec",
+            # sdp_meta_dependency deliberately unset -> PyPI fallback
+        )
+
+        sdp_meta.create_onnboarding_job(cmd)
+
+        expected = f"databricks-labs-sdp-meta=={sdp_meta.version}"
+        job_kwargs = mock_workspace_client.jobs.create.call_args.kwargs
+        self.assertEqual(
+            job_kwargs["environments"][0].spec.dependencies,
+            [expected],
+        )
+
+    @patch("databricks.labs.sdp_meta.cli.WorkspaceClient")
     def test_install_folder(self, mock_workspace_client):
         sdp_meta = SDPMeta(mock_workspace_client)
         sdp_meta._wsi = mock_workspace_client.return_value
@@ -2347,9 +2386,33 @@ class CliCommandWiringTests(unittest.TestCase):
             "bundle-prepare-wheel",
             "bundle-validate",
             "bundle-add-flow",
+            "bundle-add-pipeline",
         ):
             self.assertIn(cmd, mapping, f"{cmd!r} missing from cli.MAPPING")
             self.assertIn(cmd, labs_yml_cmds, f"{cmd!r} missing from labs.yml")
+
+    def test_bundle_commands_declare_profile_flag(self):
+        """The command-level flag must reach the Python JSON payload.
+
+        Relying only on the Labs CLI global flag leaves duplicate profiles for
+        one host ambiguous when ``WorkspaceClient`` initializes.
+        """
+        commands = {
+            entry["name"]: entry
+            for entry in self._labs_yml["commands"]
+        }
+        for name in (
+            "bundle-init",
+            "bundle-prepare-wheel",
+            "bundle-validate",
+            "bundle-add-flow",
+            "bundle-add-pipeline",
+        ):
+            flags = {
+                flag["name"]
+                for flag in commands[name].get("flags", [])
+            }
+            self.assertIn("profile", flags, f"{name} drops --profile")
 
     def test_main_dispatches_bundle_command_through_mapping(self):
         """Functional smoke test: the `main()` dispatcher actually finds
@@ -2959,11 +3022,16 @@ class BundleInitQuickstartFlagTests(unittest.TestCase):
             fake_run.return_value = 0
             cli_bundle_init(
                 sdp_meta,
-                flags={"quickstart": "true", "output-dir": tmp},
+                flags={
+                    "quickstart": "true",
+                    "output-dir": tmp,
+                    "profile": "fevm",
+                },
             )
             self.assertEqual(fake_run.call_count, 1)
             cmd = fake_run.call_args[0][0]
             self.assertEqual(cmd.output_dir, tmp)
+            self.assertEqual(cmd.profile, "fevm")
             self.assertIsNotNone(cmd.config_file)
             cfg_path = cmd.config_file
             self.assertTrue(cfg_path.endswith(".json"))
@@ -3003,6 +3071,21 @@ class BundleInitQuickstartFlagTests(unittest.TestCase):
             cli_bundle_init(sdp_meta, flags={"output-dir": "/cli/wins"})
             cmd = fake_run.call_args[0][0]
             self.assertEqual(cmd.output_dir, "/cli/wins")
+
+    def test_interactive_profile_and_output_dir_alias_are_forwarded(self):
+        from databricks.labs.sdp_meta.cli import bundle_init as cli_bundle_init
+
+        sdp_meta = MagicMock()
+        sdp_meta._wsi._question.return_value = "/interactive/answer"
+        with self._patched_run() as fake_run:
+            fake_run.return_value = 0
+            cli_bundle_init(
+                sdp_meta,
+                flags={"output_dir": "/alias/wins", "profile": "fevm"},
+            )
+            cmd = fake_run.call_args[0][0]
+            self.assertEqual(cmd.output_dir, "/alias/wins")
+            self.assertEqual(cmd.profile, "fevm")
 
     def test_bare_quickstart_recovers_swallowed_output_dir(self):
         """Regression: the labs string-flag parser lets a bare `--quickstart`

@@ -68,6 +68,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -85,11 +86,16 @@ if str(SRC) not in sys.path:
 # Importing from src after path patching, so flake8 E402 is expected/intended.
 from databricks.labs.sdp_meta.bundle import (  # noqa: E402
     BundleAddFlowCommand,
+    BundleAddPipelineCommand,
     BundleInitCommand,
     BundlePrepareWheelCommand,
     BundleValidateCommand,
+    FlowSpec,
+    PipelineSpec,
     _flows_from_csv,
+    _sdp_meta_sanity_checks,
     bundle_add_flow,
+    bundle_add_pipeline,
     bundle_init,
     bundle_prepare_wheel,
     bundle_validate,
@@ -177,6 +183,24 @@ SCENARIOS = {
         default_bronze_target_schema="sdp_meta_bronze_dab_demo_cf",
         default_silver_target_schema="sdp_meta_silver_dab_demo_cf",
     ),
+    "multi_pipeline_cloudfiles": Scenario(
+        name="multi_pipeline_cloudfiles",
+        answers_file=DEMO_DIR / "answers" / "cloudfiles_multi_pipeline.json",
+        extra_flows_csv=DEMO_DIR / "flows" / "cloudfiles_extra.csv",
+        recipe_name="from_volume.py",
+        recipe_args_template=[
+            "--volume-path", "{bundle_dir}/_demo_landing",
+            "--bundle-dir", "{bundle_dir}",
+        ],
+        description=(
+            "Workspace integration scenario with an initial split bronze/silver "
+            "CloudFiles topology and an independently configured combined "
+            "bronze/silver topology with its own group and target schemas."
+        ),
+        default_sdp_meta_schema="sdp_meta_dab_demo_multi",
+        default_bronze_target_schema="sdp_meta_bronze_dab_demo_multi",
+        default_silver_target_schema="sdp_meta_silver_dab_demo_multi",
+    ),
     "kafka": Scenario(
         name="kafka",
         answers_file=DEMO_DIR / "answers" / "kafka_bronze.json",
@@ -252,7 +276,11 @@ SCENARIOS = {
 # `_demo_landing` tree for the recipe) and CSV `{demo_data_volume_path}`
 # substitution all gate on this set so adding a new cloudFiles topology
 # (eg. `cloudfiles_combined`) only requires registering the scenario above.
-_CLOUDFILES_SCENARIO_NAMES = {"cloudfiles", "cloudfiles_combined"}
+_CLOUDFILES_SCENARIO_NAMES = {
+    "cloudfiles",
+    "cloudfiles_combined",
+    "multi_pipeline_cloudfiles",
+}
 
 # Scenarios whose recipe (`from_uc.py`) requires upstream Delta tables in a
 # UC schema. The launcher auto-seeds those tables before STAGE 4 when
@@ -869,7 +897,10 @@ def stage_bundle_init(scenario: Scenario, out_dir: Path, uc_catalog_name: str,
     # that fails at pipeline runtime with `TABLE_OR_VIEW_NOT_FOUND`.
     # Strip it so STAGE 4's recipe (from_uc.py for delta, from_topics.py
     # for kafka/eventhub) is the only thing populating onboarding.yml.
-    if scenario.name in _DELTA_SCENARIO_NAMES or scenario.name in {"kafka", "eventhub"}:
+    if (
+        scenario.name in _DELTA_SCENARIO_NAMES
+        or scenario.name in {"kafka", "eventhub", "multi_pipeline_cloudfiles"}
+    ):
         _strip_example_onboarding_entry(bundle_dir)
 
     print(f"\n[STAGE 1] Bundle scaffolded at {bundle_dir}")
@@ -1062,6 +1093,126 @@ def stage_add_flow(scenario: Scenario, bundle_dir: Path, uc_catalog_name: str,
         raise SystemExit(f"bundle-add-flow failed with exit code {rc}")
 
 
+def stage_add_independent_pipeline(
+    scenario: Scenario,
+    bundle_dir: Path,
+    *,
+    uc_schema: Optional[str],
+    demo_data_volume_path: Optional[str],
+) -> None:
+    if scenario.name != "multi_pipeline_cloudfiles":
+        return
+
+    _banner(
+        "STAGE 3B",
+        "bundle-add-pipeline + inherited bundle-add-flow  (secondary topology)",
+    )
+    schemas = _resolve_demo_schemas(scenario, uc_schema)
+    secondary_bronze = f"{schemas['bronze_target_schema']}_secondary"
+    secondary_silver = f"{schemas['silver_target_schema']}_secondary"
+    rc = bundle_add_pipeline(BundleAddPipelineCommand(
+        bundle_dir=str(bundle_dir),
+        pipeline=PipelineSpec(
+            name="secondary",
+            layer="bronze_silver",
+            pipeline_mode="combined",
+            dataflow_group="dab_demo_cf_secondary_group",
+            bronze_target_schema=secondary_bronze,
+            silver_target_schema=secondary_silver,
+        ),
+    ))
+    if rc != 0:
+        raise SystemExit(f"bundle-add-pipeline failed with exit code {rc}")
+
+    volume_base = demo_data_volume_path or (
+        "/Volumes/__placeholder__/__placeholder__/__placeholder__/demo_data"
+    )
+    rc = bundle_add_flow(BundleAddFlowCommand(
+        bundle_dir=str(bundle_dir),
+        flows=[FlowSpec(
+            source_format="cloudFiles",
+            source_path=f"{volume_base}/customers/",
+            bronze_table="secondary_customers",
+            silver_table="secondary_customers",
+            data_flow_group="dab_demo_cf_secondary_group",
+            source_system="demo_assets_secondary",
+            cloudfiles_format="csv",
+        )],
+    ))
+    if rc != 0:
+        raise SystemExit(
+            f"bundle-add-flow for secondary topology failed with exit code {rc}"
+        )
+
+
+def stage_assert_duplicate_pipeline_rejected(
+    scenario: Scenario,
+    bundle_dir: Path,
+    *,
+    uc_schema: Optional[str],
+) -> None:
+    """Prove Issue #458 rejects duplicate ownership without changing files."""
+    if scenario.name != "multi_pipeline_cloudfiles":
+        return
+
+    _banner(
+        "STAGE 3C",
+        "bundle-add-pipeline duplicate ownership rejection (Issue #458)",
+    )
+
+    def snapshot() -> Dict[Path, bytes]:
+        return {
+            path.relative_to(bundle_dir): path.read_bytes()
+            for path in bundle_dir.rglob("*")
+            if path.is_file()
+            and ".git" not in path.relative_to(bundle_dir).parts
+        }
+
+    before = snapshot()
+    schemas = _resolve_demo_schemas(scenario, uc_schema)
+    output = StringIO()
+    rc = bundle_add_pipeline(
+        BundleAddPipelineCommand(
+            bundle_dir=str(bundle_dir),
+            pipeline=PipelineSpec(
+                name="rejected_duplicate_owner",
+                layer="bronze",
+                dataflow_group="dab_demo_cf_group",
+                bronze_target_schema=(
+                    f"{schemas['bronze_target_schema']}_must_not_apply"
+                ),
+            ),
+        ),
+        output=output,
+    )
+    message = output.getvalue()
+    after = snapshot()
+    changed = sorted(
+        str(path)
+        for path in set(before).union(after)
+        if before.get(path) != after.get(path)
+    )
+    if rc == 0:
+        raise SystemExit(
+            "Issue #458 regression: duplicate group/layer ownership was "
+            "accepted"
+        )
+    if "Duplicate bronze ownership" not in message:
+        raise SystemExit(
+            "Issue #458 regression: duplicate request failed for an "
+            f"unexpected reason:\n{message}"
+        )
+    if changed:
+        raise SystemExit(
+            "Issue #458 regression: rejected duplicate request modified "
+            f"bundle file(s): {changed}"
+        )
+    print(
+        "[STAGE 3C] Duplicate bronze ownership rejected and bundle files "
+        "remained byte-for-byte unchanged."
+    )
+
+
 def stage_recipe(scenario: Scenario, bundle_dir: Path, *, apply_recipe: bool,
                  uc_catalog_name: str, profile: Optional[str],
                  uc_source_catalog: Optional[str] = None,
@@ -1109,6 +1260,239 @@ def stage_validate(bundle_dir: Path, profile: Optional[str]) -> None:
     if rc != 0:
         raise SystemExit(f"bundle-validate exited with code {rc}")
     _print_onboarding_summary(bundle_dir)
+
+
+_BUNDLE_TARGET_ENV_KEYS = (
+    "DATABRICKS_BUNDLE_TARGET",
+    "DATABRICKS_BUNDLE_ENV",
+)
+
+
+def _validate_with_target_environment(
+    bundle_dir: Path,
+    profile: Optional[str],
+    environment: Dict[str, str],
+) -> int:
+    """Run bundle validation with isolated Databricks target environment."""
+    saved = {
+        key: os.environ.get(key)
+        for key in _BUNDLE_TARGET_ENV_KEYS
+    }
+    try:
+        for key in _BUNDLE_TARGET_ENV_KEYS:
+            os.environ.pop(key, None)
+        os.environ.update(environment)
+        return bundle_validate(BundleValidateCommand(
+            bundle_dir=str(bundle_dir),
+            profile=profile,
+        ))
+    finally:
+        for key in _BUNDLE_TARGET_ENV_KEYS:
+            os.environ.pop(key, None)
+        for key, value in saved.items():
+            if value is not None:
+                os.environ[key] = value
+
+
+def _wire_transitive_pipeline_dependencies(bundle_dir: Path) -> None:
+    """Wire bronze -> secondary -> silver for the multi-pipeline scenario."""
+    pipelines_path = bundle_dir / "resources" / "sdp_meta_pipelines.yml"
+    pipelines_doc = yaml.safe_load(pipelines_path.read_text()) or {}
+    tasks = (
+        (((pipelines_doc.get("resources") or {}).get("jobs") or {})
+         .get("pipelines") or {}).get("tasks") or []
+    )
+    task_by_key = {
+        task.get("task_key"): task
+        for task in tasks
+        if isinstance(task, dict) and task.get("task_key")
+    }
+    required = {"bronze", "silver"}
+    missing = required - set(task_by_key)
+    if missing:
+        raise SystemExit(
+            "Customized validation stage expected pipeline task(s) "
+            f"{sorted(required)}; missing {sorted(missing)}"
+        )
+
+    secondary_candidates = [
+        task_key
+        for task_key, task in task_by_key.items()
+        if task_key not in required and isinstance(task.get("pipeline_task"), dict)
+    ]
+    if len(secondary_candidates) != 1:
+        raise SystemExit(
+            "Customized validation stage expected exactly one generated "
+            "secondary pipeline task; found "
+            f"{sorted(secondary_candidates)}"
+        )
+    secondary_task_key = secondary_candidates[0]
+    task_by_key[secondary_task_key]["depends_on"] = [
+        {"task_key": "bronze"}
+    ]
+    task_by_key["silver"]["depends_on"] = [
+        {"task_key": secondary_task_key}
+    ]
+    pipelines_path.write_text(yaml.safe_dump(pipelines_doc, sort_keys=False))
+
+
+def _set_target_group_overrides(
+    bundle_dir: Path,
+    *,
+    default_group: str,
+    dev_group: str,
+    prod_group: str,
+) -> None:
+    variables_path = bundle_dir / "resources" / "variables.yml"
+    variables_doc = yaml.safe_load(variables_path.read_text()) or {}
+    variables = variables_doc.setdefault("variables", {})
+    group_variable = variables.setdefault("dataflow_group", {})
+    if not isinstance(group_variable, dict):
+        raise SystemExit(
+            "Customized validation stage expected `dataflow_group` "
+            "to use mapping-form bundle variable configuration"
+        )
+    group_variable["default"] = default_group
+    variables_path.write_text(yaml.safe_dump(variables_doc, sort_keys=False))
+
+    databricks_path = bundle_dir / "databricks.yml"
+    databricks_doc = yaml.safe_load(databricks_path.read_text()) or {}
+    targets = databricks_doc.get("targets") or {}
+    for target_name, group in (("dev", dev_group), ("prod", prod_group)):
+        target_doc = targets.get(target_name)
+        if not isinstance(target_doc, dict):
+            raise SystemExit(
+                "Customized validation stage expected target "
+                f"`{target_name}` to be a mapping"
+            )
+        target_doc.setdefault("variables", {})["dataflow_group"] = group
+        if target_name == "prod":
+            target_doc.setdefault("workspace", {})["root_path"] = (
+                "/Workspace/Users/${workspace.current_user.userName}/"
+                ".bundle/${bundle.name}/${bundle.target}"
+            )
+    databricks_path.write_text(yaml.safe_dump(databricks_doc, sort_keys=False))
+
+
+def stage_assert_customized_bundle_validation(
+    scenario: Scenario,
+    bundle_dir: Path,
+    profile: Optional[str],
+) -> None:
+    """Exercise customized target and task wiring against a rendered bundle."""
+    if scenario.name != "multi_pipeline_cloudfiles":
+        return
+
+    _banner(
+        "STAGE 4B",
+        "custom target + transitive dependency validation",
+    )
+    _wire_transitive_pipeline_dependencies(bundle_dir)
+
+    variables_doc = yaml.safe_load(
+        (bundle_dir / "resources" / "variables.yml").read_text()
+    ) or {}
+    group_node = (variables_doc.get("variables") or {}).get("dataflow_group")
+    primary_group = (
+        group_node.get("default")
+        if isinstance(group_node, dict)
+        else None
+    )
+    if not primary_group:
+        raise SystemExit(
+            "Customized validation stage could not resolve the primary "
+            "`dataflow_group` variable"
+        )
+
+    with tempfile.TemporaryDirectory(prefix="dab_custom_validation_") as tmp:
+        tmp_root = Path(tmp)
+        target_bundle = tmp_root / "target_selection"
+        shutil.copytree(bundle_dir, target_bundle)
+
+        _set_target_group_overrides(
+            target_bundle,
+            default_group="wrong_default_group",
+            dev_group=primary_group,
+            prod_group="wrong_prod_group",
+        )
+        if _validate_with_target_environment(target_bundle, profile, {}) != 0:
+            raise SystemExit(
+                "Customized default-target validation failed"
+            )
+
+        _set_target_group_overrides(
+            target_bundle,
+            default_group="wrong_default_group",
+            dev_group="wrong_dev_group",
+            prod_group=primary_group,
+        )
+        for environment_key in _BUNDLE_TARGET_ENV_KEYS:
+            rc = _validate_with_target_environment(
+                target_bundle,
+                profile,
+                {environment_key: "prod"},
+            )
+            if rc != 0:
+                raise SystemExit(
+                    "Environment-selected target validation failed "
+                    f"for {environment_key}"
+                )
+
+        malformed_bundle = tmp_root / "malformed_targets"
+        shutil.copytree(bundle_dir, malformed_bundle)
+        databricks_path = malformed_bundle / "databricks.yml"
+        databricks_doc = yaml.safe_load(databricks_path.read_text()) or {}
+        databricks_doc["targets"] = "dev"
+        databricks_path.write_text(
+            yaml.safe_dump(databricks_doc, sort_keys=False)
+        )
+        malformed_errors = _sdp_meta_sanity_checks(malformed_bundle)
+        if not any(
+            "`targets` must be a mapping" in error
+            for error in malformed_errors
+        ):
+            raise SystemExit(
+                "Malformed-target validation did not return the "
+                f"expected clean error: {malformed_errors}"
+            )
+
+        cycle_bundle = tmp_root / "dependency_cycle"
+        shutil.copytree(bundle_dir, cycle_bundle)
+        pipelines_path = (
+            cycle_bundle / "resources" / "sdp_meta_pipelines.yml"
+        )
+        pipelines_doc = yaml.safe_load(pipelines_path.read_text()) or {}
+        tasks = (
+            (((pipelines_doc.get("resources") or {}).get("jobs") or {})
+             .get("pipelines") or {}).get("tasks") or []
+        )
+        bronze_task = next(
+            (
+                task for task in tasks
+                if isinstance(task, dict)
+                and task.get("task_key") == "bronze"
+            ),
+            None,
+        )
+        if bronze_task is None:
+            raise SystemExit(
+                "Dependency-cycle check could not find the bronze task"
+            )
+        bronze_task["depends_on"] = [{"task_key": "silver"}]
+        pipelines_path.write_text(
+            yaml.safe_dump(pipelines_doc, sort_keys=False)
+        )
+        cycle_errors = _sdp_meta_sanity_checks(cycle_bundle)
+        if not any("dependency cycle" in error for error in cycle_errors):
+            raise SystemExit(
+                "Dependency-cycle validation did not return the expected "
+                f"clean error: {cycle_errors}"
+            )
+
+    print(
+        "[STAGE 4B] Verified default and environment-selected targets, "
+        "transitive pipeline ordering, malformed targets, and cycle errors."
+    )
 
 
 # Per-flow keys that store a path to another conf file. The launcher rewrites
@@ -1408,6 +1792,23 @@ def _resolve_target_schemas(bundle_dir: Path) -> List[str]:
         val = doc.get("variables", {}).get(key, {}).get("default")
         if val and val not in schemas:
             schemas.append(val)
+    pipelines_path = bundle_dir / "resources" / "sdp_meta_pipelines.yml"
+    if pipelines_path.is_file():
+        pipelines_doc = yaml.safe_load(pipelines_path.read_text()) or {}
+        pipelines = (
+            pipelines_doc.get("resources", {}).get("pipelines", {}) or {}
+        )
+        for pipeline in pipelines.values():
+            if not isinstance(pipeline, dict):
+                continue
+            config = pipeline.get("configuration") or {}
+            for key in (
+                "sdp_meta.bronzeTargetSchema",
+                "sdp_meta.silverTargetSchema",
+            ):
+                val = config.get(key)
+                if val and "${" not in str(val) and val not in schemas:
+                    schemas.append(val)
     return schemas
 
 
@@ -1489,6 +1890,50 @@ def _resolve_onboarding_file_name(bundle_dir: Path) -> str:
     return name
 
 
+def _set_onboarding_file_path(
+    onboarding_job_path: Path,
+    onboarding_path: str,
+) -> None:
+    """Update the onboarding task or fail clearly on hand-edited YAML."""
+    onboarding_job = yaml.safe_load(onboarding_job_path.read_text()) or {}
+    tasks = (
+        (((onboarding_job.get("resources") or {}).get("jobs") or {})
+         .get("onboarding") or {}).get("tasks")
+    )
+    if not isinstance(tasks, list):
+        raise ValueError(
+            f"{onboarding_job_path}: job `onboarding` must define a task list"
+        )
+    onboarding_task = next(
+        (
+            task for task in tasks
+            if isinstance(task, dict)
+            and task.get("task_key") == "onboard_dataflowspecs"
+        ),
+        None,
+    )
+    if onboarding_task is None:
+        raise ValueError(
+            f"{onboarding_job_path}: missing task `onboard_dataflowspecs`"
+        )
+    wheel_task = onboarding_task.get("python_wheel_task")
+    if not isinstance(wheel_task, dict):
+        raise ValueError(
+            f"{onboarding_job_path}: task `onboard_dataflowspecs` is missing "
+            "`python_wheel_task`"
+        )
+    named_parameters = wheel_task.get("named_parameters")
+    if not isinstance(named_parameters, dict):
+        raise ValueError(
+            f"{onboarding_job_path}: task `onboard_dataflowspecs` is missing "
+            "`python_wheel_task.named_parameters`"
+        )
+    named_parameters["onboarding_file_path"] = onboarding_path
+    onboarding_job_path.write_text(
+        yaml.safe_dump(onboarding_job, sort_keys=False)
+    )
+
+
 def stage_deploy_and_run(bundle_dir: Path, profile: Optional[str], *,
                          uc_catalog: Optional[str] = None,
                          uc_schema: Optional[str] = None,
@@ -1512,6 +1957,32 @@ def stage_deploy_and_run(bundle_dir: Path, profile: Optional[str], *,
     # 0) ensure target schemas exist (SDP + onboarding fail if they don't).
     if uc_catalog:
         _ensure_target_schemas(bundle_dir, uc_catalog, profile)
+
+    # Stage the rewritten/pruned conf tree before deployment and point only
+    # the onboarding task at it. Passing --python-named-params to `bundle run`
+    # forwards the parameter to every Python wheel task, including stage_conf,
+    # whose CLI correctly rejects onboarding_file_path.
+    if uc_catalog and uc_schema and uc_volume:
+        volume_conf_base = _stage_conf_to_uc_volume(
+            bundle_dir, uc_catalog, uc_schema, uc_volume, profile,
+        )
+        onboarding_file_name = _resolve_onboarding_file_name(bundle_dir)
+        onboarding_path = f"{volume_conf_base}/{onboarding_file_name}"
+        onboarding_job_path = (
+            bundle_dir / "resources" / "sdp_meta_onboarding_job.yml"
+        )
+        try:
+            _set_onboarding_file_path(
+                onboarding_job_path,
+                onboarding_path,
+            )
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            raise SystemExit(
+                f"Cannot update onboarding file path: {exc}"
+            ) from exc
+        print(
+            f"[STAGE 6] Onboarding task file path -> {onboarding_path}"
+        )
 
     # 1) deploy. Capture stderr so we can detect the silent
     # "no files to sync" failure mode (caused by the bundle dir being
@@ -1543,22 +2014,7 @@ def stage_deploy_and_run(bundle_dir: Path, profile: Optional[str], *,
             ".gitignored ancestor."
         )
 
-    # 2) (optional) stage conf/ to UC volume + build the override params.
-    onboarding_extra: List[str] = []
-    if uc_catalog and uc_schema and uc_volume:
-        volume_conf_base = _stage_conf_to_uc_volume(
-            bundle_dir, uc_catalog, uc_schema, uc_volume, profile,
-        )
-        onboarding_file_name = _resolve_onboarding_file_name(bundle_dir)
-        onboarding_extra = [
-            "--python-named-params",
-            f"onboarding_file_path={volume_conf_base}/{onboarding_file_name}",
-        ]
-        print(
-            f"[STAGE 6] Overriding onboarding_file_path -> "
-            f"{volume_conf_base}/{onboarding_file_name}"
-        )
-    else:
+    if not (uc_catalog and uc_schema and uc_volume):
         print(
             "[STAGE 6] WARNING: --apply-prepare-wheel was not set with UC "
             "catalog/schema/volume; the onboarding job will read from "
@@ -1567,7 +2023,7 @@ def stage_deploy_and_run(bundle_dir: Path, profile: Optional[str], *,
         )
 
     for sub in (
-        ["bundle", "run", "onboarding", "--target", "dev"] + onboarding_extra,
+        ["bundle", "run", "onboarding", "--target", "dev"],
         ["bundle", "run", "pipelines", "--target", "dev"],
     ):
         cmd = base + sub
@@ -1685,7 +2141,8 @@ def _selected_scenarios(name: str) -> List[Scenario]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", maxsplit=1)[0])
     parser.add_argument("--scenario", default="all",
-                        choices=["cloudfiles", "cloudfiles_combined", "kafka",
+                        choices=["cloudfiles", "cloudfiles_combined",
+                                 "multi_pipeline_cloudfiles", "kafka",
                                  "eventhub", "delta", "all"],
                         help="Which source scenario to run (default: all). "
                              "`cloudfiles` renders pipeline_mode=split; "
@@ -1814,6 +2271,17 @@ def main() -> int:
                 uc_source_catalog=args.uc_source_catalog,
                 uc_source_schema=args.uc_source_schema,
             )
+            stage_add_independent_pipeline(
+                scenario,
+                bundle_dir,
+                uc_schema=args.uc_schema,
+                demo_data_volume_path=demo_data_volume_path,
+            )
+            stage_assert_duplicate_pipeline_rejected(
+                scenario,
+                bundle_dir,
+                uc_schema=args.uc_schema,
+            )
             stage_recipe(
                 scenario, bundle_dir,
                 apply_recipe=args.apply_recipe,
@@ -1823,6 +2291,11 @@ def main() -> int:
                 uc_source_schema=args.uc_source_schema,
                 create_missing_uc=args.create_missing_uc,
                 demo_data_volume_path=demo_data_volume_path,
+            )
+            stage_assert_customized_bundle_validation(
+                scenario,
+                bundle_dir,
+                args.profile,
             )
             stage_validate(bundle_dir, args.profile)
             if args.apply_deploy:

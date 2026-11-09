@@ -345,14 +345,17 @@ def handle_onboarding_preview():
         source_ext = os.path.splitext(local_path)[1].lower()
         try:
             rendered, _parsed = render_onboarding_template(content, source_ext, substitutions)
-        except Exception as exc:
+        except Exception:
             # ``render_onboarding_template`` raises on malformed
             # YAML/JSON *after substitution* \u2014 usually means a
             # substitution value contained an unescaped quote or
             # breaks YAML indentation.
             logger.exception("Onboarding preview render failed")
             return jsonify({
-                'error': f'Could not render template after substitution: {exc}'
+                'error': (
+                    'Could not render the template after substitution. Verify '
+                    'the template syntax and the supplied catalog and schema names.'
+                )
             }), 400
 
         # Surface the detected env suffix(es) so the UI can warn the

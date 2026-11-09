@@ -189,7 +189,20 @@ def table_data():
         if state_val != 'SUCCEEDED':
             err = getattr(result.status, 'error', None)
             msg = getattr(err, 'message', None) if err else 'Query failed'
-            return jsonify({'error': msg or 'Query failed', 'state': state_val}), 400
+            logger.error(
+                "table_data query did not succeed for %s.%s.%s: %s",
+                catalog,
+                schema,
+                table,
+                msg,
+            )
+            return jsonify({
+                'error': (
+                    'The app could not read this table. Verify the SQL warehouse, '
+                    'table name, and App service principal permissions.'
+                ),
+                'state': state_val,
+            }), 400
 
         schema_obj = result.manifest.schema if result.manifest else None
         columns = [c.name for c in (schema_obj.columns if schema_obj else [])]

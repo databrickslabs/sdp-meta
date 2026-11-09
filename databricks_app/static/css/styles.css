@@ -136,18 +136,14 @@ body {
 .logo-icon {
     width: 40px;
     height: 40px;
-    background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan));
     border-radius: var(--radius-md);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    box-shadow: 0 0 20px var(--accent-blue-glow);
+    overflow: hidden;
 }
 
-.logo-icon svg {
-    width: 24px;
-    height: 24px;
-    color: white;
+.logo-icon img {
+    width: 100%;
+    height: 100%;
+    display: block;
 }
 
 .logo-text {

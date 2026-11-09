@@ -1,6 +1,6 @@
 ---
 name: sdp-meta
-description: "Use this skill for metadata-driven Databricks pipelines built with SDP-META (the framework in this repo; formerly DLT-META, package databricks-labs-sdp-meta, CLI `databricks labs sdp-meta`). Triggers: (1) 'sdp-meta', 'sdp meta', 'dlt-meta', 'dlt meta', or 'metadata-driven pipeline'; (2) onboarding a dataflowspec / writing an onboarding JSON/YAML that describes bronze/silver tables as metadata; (3) generating many bronze/silver Lakeflow SDP pipelines from config instead of hand-writing pipeline code; (4) `sdp-meta onboard`, `sdp-meta deploy`, or `sdp-meta bundle-init/bundle-add-flow/bundle-validate`; (5) scaffolding an sdp-meta Asset Bundle (DAB). This is the config-driven LAYER ON TOP OF Lakeflow Spark Declarative Pipelines — for hand-authored streaming tables / materialized views, that is plain SDP, not this framework."
+description: "Use this skill for metadata-driven Databricks pipelines built with SDP-META (formerly DLT-META; package databricks-labs-sdp-meta; CLI `databricks labs sdp-meta`). Trigger when users mention SDP-META/DLT-META, onboarding or dataflowspec JSON/YAML, config-driven Bronze/Silver Lakeflow pipelines, SDP-META CLI or MCP tools, Asset Bundle scaffolding, or Git-based CI/CD automation for SDP-META. This framework is a config-driven layer on top of Lakeflow Spark Declarative Pipelines; hand-authored streaming tables or materialized views are plain SDP."
 ---
 
 # SDP-META — Metadata-Driven Lakeflow Pipelines
@@ -55,7 +55,9 @@ Prefer a bundle for anything beyond a one-off:
 databricks labs sdp-meta bundle-init --quickstart=true --output-dir=.
 # edit resources/variables.yml (catalog / schema / sdp_meta_dependency), then:
 databricks labs sdp-meta bundle-validate
-databricks bundle deploy && databricks bundle run
+databricks bundle deploy --target dev
+databricks bundle run onboarding --target dev
+databricks bundle run pipelines --target dev
 ```
 
 > Use the `=` syntax on boolean flags (`--quickstart=true`,
@@ -80,9 +82,12 @@ Two complementary surfaces:
   [references/mcp-tools.md](references/mcp-tools.md).
 - **CLI** (`onboard`/`deploy`/`bundle-*`): the operational path that touches a
   live workspace. See [references/cli-and-bundles.md](references/cli-and-bundles.md).
+- **CI/CD** (GitHub Actions, Azure DevOps, or another unattended runner): use
+  service-principal OAuth and the non-interactive bundle workflow. See
+  [references/ci-cd-automation.md](references/ci-cd-automation.md).
 
 Recommended flow: scaffold + add flows + validate locally with the MCP tools (or
-`bundle-init`), then hand off to CLI `deploy` for the live run.
+`bundle-init`), then hand off to the CLI locally or in CI/CD for deployment.
 
 ## Onboarding file essentials
 
@@ -121,6 +126,7 @@ Full field reference: [references/onboarding-spec.md](references/onboarding-spec
 | **New to sdp-meta? Zero-to-running pipeline against your own data** | [references/getting-started-walkthrough.md](references/getting-started-walkthrough.md) |
 | Every dataflowspec field, layers, env suffixes, DQ, CDC, source formats | [references/onboarding-spec.md](references/onboarding-spec.md) |
 | CLI commands (`onboard`/`deploy`), the DAB workflow, wheel delivery flags | [references/cli-and-bundles.md](references/cli-and-bundles.md) |
+| GitHub Actions/Azure DevOps, OAuth, targets, permissions, promotion, rollback | [references/ci-cd-automation.md](references/ci-cd-automation.md) |
 | MCP tools + registering the sdp-meta MCP server for agents | [references/mcp-tools.md](references/mcp-tools.md) |
 
 ## Common issues

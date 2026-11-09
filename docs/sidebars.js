@@ -59,6 +59,7 @@ const sidebars = {
       label: 'Operations',
       link: { type: 'doc', id: 'operations/index' },
       items: [
+        'operations/ci-cd',
         'operations/troubleshooting',
         'operations/integration-tests',
         'operations/migration',

@@ -67,7 +67,7 @@ The install command also changes: `databricks labs install sdp-meta`.
 
 **Q: My onboarding file was written for DLT-META. Is it compatible?**
 
-Yes — the onboarding file format (JSON or YAML) is fully backward-compatible. Field names are unchanged. The only things that need updating are config keys: `dlt_meta_schema` → `sdp_meta_schema` (the old key is still accepted with a logged warning until v0.2.0).
+Yes — the onboarding file format (JSON or YAML) is fully backward-compatible. Field names are unchanged. The only things that need updating are the workspace config keys, which were renamed from their `dlt_meta_*` spellings to `sdp_meta_*`: `dlt_meta_operation` → `sdp_meta_operation`, `dlt_meta_schema` → `sdp_meta_schema`, `dlt_meta_layer` → `sdp_meta_layer`, and `dlt_meta_onboard_group` → `sdp_meta_onboard_group` (the old keys are still accepted with a logged warning until v0.2.0; if both spellings are present, the `sdp_meta_*` value wins).
 
 **Q: My runner notebook uses `init_dlt_meta_pipeline.py`. Do I need to update it?**
 
@@ -117,9 +117,12 @@ No. Field names in the onboarding file (`bronze_cdc_apply_changes`, `silver_cdc_
 
 DBFS paths still work, but the recommended approach for Unity Catalog workspaces is UC Volumes (`/Volumes/catalog/schema/volume/...`). The CLI and DAB workflows default to UC Volumes for all file uploads. Migrate at your own pace — there is no forced cutover.
 
-**Q: What happened to the `dlt_meta_schema` config key?**
+**Q: What happened to the legacy `dlt_meta_*` workspace config keys?**
 
-It was renamed to `sdp_meta_schema` in v0.1.0. The old key is still accepted with a logged warning. Update it before v0.2.0.
+The `dlt_meta_operation`, `dlt_meta_schema`, `dlt_meta_layer`, and
+`dlt_meta_onboard_group` keys were renamed to their `sdp_meta_*` equivalents.
+SDP-META v0.1.1 accepts the old names with logged warnings; when both names are
+present, the current `sdp_meta_*` value wins. Update them before v0.2.0.
 
 **Q: My pipeline uses `database` as a single schema name (not `catalog.schema`). Does UC mode still work?**
 
@@ -180,7 +183,7 @@ Scaffolds a bundle with developer-friendly defaults (Autoloader + bronze_silver 
 
 **Q: What is `bundle-validate` checking beyond `databricks bundle validate`?**
 
-It catches SDP-META-specific authoring mistakes: unedited `<your-...>` or `__SET_ME__` placeholders in `databricks.yml` and onboarding files, mismatched `dataflow_group` references, `pipeline_mode` inconsistencies, and `wheel_source` vs `sdp_meta_dependency` drift.
+It catches SDP-META-specific authoring mistakes: unedited `<your-...>` or `__SET_ME__` placeholders in `databricks.yml` and onboarding files, per-pipeline `data_flow_group` and layer configuration errors, missing or duplicate pipeline-job wiring, invalid split dependencies, and `wheel_source` vs `sdp_meta_dependency` drift.
 
 **Q: How do I generate onboarding entries in bulk?**
 
@@ -215,7 +218,7 @@ It reads bundle defaults from `resources/variables.yml`, auto-increments `data_f
 
 **Q: Can a single bundle have multiple `data_flow_group` values?**
 
-Yes, but each group maps to a separate pipeline. The bundle template scaffolds one group by default. To add a second group, add a new pipeline resource in `resources/sdp_meta_pipelines.yml` with its own `bronze.group` / `silver.group` configuration key pointing at the new group name, then redeploy and re-run `onboarding`.
+Yes. The bundle template scaffolds one group by default. Run `databricks labs sdp-meta bundle-add-pipeline` to add a topology with its own `bronze.group` / `silver.group`, layer, mode, and optional target schemas. Add matching flows with `bundle-add-flow`, validate, redeploy, and re-run onboarding.
 
 **Q: How do I switch from PyPI to a local wheel (or vice versa)?**
 
@@ -225,7 +228,7 @@ Change `wheel_source` and `sdp_meta_dependency` in `resources/variables.yml`, th
 wheel_source:
   default: volume_path
 sdp_meta_dependency:
-  default: /Volumes/my_catalog/my_schema/my_volume/databricks_labs_sdp_meta-0.1.0-py3-none-any.whl
+  default: /Volumes/my_catalog/my_schema/my_volume/databricks_labs_sdp_meta-0.1.1-py3-none-any.whl
 ```
 Run `bundle-prepare-wheel` first to build and upload the wheel if you don't have the path yet.
 
@@ -248,7 +251,9 @@ Per-target catalog, schema, and variable overrides live under `targets.prod.vari
 
 **Q: I was using `pip install dlt-meta`. Do I need to change anything?**
 
-No. `pip install dlt-meta==0.1.0` installs `databricks-labs-sdp-meta` as a dependency automatically. Your existing `from dlt_meta import ...` imports continue to work with a deprecation warning.
+No. `pip install dlt-meta==0.1.1` installs
+`databricks-labs-sdp-meta==0.1.1` as a dependency automatically. Your existing
+`from dlt_meta import ...` imports continue to work with a deprecation warning.
 
 **Q: When will the `dlt-meta` compatibility package be removed?**
 

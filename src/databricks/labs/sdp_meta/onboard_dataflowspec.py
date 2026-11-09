@@ -416,8 +416,9 @@ class OnboardDataflowspec:
                 # An onboarding row can be bronze-only, silver-only, or
                 # both. The runtime onboarding methods pick which rows
                 # to process by these exact predicates:
-                #   * bronze row: has non-empty ``source_details``
-                #     (see onboard_bronze_dataflow_spec:1243).
+                #   * bronze row: has a bronze target, or has source details
+                #     without a silver target (a malformed bronze row whose
+                #     missing target still needs a useful validation error).
                 #   * silver row: has non-empty
                 #     ``silver_database_{env}`` (see
                 #     onboard_silver_dataflow_spec:2157).
@@ -428,7 +429,13 @@ class OnboardDataflowspec:
                 # required-field check just for not having silver
                 # fields (issue #343 finding #2 corner case).
                 if layer == "bronze":
-                    participates = bool(row_dict.get("source_details"))
+                    participates = bool(
+                        row_dict.get(f"bronze_database_{env}")
+                        or (
+                            row_dict.get("source_details")
+                            and not row_dict.get(f"silver_database_{env}")
+                        )
+                    )
                 elif layer == "silver":
                     participates = bool(row_dict.get(f"silver_database_{env}"))
                 else:
@@ -1066,6 +1073,30 @@ class OnboardDataflowspec:
         _dict.update(filtered)
         return _dict
 
+    def __serialize_source_metadata(self, source_metadata):
+        """Normalize nested Spark Rows and encode source metadata once."""
+        if hasattr(source_metadata, "asDict"):
+            source_metadata_dict = source_metadata.asDict(recursive=True)
+        elif isinstance(source_metadata, dict):
+            source_metadata_dict = dict(source_metadata)
+        else:
+            raise TypeError(
+                "source_metadata must be a mapping, got "
+                f"{type(source_metadata).__name__}"
+            )
+        select_metadata_cols = source_metadata_dict.get(
+            "select_metadata_cols"
+        )
+        if hasattr(select_metadata_cols, "asDict"):
+            select_metadata_cols = select_metadata_cols.asDict(
+                recursive=True
+            )
+        if isinstance(select_metadata_cols, dict):
+            source_metadata_dict["select_metadata_cols"] = (
+                self.__delete_none(dict(select_metadata_cols))
+            )
+        return json.dumps(self.__delete_none(source_metadata_dict))
+
     def _load_structured_file(self, file_path):
         """Load a JSON or YAML file via Spark and return the parsed Python object.
 
@@ -1498,6 +1529,7 @@ class OnboardDataflowspec:
             data_quality_expectations = None
             quarantine_target_details = {}
             quarantine_table_properties = {}
+            has_quarantine_expectations = False
             if f"bronze_data_quality_expectations_json_{env}" in onboarding_row:
                 bronze_data_quality_expectations_json = onboarding_row[
                     f"bronze_data_quality_expectations_json_{env}"
@@ -1506,16 +1538,44 @@ class OnboardDataflowspec:
                     data_quality_expectations = self.__get_data_quality_expecations(
                         bronze_data_quality_expectations_json
                     )
-                    if onboarding_row["bronze_quarantine_table"]:
-                        quarantine_target_details, quarantine_table_properties = self.__get_quarantine_details(
-                            env, "bronze", onboarding_row
+                    has_quarantine_expectations = (
+                        self.__has_quarantine_expectations(
+                            data_quality_expectations
                         )
+                    )
+            quarantine_target_configured = (
+                "bronze_quarantine_table" in onboarding_row
+                and bool(onboarding_row["bronze_quarantine_table"])
+            )
+            quarantine_database_configured = (
+                f"bronze_database_quarantine_{env}" in onboarding_row
+                and bool(onboarding_row[f"bronze_database_quarantine_{env}"])
+            )
+            if has_quarantine_expectations and not (
+                quarantine_target_configured and quarantine_database_configured
+            ):
+                logger.warning(
+                    "Bronze DQE contains non-empty expect_or_quarantine rules "
+                    "but its quarantine target is incomplete. No quarantine "
+                    "table will be created. Add "
+                    "bronze_quarantine_table and "
+                    "bronze_database_quarantine_%s. Missing targets remain "
+                    "allowed for backward compatibility.",
+                    env,
+                )
+            if has_quarantine_expectations or quarantine_target_configured:
+                quarantine_target_details, quarantine_table_properties = self.__get_quarantine_details(
+                    env, "bronze", onboarding_row
+                )
 
             append_flows, append_flows_schemas = self.get_append_flows_json(
                 onboarding_row, "bronze", env
             )
             cdc_apply_changes_flows, cdc_apply_changes_flows_schemas = (
                 self.get_cdc_apply_changes_flows_json(onboarding_row, "bronze", env)
+            )
+            self.__validate_cdc_flows_quarantine_expectations(
+                data_quality_expectations, cdc_apply_changes_flows, "bronze"
             )
             bronze_row_filter = (
                 onboarding_row["bronze_row_filter"]
@@ -1747,6 +1807,13 @@ class OnboardDataflowspec:
                                     append_flows_schema[json_append_flow["name"]] = (
                                         schema
                                     )
+                            elif (
+                                "source_metadata" == ff
+                                and json_append_flow[key][ff] is not None
+                            ):
+                                mp[ff] = self.__serialize_source_metadata(
+                                    json_append_flow[key][ff]
+                                )
                             else:
                                 mp[f"{ff}"] = json_append_flow[key][f"{ff}"]
                         append_flow_map[key] = self.__delete_none(mp)
@@ -2132,16 +2199,10 @@ class OnboardDataflowspec:
                 if "source_table" in source_details_file:
                     source_details["source_table"] = source_details_file["source_table"]
                 if "source_metadata" in source_details_file:
-                    source_metadata_dict = self.__delete_none(
-                        source_details_file["source_metadata"].asDict()
-                    )
-                    if "select_metadata_cols" in source_metadata_dict:
-                        select_metadata_cols = self.__delete_none(
-                            source_metadata_dict["select_metadata_cols"].asDict()
+                    source_details["source_metadata"] = (
+                        self.__serialize_source_metadata(
+                            source_details_file["source_metadata"]
                         )
-                        source_metadata_dict["select_metadata_cols"] = select_metadata_cols
-                    source_details["source_metadata"] = json.dumps(
-                        self.__delete_none(source_metadata_dict)
                     )
             if source_format.lower() == "snapshot":
                 snapshot_format = source_details_file.get("snapshot_format", None)
@@ -2236,6 +2297,30 @@ class OnboardDataflowspec:
         if parsed is None:
             return None
         return json.dumps(parsed)
+
+    @staticmethod
+    def __has_quarantine_expectations(data_quality_expectations):
+        """Return whether serialized DQE contains quarantine rules."""
+        if not data_quality_expectations:
+            return False
+        parsed = json.loads(data_quality_expectations)
+        if not isinstance(parsed, dict):
+            return False
+        return bool(parsed.get("expect_or_quarantine"))
+
+    def __validate_cdc_flows_quarantine_expectations(
+        self, data_quality_expectations, cdc_apply_changes_flows, layer
+    ):
+        """Reject an unsupported multi-source CDC quarantine combination."""
+        if (
+            cdc_apply_changes_flows
+            and self.__has_quarantine_expectations(data_quality_expectations)
+        ):
+            raise ValueError(
+                f"{layer}_cdc_apply_changes_flows does not support "
+                "expect_or_quarantine expectations. Use expect, "
+                "expect_or_drop, or expect_or_fail instead."
+            )
 
     def __get_silver_dataflow_spec_dataframe(self, onboarding_df, env):
         """Get silver_dataflow_spec method transform onboarding dataframe to silver dataflowSpec dataframe.
@@ -2507,6 +2592,7 @@ class OnboardDataflowspec:
             silver_quarantine_target_details = None
             silver_quarantine_table_properties = None
             silver_quarantine_cluster_by = None
+            has_quarantine_expectations = False
             if f"silver_data_quality_expectations_json_{env}" in onboarding_row:
                 silver_data_quality_expectations_json = onboarding_row[
                     f"silver_data_quality_expectations_json_{env}"
@@ -2515,19 +2601,53 @@ class OnboardDataflowspec:
                     data_quality_expectations = self.__get_data_quality_expecations(
                         silver_data_quality_expectations_json
                     )
-                silver_quarantine_target_details, silver_quarantine_table_properties = self.__get_quarantine_details(
+                    has_quarantine_expectations = (
+                        self.__has_quarantine_expectations(
+                            data_quality_expectations
+                        )
+                    )
+            quarantine_target_configured = (
+                "silver_quarantine_table" in onboarding_row
+                and bool(onboarding_row["silver_quarantine_table"])
+            )
+            quarantine_database_configured = (
+                f"silver_database_quarantine_{env}" in onboarding_row
+                and bool(onboarding_row[f"silver_database_quarantine_{env}"])
+            )
+            if has_quarantine_expectations and not (
+                quarantine_target_configured and quarantine_database_configured
+            ):
+                logger.warning(
+                    "Silver DQE contains non-empty expect_or_quarantine rules "
+                    "but its quarantine target is incomplete. No quarantine "
+                    "table will be created. Add "
+                    "silver_quarantine_table and "
+                    "silver_database_quarantine_%s. Missing targets remain "
+                    "allowed for backward compatibility.",
+                    env,
+                )
+            if has_quarantine_expectations or quarantine_target_configured:
+                (
+                    silver_quarantine_target_details,
+                    silver_quarantine_table_properties,
+                ) = self.__get_quarantine_details(
                     env, "silver", onboarding_row
                 )
-                silver_quarantine_cluster_by = self.__get_cluster_by_properties(
-                    onboarding_row,
-                    silver_quarantine_table_properties,
-                    "silver_quarantine_cluster_by"
+                silver_quarantine_cluster_by = (
+                    self.__get_cluster_by_properties(
+                        onboarding_row,
+                        silver_quarantine_table_properties,
+                        "silver_quarantine_cluster_by",
+                    )
                 )
             append_flows, append_flow_schemas = self.get_append_flows_json(
                 onboarding_row, layer="silver", env=env
             )
             silver_cdc_apply_changes_flows, _silver_cdc_flow_schemas = (
                 self.get_cdc_apply_changes_flows_json(onboarding_row, "silver", env)
+            )
+            self.__validate_cdc_flows_quarantine_expectations(
+                data_quality_expectations, silver_cdc_apply_changes_flows, "silver"
             )
             apply_changes_from_snapshot = None
             source_format = "delta"

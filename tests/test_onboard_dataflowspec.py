@@ -1,5 +1,6 @@
 """Test OnboardDataflowSpec class."""
 import copy
+import dataclasses
 import json
 import os
 import shutil
@@ -9,7 +10,63 @@ from tests.utils import SDPFrameworkTestCase
 from databricks.labs.sdp_meta.onboard_dataflowspec import OnboardDataflowspec
 from databricks.labs.sdp_meta.dataflow_spec import BronzeDataflowSpec, SilverDataflowSpec
 from unittest.mock import MagicMock, patch
-from pyspark.sql import DataFrame
+from pyspark.sql import DataFrame, Row
+
+
+_V0010_BRONZE_SPEC_SCHEMA_DDL = """
+    dataFlowId STRING,
+    dataFlowGroup STRING,
+    sourceFormat STRING,
+    sourceDetails MAP<STRING, STRING>,
+    readerConfigOptions MAP<STRING, STRING>,
+    targetFormat STRING,
+    targetDetails MAP<STRING, STRING>,
+    tableProperties MAP<STRING, STRING>,
+    schema STRING,
+    partitionColumns ARRAY<STRING>,
+    cdcApplyChanges STRING,
+    applyChangesFromSnapshot STRING,
+    dataQualityExpectations STRING,
+    quarantineTargetDetails MAP<STRING, STRING>,
+    quarantineTableProperties MAP<STRING, STRING>,
+    appendFlows STRING,
+    appendFlowsSchemas MAP<STRING, STRING>,
+    version STRING,
+    createDate TIMESTAMP,
+    createdBy STRING,
+    updateDate TIMESTAMP,
+    updatedBy STRING,
+    clusterBy ARRAY<STRING>,
+    sinks STRING
+"""
+
+_V0010_SILVER_SPEC_SCHEMA_DDL = """
+    dataFlowId STRING,
+    dataFlowGroup STRING,
+    sourceFormat STRING,
+    sourceDetails MAP<STRING, STRING>,
+    readerConfigOptions MAP<STRING, STRING>,
+    targetFormat STRING,
+    targetDetails MAP<STRING, STRING>,
+    tableProperties MAP<STRING, STRING>,
+    selectExp ARRAY<STRING>,
+    whereClause ARRAY<STRING>,
+    partitionColumns ARRAY<STRING>,
+    cdcApplyChanges STRING,
+    applyChangesFromSnapshot STRING,
+    dataQualityExpectations STRING,
+    quarantineTargetDetails MAP<STRING, STRING>,
+    quarantineTableProperties MAP<STRING, STRING>,
+    appendFlows STRING,
+    appendFlowsSchemas MAP<STRING, STRING>,
+    version STRING,
+    createDate TIMESTAMP,
+    createdBy STRING,
+    updateDate TIMESTAMP,
+    updatedBy STRING,
+    clusterBy ARRAY<STRING>,
+    sinks STRING
+"""
 
 
 class OnboardDataflowspecTests(SDPFrameworkTestCase):
@@ -26,6 +83,118 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
         """
         params = copy.deepcopy(self.onboarding_bronze_silver_params_map)
         return OnboardDataflowspec(self.spark, params)
+
+    def _rewrite_spec_table_with_legacy_schema(
+        self, table_name, legacy_schema_ddl, path=None
+    ):
+        legacy_schema = self.spark.createDataFrame(
+            [], schema=legacy_schema_ddl
+        ).schema
+        current = self.spark.table(table_name).select(
+            *legacy_schema.fieldNames()
+        )
+        rows = current.collect()
+        self.spark.sql(f"DROP TABLE IF EXISTS {table_name}")
+        legacy = self.spark.createDataFrame(rows, legacy_schema)
+        if path is None:
+            legacy.write.format("delta").saveAsTable(table_name)
+            return
+        shutil.rmtree(path, ignore_errors=True)
+        legacy.write.format("delta").save(path)
+        database, table = table_name.rsplit(".", 1)
+        self.deltaPipelinesMetaStoreOps.register_table_in_metastore(
+            database, table, path
+        )
+
+    def _assert_append_onboarding_evolves_v0010_schema(self, uc_enabled):
+        params = copy.deepcopy(
+            self.onboarding_bronze_silver_params_uc_map
+            if uc_enabled
+            else self.onboarding_bronze_silver_params_map
+        )
+        params.pop("uc_enabled", None)
+        onboarder = OnboardDataflowspec(
+            self.spark, params, uc_enabled=uc_enabled
+        )
+        onboarder.onboard_dataflow_specs()
+
+        database = params["database"]
+        bronze_table = f"{database}.{params['bronze_dataflowspec_table']}"
+        silver_table = f"{database}.{params['silver_dataflowspec_table']}"
+        original_bronze = {
+            row["dataFlowId"]: row.asDict()
+            for row in self.spark.table(bronze_table).collect()
+        }
+        original_silver = {
+            row["dataFlowId"]: row.asDict()
+            for row in self.spark.table(silver_table).collect()
+        }
+        self._rewrite_spec_table_with_legacy_schema(
+            bronze_table,
+            _V0010_BRONZE_SPEC_SCHEMA_DDL,
+            None if uc_enabled else params["bronze_dataflowspec_path"],
+        )
+        self._rewrite_spec_table_with_legacy_schema(
+            silver_table,
+            _V0010_SILVER_SPEC_SCHEMA_DDL,
+            None if uc_enabled else params["silver_dataflowspec_path"],
+        )
+
+        with open(self.onboarding_json_file, "r") as source:
+            payload = json.load(source)
+        new_row = copy.deepcopy(payload[0])
+        new_row["data_flow_id"] = "schema-evolution-new"
+        new_row["bronze_cluster_by_auto"] = True
+        new_row["silver_cluster_by_auto"] = True
+        payload.append(new_row)
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False
+        ) as target:
+            json.dump(payload, target)
+            onboarding_path = target.name
+        self.addCleanup(
+            lambda: os.path.exists(onboarding_path)
+            and os.remove(onboarding_path)
+        )
+
+        params["overwrite"] = "False"
+        params["onboarding_file_path"] = onboarding_path
+        for _ in range(2):
+            OnboardDataflowspec(
+                self.spark, params, uc_enabled=uc_enabled
+            ).onboard_dataflow_specs()
+
+        bronze = self.spark.table(bronze_table)
+        silver = self.spark.table(silver_table)
+        self.assertEqual(
+            set(bronze.columns),
+            {field.name for field in dataclasses.fields(BronzeDataflowSpec)},
+        )
+        self.assertEqual(
+            set(silver.columns),
+            {field.name for field in dataclasses.fields(SilverDataflowSpec)},
+        )
+        bronze_rows = {
+            row["dataFlowId"]: row.asDict() for row in bronze.collect()
+        }
+        silver_rows = {
+            row["dataFlowId"]: row.asDict() for row in silver.collect()
+        }
+        self.assertEqual(len(bronze_rows), 4)
+        self.assertEqual(len(silver_rows), 4)
+        self.assertTrue(
+            bronze_rows["schema-evolution-new"]["clusterByAuto"]
+        )
+        self.assertTrue(
+            silver_rows["schema-evolution-new"]["clusterByAuto"]
+        )
+        for field in ("createDate", "createdBy"):
+            self.assertEqual(
+                bronze_rows["100"][field], original_bronze["100"][field]
+            )
+            self.assertEqual(
+                silver_rows["100"][field], original_silver["100"][field]
+            )
 
     @staticmethod
     def _row(values):
@@ -86,7 +255,10 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
         onboarder = self._make_onboarder()
         onboarder.bronze_schema_mapper = MagicMock(return_value="mapped-schema")
         source_metadata = self._row({
-            "select_metadata_cols": self._row({"file_name": "_metadata.file_name"}),
+            "select_metadata_cols": self._row({
+                "file_name": "_metadata.file_name",
+                "unused": None,
+            }),
             "include_autoloader_metadata_column": True,
         })
         onboarding_row = {
@@ -113,9 +285,58 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
         self.assertEqual(details["source_database"], "raw")
         self.assertEqual(options, {"cloudFiles.format": "json"})
         self.assertEqual(schema, "mapped-schema")
+        self.assertEqual(
+            json.loads(details["source_metadata"]),
+            {
+                "select_metadata_cols": {
+                    "file_name": "_metadata.file_name"
+                },
+                "include_autoloader_metadata_column": True,
+            },
+        )
         onboarder.bronze_schema_mapper.assert_called_once_with(
             "/tmp/schema.ddl", self.spark
         )
+
+    def test_append_flow_source_metadata_is_json_encoded(self):
+        onboarder = self._make_onboarder()
+        onboarding_row = {
+            "bronze_append_flows": [
+                Row(
+                    name="events_append",
+                    create_streaming_table=False,
+                    source_format="cloudFiles",
+                    source_details=Row(
+                        source_path_dev="/tmp/append",
+                        source_metadata=Row(
+                            select_metadata_cols=Row(
+                                file_path="_metadata.file_path"
+                            )
+                        ),
+                    ),
+                )
+            ]
+        }
+
+        encoded, schemas = onboarder.get_append_flows_json(
+            onboarding_row, "bronze", "dev"
+        )
+
+        append_flow = json.loads(encoded)[0]
+        source_metadata = append_flow["source_details"]["source_metadata"]
+        self.assertIsInstance(source_metadata, str)
+        self.assertEqual(
+            json.loads(source_metadata),
+            {
+                "select_metadata_cols": {
+                    "file_path": "_metadata.file_path"
+                }
+            },
+        )
+        self.assertEqual(
+            append_flow["source_details"]["path"], "/tmp/append"
+        )
+        self.assertEqual(schemas, {})
 
     def test_snapshot_source_requires_format(self):
         onboarder = self._make_onboarder()
@@ -442,6 +663,214 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
         with self.assertRaises(ValueError):
             onboard_dfs._OnboardDataflowspec__get_data_quality_expecations(
                 "tests/resources/schema.ddl"
+            )
+
+    def test_has_quarantine_expectations_rejects_empty_and_non_mapping_values(self):
+        has_quarantine_expectations = (
+            OnboardDataflowspec._OnboardDataflowspec__has_quarantine_expectations
+        )
+
+        self.assertFalse(has_quarantine_expectations(None))
+        self.assertFalse(has_quarantine_expectations(json.dumps([])))
+
+    def test_empty_dqe_paths_do_not_require_quarantine_fields(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with open(self.onboarding_json_file, "r") as source:
+                onboarding_row = copy.deepcopy(json.load(source)[0])
+            for field_name in list(onboarding_row):
+                if "quarantine" in field_name:
+                    del onboarding_row[field_name]
+            onboarding_row["bronze_data_quality_expectations_json_dev"] = ""
+            onboarding_row["silver_data_quality_expectations_json_dev"] = ""
+
+            onboarding_path = os.path.join(tmp_dir, "onboarding.json")
+            with open(onboarding_path, "w") as target:
+                json.dump([onboarding_row], target)
+
+            params = copy.deepcopy(self.onboarding_bronze_silver_params_map)
+            params["onboarding_file_path"] = onboarding_path
+            onboarder = OnboardDataflowspec(self.spark, params)
+            onboarding_df = onboarder._OnboardDataflowspec__get_onboarding_file_dataframe(
+                onboarding_path
+            )
+
+            bronze_row = onboarder._OnboardDataflowspec__get_bronze_dataflow_spec_dataframe(
+                onboarding_df, "dev"
+            ).collect()[0]
+            silver_row = onboarder._OnboardDataflowspec__get_silver_dataflow_spec_dataframe(
+                onboarding_df, "dev"
+            ).collect()[0]
+
+            self.assertIsNone(bronze_row.dataQualityExpectations)
+            self.assertEqual(bronze_row.quarantineTargetDetails, {})
+            self.assertIsNone(silver_row.dataQualityExpectations)
+            self.assertIsNone(silver_row.quarantineTargetDetails)
+
+    def _stage_onboarding_with_dqe_without_quarantine(
+        self, tmp_dir, extension, dqe_payload
+    ):
+        with open(self.onboarding_json_file, "r") as source:
+            onboarding_row = copy.deepcopy(json.load(source)[0])
+        for field_name in list(onboarding_row):
+            if "quarantine" in field_name:
+                del onboarding_row[field_name]
+
+        dqe_path = os.path.join(tmp_dir, f"expectations.{extension}")
+        onboarding_path = os.path.join(tmp_dir, f"onboarding.{extension}")
+        with open(dqe_path, "w") as target:
+            if extension == "json":
+                json.dump(dqe_payload, target)
+            else:
+                yaml.safe_dump(dqe_payload, target, sort_keys=False)
+
+        onboarding_row["bronze_data_quality_expectations_json_dev"] = dqe_path
+        onboarding_row["silver_data_quality_expectations_json_dev"] = dqe_path
+        with open(onboarding_path, "w") as target:
+            if extension == "json":
+                json.dump([onboarding_row], target)
+            else:
+                yaml.safe_dump([onboarding_row], target, sort_keys=False)
+        return onboarding_path
+
+    def test_dqe_without_quarantine_rules_does_not_require_quarantine_fields(self):
+        dqe_payloads = {
+            "expect": {"expect": {"observed_id": "id IS NOT NULL"}},
+            "expect_or_drop": {
+                "expect_or_drop": {"valid_id": "id IS NOT NULL"}
+            },
+            "expect_or_fail": {
+                "expect_or_fail": {"required_id": "id IS NOT NULL"}
+            },
+            "empty_expect_or_quarantine": {"expect_or_quarantine": {}},
+        }
+        for extension in ("json", "yml"):
+            for case_name, dqe_payload in dqe_payloads.items():
+                with self.subTest(extension=extension, case=case_name):
+                    with tempfile.TemporaryDirectory() as tmp_dir:
+                        onboarding_path = (
+                            self._stage_onboarding_with_dqe_without_quarantine(
+                                tmp_dir,
+                                extension,
+                                dqe_payload,
+                            )
+                        )
+                        params = copy.deepcopy(
+                            self.onboarding_bronze_silver_params_map
+                        )
+                        params["onboarding_file_path"] = onboarding_path
+                        onboarder = OnboardDataflowspec(self.spark, params)
+                        onboarding_df = onboarder._OnboardDataflowspec__get_onboarding_file_dataframe(
+                            onboarding_path
+                        )
+
+                        bronze_row = onboarder._OnboardDataflowspec__get_bronze_dataflow_spec_dataframe(
+                            onboarding_df, "dev"
+                        ).collect()[0]
+                        silver_row = onboarder._OnboardDataflowspec__get_silver_dataflow_spec_dataframe(
+                            onboarding_df, "dev"
+                        ).collect()[0]
+
+                        self.assertEqual(
+                            json.loads(bronze_row.dataQualityExpectations),
+                            dqe_payload,
+                        )
+                        self.assertEqual(
+                            json.loads(silver_row.dataQualityExpectations),
+                            dqe_payload,
+                        )
+                        self.assertEqual(
+                            bronze_row.quarantineTargetDetails, {}
+                        )
+                        self.assertIsNone(
+                            silver_row.quarantineTargetDetails
+                        )
+
+    def test_legacy_quarantine_rules_without_targets_remain_compatible(self):
+        dqe_payload = {
+            "expect_or_quarantine": {"valid_id": "id IS NOT NULL"}
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            onboarding_path = (
+                self._stage_onboarding_with_dqe_without_quarantine(
+                    tmp_dir, "json", dqe_payload
+                )
+            )
+            params = copy.deepcopy(self.onboarding_bronze_silver_params_map)
+            params["onboarding_file_path"] = onboarding_path
+            onboarder = OnboardDataflowspec(self.spark, params)
+            onboarding_df = onboarder._OnboardDataflowspec__get_onboarding_file_dataframe(
+                onboarding_path
+            )
+
+            with self.assertLogs(
+                "databricks.labs.sdp_meta", level="WARNING"
+            ) as captured:
+                bronze_row = onboarder._OnboardDataflowspec__get_bronze_dataflow_spec_dataframe(
+                    onboarding_df, "dev"
+                ).collect()[0]
+                silver_row = onboarder._OnboardDataflowspec__get_silver_dataflow_spec_dataframe(
+                    onboarding_df, "dev"
+                ).collect()[0]
+
+            self.assertEqual(
+                json.loads(bronze_row.dataQualityExpectations),
+                dqe_payload,
+            )
+            self.assertEqual(
+                json.loads(silver_row.dataQualityExpectations),
+                dqe_payload,
+            )
+            self.assertEqual(bronze_row.quarantineTargetDetails, {})
+            self.assertEqual(silver_row.quarantineTargetDetails, {})
+            warning_output = "\n".join(captured.output)
+            self.assertIn(
+                "Bronze DQE contains non-empty expect_or_quarantine rules",
+                warning_output,
+            )
+            self.assertIn(
+                "Silver DQE contains non-empty expect_or_quarantine rules",
+                warning_output,
+            )
+            self.assertIn(
+                "Missing targets remain allowed for backward compatibility",
+                warning_output,
+            )
+
+    def test_optional_quarantine_metadata_is_preserved_without_dqe(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with open(self.onboarding_json_file, "r") as source:
+                onboarding_row = copy.deepcopy(json.load(source)[0])
+            onboarding_row.pop(
+                "bronze_data_quality_expectations_json_dev", None
+            )
+            onboarding_row.pop(
+                "silver_data_quality_expectations_json_dev", None
+            )
+            onboarding_path = os.path.join(tmp_dir, "onboarding.json")
+            with open(onboarding_path, "w") as target:
+                json.dump([onboarding_row], target)
+
+            params = copy.deepcopy(self.onboarding_bronze_silver_params_map)
+            params["onboarding_file_path"] = onboarding_path
+            onboarder = OnboardDataflowspec(self.spark, params)
+            onboarding_df = onboarder._OnboardDataflowspec__get_onboarding_file_dataframe(
+                onboarding_path
+            )
+
+            bronze_row = onboarder._OnboardDataflowspec__get_bronze_dataflow_spec_dataframe(
+                onboarding_df, "dev"
+            ).collect()[0]
+            silver_row = onboarder._OnboardDataflowspec__get_silver_dataflow_spec_dataframe(
+                onboarding_df, "dev"
+            ).collect()[0]
+
+            self.assertEqual(
+                bronze_row.quarantineTargetDetails["table"],
+                onboarding_row["bronze_quarantine_table"],
+            )
+            self.assertEqual(
+                silver_row.quarantineTargetDetails["table"],
+                onboarding_row["silver_quarantine_table"],
             )
 
     def test_validate_params_for_onboardBronzeDataflowSpec(self):
@@ -1210,6 +1639,35 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    def test_combined_preflight_does_not_treat_silver_source_as_bronze_row(self):
+        """A silver-only source row remains valid when onboarding both layers."""
+        rows = [{
+            "data_flow_id": "446S1",
+            "data_flow_group": "silver_group",
+            "source_format": "delta",
+            "source_details": {
+                "source_database": "raw",
+                "source_table": "orders",
+            },
+            "silver_database_dev": "main.silver",
+            "silver_table": "orders",
+            "silver_transformation_json_dev": "/tmp/xform.json",
+        }]
+        tmp_dir = tempfile.mkdtemp(prefix="sdp_meta_i446_silver_")
+        try:
+            onboarding_file = os.path.join(tmp_dir, "onboarding.json")
+            with open(onboarding_file, "w") as f:
+                json.dump(rows, f)
+            params = copy.deepcopy(self.onboarding_bronze_silver_params_map)
+            params["onboarding_file_path"] = onboarding_file
+            onboarder = OnboardDataflowspec(self.spark, params)
+
+            onboarder._OnboardDataflowspec__pre_validate_onboarding_uc_names(
+                layers=("bronze", "silver")
+            )
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
     def test_issue343_empty_required_field_rejected(self):
         """Empty ``<layer>_database_<env>`` / ``<layer>_table`` \u2192 400.
 
@@ -1608,6 +2066,16 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
             if bronze_row.dataFlowId == "103":
                 self.assertEqual(bronze_row.readerConfigOptions.get("maxOffsetsPerTrigger"), "60000")
 
+    def test_append_onboarding_evolves_v0010_path_spec_schemas(self):
+        self._assert_append_onboarding_evolves_v0010_schema(
+            uc_enabled=False
+        )
+
+    def test_append_onboarding_evolves_v0010_uc_spec_schemas(self):
+        self._assert_append_onboarding_evolves_v0010_schema(
+            uc_enabled=True
+        )
+
     def test_onboardDataflowSpec_with_multiple_partitions(self):
         """Test for onboardDataflowspec with multiple partitions for bronze layer."""
         onboarding_params_map = copy.deepcopy(self.onboarding_bronze_silver_params_uc_map)
@@ -1940,6 +2408,35 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
             onboardDataFlowSpecs.onboard_dataflow_specs()
         self.assertIn("silver_cdc_apply_changes_flows", str(ctx.exception))
         self.assertIn("use one or the other", str(ctx.exception))
+
+    def test_cdc_flows_rejects_quarantine_expectations(self):
+        """Multi-source CDC cannot route expect_or_quarantine rows yet."""
+        with open(self.onboarding_silver_cdc_flows_json_file) as source:
+            data = json.load(source)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dqe_path = os.path.join(tmp_dir, "expectations.json")
+            onboarding_path = os.path.join(tmp_dir, "onboarding.json")
+            with open(dqe_path, "w") as dqe_file:
+                json.dump(
+                    {
+                        "expect_or_quarantine": {
+                            "amount_non_negative": "amount >= 0"
+                        }
+                    },
+                    dqe_file,
+                )
+            data[0]["silver_data_quality_expectations_json_dev"] = dqe_path
+            with open(onboarding_path, "w") as onboarding_file:
+                json.dump(data, onboarding_file)
+
+            params = copy.deepcopy(self.onboarding_bronze_silver_params_map)
+            params["onboarding_file_path"] = onboarding_path
+            onboarder = OnboardDataflowspec(self.spark, params)
+            with self.assertRaisesRegex(
+                ValueError, "does not support expect_or_quarantine"
+            ):
+                onboarder.onboard_dataflow_specs()
 
     def test_cdc_flows_pre_validate_duplicate_flow_names(self):
         """Pre-flight validation rejects duplicate ``flow.name`` within a

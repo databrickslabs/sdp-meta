@@ -180,7 +180,7 @@ Deliver the wheel from a UC Volume instead:
 ```bash
 databricks labs sdp-meta deploy --build-and-upload-whl=true --profile <p>
 # or point at a pre-uploaded wheel:
-databricks labs sdp-meta deploy --whl-file-path=/Volumes/acme/libs/vol/databricks_labs_sdp_meta-0.1.0-py3-none-any.whl --profile <p>
+databricks labs sdp-meta deploy --whl-file-path=/Volumes/acme/libs/vol/databricks_labs_sdp_meta-0.1.1-py3-none-any.whl --profile <p>
 ```
 
 On serverless the wheel is baked into the runner notebook's `%pip install` (not a

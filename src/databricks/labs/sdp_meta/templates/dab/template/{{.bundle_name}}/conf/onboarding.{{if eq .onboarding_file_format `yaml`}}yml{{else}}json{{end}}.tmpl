@@ -57,6 +57,13 @@ in variables.yml).
   {{- end}}
   bronze_table_path_dev: ""
   bronze_partition_columns: ""
+  # The onboarding engine accesses this field whenever DQE is configured.
+  # Keep quarantine disabled by default while preserving a complete Row schema.
+  bronze_database_quarantine_dev: "{{.uc_catalog_name}}.{{.bronze_target_schema}}"
+  bronze_quarantine_table: ""
+  bronze_quarantine_table_path_dev: ""
+  bronze_quarantine_table_properties: {}
+  bronze_quarantine_table_cluster_by: []
   bronze_data_quality_expectations_json_dev: "${workspace.file_path}/conf/dqe/example_table/bronze_expectations.yml"
   {{- end}}
   {{- if or (eq .layer "silver") (eq .layer "bronze_silver")}}
@@ -114,6 +121,11 @@ in variables.yml).
     }{{else}}{}{{end}},
     "bronze_table_path_dev": "",
     "bronze_partition_columns": "",
+    "bronze_database_quarantine_dev": "{{.uc_catalog_name}}.{{.bronze_target_schema}}",
+    "bronze_quarantine_table": "",
+    "bronze_quarantine_table_path_dev": "",
+    "bronze_quarantine_table_properties": {},
+    "bronze_quarantine_table_cluster_by": [],
     "bronze_data_quality_expectations_json_dev": "${workspace.file_path}/conf/dqe/example_table/bronze_expectations.json"
     {{- end}}
     {{- if or (eq .layer "silver") (eq .layer "bronze_silver")}},

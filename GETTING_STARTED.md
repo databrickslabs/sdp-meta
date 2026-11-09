@@ -67,9 +67,9 @@ What you get with the bundle path:
 
 - **Git-tracked pipeline state** — every onboarding row, expectation, transformation, and pipeline definition lives in YAML/JSON files inside the bundle.
 - **`dev` and `prod` targets** out of the box, with development-mode overrides (single-node clusters, no schedules, prefixed table names) and a commented `run_as: { service_principal_name: <your-...> }` block in prod for CI/CD.
-- **`pipeline_mode` switch** — render bronze + silver as two separate Lakeflow Spark Declarative Pipelines (`split`, the default) or as a single combined pipeline (`combined`).
+- **Independent pipeline topologies** — scaffold a split or combined topology, then use `bundle-add-pipeline` to add more bronze, silver, split, or combined pipelines with their own groups and target schemas.
 - **Recipes** for programmatically generating onboarding entries from real workspace state: `from_uc.py` (existing UC tables), `from_volume.py` (CSVs in a UC volume), `from_topics.py` (Kafka / Event Hub topic lists), `from_inventory.py` (inventory CSV).
-- **`bundle-validate` static checks** that catch authoring mistakes the upstream `databricks bundle validate` doesn't (unedited `<your-...>` placeholders in either onboarding or `databricks.yml`, mis-typed `dataflow_group` references, `pipeline_mode` mismatches, sentinel `__SET_ME__` left in place, wheel_source vs sdp_meta_dependency drift, etc.).
+- **`bundle-validate` static checks** that catch authoring mistakes the upstream `databricks bundle validate` doesn't (unedited `<your-...>` placeholders, per-pipeline group/layer errors, missing or duplicate job wiring, invalid split dependencies, sentinel `__SET_ME__`, wheel-source drift, etc.).
 
 Full reference: [`DAB_README.md`](DAB_README.md). Runnable end-to-end walkthrough with sample data: [`demo/README.md#dab-demo`](demo/README.md#dab-demo).
 

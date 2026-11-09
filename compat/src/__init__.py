@@ -56,6 +56,15 @@ surface. Useful if a project has its own (unrelated) ``src/`` directory
 it wants to import from.
 """
 
+# Marker consumed by ``dlt_meta._register_src_aliases``: it tells the
+# registration walk that the ``src`` object occupying ``sys.modules`` is
+# THIS bundled compat package (safe to alias into and bind children
+# onto), not an unrelated customer-owned ``src`` package (which must be
+# left completely alone). Must be set BEFORE the ``import dlt_meta``
+# below — we are mid-import, so dlt_meta sees this module object in
+# ``sys.modules['src']`` with whatever attributes exist at that point.
+__sdp_meta_compat__ = True
+
 # Importing ``dlt_meta`` triggers its registration walk, which wires
 # ``src.<sub>`` into ``sys.modules`` (with actionable stub modules on a
 # non-SDP runtime), binds the renamed symbols, honours
@@ -63,5 +72,6 @@ it wants to import from.
 # Its ``sys.modules.setdefault("src", …)`` is a no-op here because we
 # (the real ``src`` package) are already mid-import in ``sys.modules``,
 # so this package object stays the canonical ``src`` and merely gains
-# the ``src.<sub>`` entries dlt_meta registers.
+# the ``src.<sub>`` entries dlt_meta registers (plus, via
+# ``_bind_on_parent``, the matching attributes on this package itself).
 import dlt_meta  # noqa: F401  (imported for its registration side effects)

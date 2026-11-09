@@ -2,21 +2,55 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 import venv
+import zipfile
+from email.parser import BytesParser
 from pathlib import Path
+
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+EXTRA_MARKER_RE = re.compile(r"(?<![A-Za-z0-9_])extra(?![A-Za-z0-9_])")
 
 
 def _wheel_version(wheel_name):
     """Version field of a wheel filename (``dist-version-py-abi-plat.whl``)."""
     return wheel_name.split("-")[1]
+
+
+def _wheel_requirements(wheel_path):
+    """Return non-extra requirements as normalized metadata tuples."""
+    with zipfile.ZipFile(wheel_path) as archive:
+        metadata_name = next(
+            (
+                name
+                for name in archive.namelist()
+                if name.endswith(".dist-info/METADATA")
+            ),
+            None,
+        )
+        if metadata_name is None:
+            raise AssertionError(f"{wheel_path} contains no .dist-info/METADATA")
+        metadata = BytesParser().parsebytes(archive.read(metadata_name))
+    return {
+        (
+            canonicalize_name(requirement.name),
+            str(requirement.specifier),
+            str(requirement.marker) if requirement.marker else "",
+        )
+        for raw_requirement in metadata.get_all("Requires-Dist", [])
+        for requirement in (Requirement(raw_requirement),)
+        if not requirement.marker
+        or not EXTRA_MARKER_RE.search(str(requirement.marker))
+    }
 
 
 def _run(command, *, cwd=None, env=None, timeout=300):
@@ -36,9 +70,9 @@ def _run(command, *, cwd=None, env=None, timeout=300):
     return result
 
 
-@unittest.skipIf(
-    sys.version_info >= (3, 13),
-    "The v0.1.0 primary and compatibility distributions require Python <3.13.",
+@unittest.skipUnless(
+    (3, 10) <= sys.version_info < (3, 13),
+    "The v0.1.1 primary and compatibility distributions require Python 3.10-3.12.",
 )
 class CompatibilityWheelResolutionTests(unittest.TestCase):
     """Prove pip resolves the legacy distribution to the local primary wheel."""
@@ -140,6 +174,38 @@ class CompatibilityWheelResolutionTests(unittest.TestCase):
             target_version = _wheel_version(compat_wheel)
             self.assertEqual(
                 target_version, _wheel_version(primary_wheel), built_wheels
+            )
+            primary_wheel_path = wheelhouse / primary_wheel
+            compat_wheel_path = wheelhouse / compat_wheel
+            primary_requirements = _wheel_requirements(primary_wheel_path)
+            compat_requirements = _wheel_requirements(compat_wheel_path)
+            redirect_name = canonicalize_name("databricks-labs-sdp-meta")
+            compat_runtime_requirements = {
+                requirement
+                for requirement in compat_requirements
+                if requirement[0] != redirect_name
+            }
+            self.assertEqual(
+                compat_runtime_requirements,
+                primary_requirements,
+                "The compatibility wheel runtime metadata must exactly match "
+                "the primary wheel for serverless Job Environment client 2",
+            )
+            with zipfile.ZipFile(primary_wheel_path) as archive:
+                packaged_files = set(archive.namelist())
+            self.assertIn(
+                "databricks/labs/sdp_meta/templates/dab/"
+                "databricks_template_schema.json",
+                packaged_files,
+            )
+            self.assertTrue(
+                any(
+                    name.endswith(
+                        "notebooks/init_sdp_meta_pipeline.py.tmpl"
+                    )
+                    for name in packaged_files
+                ),
+                "The primary wheel must include the runnable DAB template.",
             )
             self.assertTrue(
                 any(name.startswith("databricks_sdk-") for name in built_wheels),
