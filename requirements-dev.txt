@@ -15,7 +15,7 @@
 -e .
 
 # Test stack (DEV_REQUIREMENTS in setup.py)
-flake8==7.3.0
+flake8==7.4.1
 delta-spark==3.0.0
 pytest>=9.1.1
 coverage>=7.16.1
