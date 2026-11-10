@@ -19,7 +19,7 @@ flake8==7.3.0
 delta-spark==3.0.0
 pytest>=9.1.1
 coverage>=7.16.1
-pyspark==3.5.5
+pyspark==4.2.1
 # Parse and compare wheel/setup requirement metadata in packaging tests.
 packaging>=24.0,<27
 
