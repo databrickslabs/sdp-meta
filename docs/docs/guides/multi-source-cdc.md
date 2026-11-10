@@ -199,10 +199,9 @@ quarantine routing is not implemented for this flow type.
 ## Demo
 
 ```bash
-python demo/launch_af_cloudfiles_demo.py \
-  --cloud_provider_name=aws \
-  --dbr_version=15.3.x-scala2.12 \
-  --uc_catalog_name=<your_catalog>
+python -m demo.launch_multi_source_cdc_demo \
+  --uc_catalog_name=<your_catalog> \
+  --profile=<profile-name>
 ```
 
 ## Related

@@ -26,10 +26,11 @@ databricks auth login --host YOUR_WORKSPACE_URL
 ### 3. Scaffold a bundle
 
 ```bash
-databricks labs sdp-meta bundle-init --quickstart
+databricks labs sdp-meta bundle-init --quickstart=true
+cd my_sdp_meta_pipeline
 ```
 
-Creates a bundle directory with job definition, pipeline definition, runner notebook, and a sample onboarding file.
+Creates `./my_sdp_meta_pipeline` with a job definition, pipeline definition, runner notebook, and a sample onboarding file. Prefer `--quickstart=true` so the Labs CLI string-flag parser does not consume the next token (for example `--output-dir`) as the flag value.
 
 ### 4. Edit variables
 
@@ -38,7 +39,7 @@ Open `resources/variables.yml` and set at minimum:
 - `uc_catalog_name` — your Unity Catalog catalog name
 - `sdp_meta_schema` — schema where DataflowSpec tables will be created
 - `bronze_target_schema` — schema for Bronze output tables
-- `sdp_meta_dependency` — a PyPI coordinate (`databricks-labs-sdp-meta==0.1.1`) or `/Volumes/...` wheel path
+- `sdp_meta_dependency` — a PyPI coordinate (for example `databricks-labs-sdp-meta==0.1.1`) or `/Volumes/...` wheel path. Pin the current release from [PyPI](https://pypi.org/project/databricks-labs-sdp-meta/).
 
 :::warning
 `--quickstart` leaves `sdp_meta_dependency` set to `__SET_ME__`. `bundle-validate` rejects this placeholder, so you must set a real value before deploying.

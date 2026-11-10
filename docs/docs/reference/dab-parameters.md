@@ -12,7 +12,7 @@ This page covers all parameters exposed when scaffolding a bundle with `databric
 
 ## Bundle Init Prompts
 
-When you run `databricks labs sdp-meta bundle-init`, the template walks you through 13 prompts. Pass `--quickstart` to skip all prompts and accept developer defaults.
+When you run `databricks labs sdp-meta bundle-init`, the template walks you through 13 prompts. Pass `--quickstart=true` to skip all prompts and accept developer defaults.
 
 | # | Prompt Key | Default | Description |
 |---|---|---|---|
@@ -27,7 +27,7 @@ When you run `databricks labs sdp-meta bundle-init`, the template walks you thro
 | 9 | `onboarding_file_format` | `yaml` | File format for generated onboarding and transformation files: `yaml` or `json` |
 | 10 | `dataflow_group` | `my_group` | The `data_flow_group` value used in the seeded onboarding file — must match the pipeline's `*.group` configuration |
 | 11 | `wheel_source` | `pypi` | Where sdp-meta is installed from: `pypi` or `volume_path` |
-| 12 | `sdp_meta_dependency` | `__SET_ME__` | Concrete install specification: a PyPI coordinate (e.g. `databricks-labs-sdp-meta==0.1.1`) or a `/Volumes/...` wheel path |
+| 12 | `sdp_meta_dependency` | `__SET_ME__` | Concrete install specification: a PyPI coordinate (pin the [current release](https://pypi.org/project/databricks-labs-sdp-meta/), e.g. `databricks-labs-sdp-meta==0.1.1`) or a `/Volumes/...` wheel path |
 | 13 | `author` | `sdp-meta-user` | Written to the `import_author` column on dataflowspec rows |
 
 :::warning
@@ -95,7 +95,7 @@ You can change `pipeline_mode` in `resources/variables.yml` at any time, then re
 
 ```bash
 # Scaffold with zero prompts
-databricks labs sdp-meta bundle-init --quickstart
+databricks labs sdp-meta bundle-init --quickstart=true
 cd my_sdp_meta_pipeline
 
 # Set a real sdp_meta_dependency value

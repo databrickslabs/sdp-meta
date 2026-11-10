@@ -148,13 +148,10 @@ python demo/launch_autoloader_schema_demo.py \
 Append-flow and file-metadata demo:
 
 ```bash
-python demo/launch_af_cloudfiles_demo.py \
-  --cloud_provider_name=aws \
-  --dbr_version=15.3.x-scala2.12 \
-  --uc_catalog_name=<your_catalog>
+python -m demo.launch_af_cloudfiles_demo \
+  --uc_catalog_name=<your_catalog> \
+  --profile=<profile-name>
 ```
-
-For Azure, use `--cloud_provider_name=azure`.
 
 ## Related
 

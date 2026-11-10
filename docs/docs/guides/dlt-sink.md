@@ -1,12 +1,12 @@
 ---
 id: dlt-sink
-title: DLT Sink
+title: Declarative Pipeline Sink
 sidebar_position: 6
 ---
 
-# DLT Sink
+# Declarative Pipeline Sink
 
-The DLT Sink feature writes pipeline output to an external Delta table or Kafka topic outside the pipeline's managed storage. SDP-META maps `bronze_sink` and `silver_sink` directly to the Declarative Pipeline Sink API.
+The sink feature writes pipeline output to external Delta tables or Kafka topics outside the pipeline's managed storage. SDP-META maps the `bronze_sinks` and `silver_sinks` arrays to the Declarative Pipeline Sink API.
 
 ![Delta sink](/img/dlt_delta_sink.png)
 
@@ -14,19 +14,21 @@ The DLT Sink feature writes pipeline output to an external Delta table or Kafka 
 
 ![Sink demo overview](/img/dlt_demo_sink.png)
 
-## `bronze_sink` configuration
+## `bronze_sinks` configuration
 
 ### Delta sink
 
 ```json
 {
-  "bronze_sink": {
-    "name": "bronze_sink",
-    "format": "delta",
-    "options": {
-      "tableName": "my_catalog.my_schema.my_external_table"
+  "bronze_sinks": [
+    {
+      "name": "bronze_sink",
+      "format": "delta",
+      "options": {
+        "tablename": "my_catalog.my_schema.my_external_table"
+      }
     }
-  }
+  ]
 }
 ```
 
@@ -34,30 +36,34 @@ The DLT Sink feature writes pipeline output to an external Delta table or Kafka 
 
 ```json
 {
-  "bronze_sink": {
-    "name": "bronze_sink",
-    "format": "kafka",
-    "options": {
-      "kafka.bootstrap.servers": "broker-host:9092",
-      "subscribe": "my-output-topic"
+  "bronze_sinks": [
+    {
+      "name": "bronze_sink",
+      "format": "kafka",
+      "options": {
+        "kafka.bootstrap.servers": "broker-host:9092",
+        "topic": "my-output-topic"
+      }
     }
-  }
+  ]
 }
 ```
 
-## `silver_sink` configuration
+## `silver_sinks` configuration
 
-Same structure as `bronze_sink`:
+Same structure as `bronze_sinks`:
 
 ```json
 {
-  "silver_sink": {
-    "name": "silver_sink",
-    "format": "delta",
-    "options": {
-      "tableName": "my_catalog.my_schema.my_silver_external_table"
+  "silver_sinks": [
+    {
+      "name": "silver_sink",
+      "format": "delta",
+      "options": {
+        "tablename": "my_catalog.my_schema.my_silver_external_table"
+      }
     }
-  }
+  ]
 }
 ```
 
@@ -73,14 +79,14 @@ Same structure as `bronze_sink`:
 
 | Option | Description |
 |---|---|
-| `tableName` | Fully qualified table name: `catalog.schema.table` |
+| `tablename` | Fully qualified table name: `catalog.schema.table` |
 
 **Kafka sink options:**
 
 | Option | Description |
 |---|---|
 | `kafka.bootstrap.servers` | Comma-separated broker addresses |
-| `subscribe` | Target Kafka topic name |
+| `topic` | Target Kafka topic name |
 
 ## Full example
 
@@ -97,25 +103,29 @@ Same structure as `bronze_sink`:
     "bronze_catalog_dev": "my_catalog",
     "bronze_database_dev": "retail_bronze",
     "bronze_table": "orders_bronze",
-    "bronze_sink": {
-      "name": "bronze_sink",
-      "format": "delta",
-      "options": {
-        "tableName": "external_catalog.archive_schema.orders_archive"
+    "bronze_sinks": [
+      {
+        "name": "bronze_sink",
+        "format": "delta",
+        "options": {
+          "tablename": "external_catalog.archive_schema.orders_archive"
+        }
       }
-    },
+    ],
     "silver_catalog_dev": "my_catalog",
     "silver_database_dev": "retail_silver",
     "silver_table": "orders_silver",
-    "silver_transformation_json_prod": "/Volumes/my_catalog/my_schema/my_volume/conf/silver_transformations.json",
-    "silver_sink": {
-      "name": "silver_sink",
-      "format": "kafka",
-      "options": {
-        "kafka.bootstrap.servers": "broker-host:9092",
-        "subscribe": "orders-processed"
+    "silver_transformation_json_dev": "/Volumes/my_catalog/my_schema/my_volume/conf/silver_transformations.json",
+    "silver_sinks": [
+      {
+        "name": "silver_sink",
+        "format": "kafka",
+        "options": {
+          "kafka.bootstrap.servers": "broker-host:9092",
+          "topic": "orders-processed"
+        }
       }
-    }
+    ]
   }
 ]
 ```
@@ -123,4 +133,4 @@ Same structure as `bronze_sink`:
 ## Related
 
 - [Declarative Pipeline Sink API](https://docs.databricks.com/aws/en/ldp/developer/ldp-python-ref-sink)
-- [Onboarding File Fields — `bronze_sink` and `silver_sink`](../reference/onboarding-fields#bronze-layer-fields)
+- [Onboarding File Fields — `bronze_sinks` and `silver_sinks`](../reference/onboarding-fields#bronze-layer-fields)

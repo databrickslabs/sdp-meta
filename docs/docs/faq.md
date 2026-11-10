@@ -75,21 +75,17 @@ Yes. The runner notebook was renamed to `init_sdp_meta_pipeline.py`. Re-run `dat
 
 **Q: My existing DLT-META pipelines are running in production. Will they break?**
 
-They keep running as-is — the pipeline graph is unchanged. However, if you upgrade the wheel to `databricks-labs-sdp-meta` you must also migrate away from Legacy Publishing Mode (see below) and update any `PythonWheelTask` `package_name` from `dlt_meta` to `databricks_labs_sdp_meta`. The safest upgrade path is: migrate to default publishing mode first → test in non-prod → upgrade the wheel → update the runner notebook.
+They keep running as-is — the pipeline graph is unchanged. When upgrading the wheel to `databricks-labs-sdp-meta`, update any `PythonWheelTask` `package_name` from `dlt_meta` to `databricks_labs_sdp_meta`. SDP-META v0.1.1 retains a compatibility path for Legacy Publishing Mode, but migrating to default publishing mode is still recommended when you need catalog- or schema-qualified targets. Test the upgrade in non-production before updating the runner notebook.
 
-**Q: My pipeline runs in Legacy Publishing Mode (DPM). Can I upgrade to v0.1.0?**
+**Q: My pipeline runs in Legacy Publishing Mode. Can I upgrade to v0.1.1?**
 
-No — not yet. You must migrate to the default publishing mode first, then upgrade. Legacy DPM pipelines with custom schemas will fail at runtime in v0.1.0 with:
-```
-DLTAnalysisException: Materializing tables in custom schemas is not supported.
-```
-Follow the Databricks guide to [migrate to the default publishing mode](https://docs.databricks.com/aws/en/ldp/migrate-to-dpm#migrate-to-the-default-publishing-mode) before upgrading. Test in a non-production environment — the migration is one-way.
+SDP-META v0.1.1 detects Legacy Publishing Mode and uses unqualified table names so existing pipelines can continue writing to the pipeline's configured target schema. Custom per-table catalog or schema routing still requires default publishing mode. Test the upgrade in a non-production environment. If you need qualified targets, follow the Databricks guide to [migrate to the default publishing mode](https://docs.databricks.com/aws/en/ldp/migrate-to-dpm#migrate-to-the-default-publishing-mode); that migration is one-way.
 
 **Q: My notebooks use `from src.dataflow_pipeline import DataflowPipeline`. Will they break?**
 
 No. A `sys.modules` shim maps all `src.*` imports to `databricks.labs.sdp_meta.*` automatically. Your notebooks keep working without changes. This shim will be removed in v0.2.0 — update imports before then.
 
-**Q: My code uses `import dlt`. Does v0.1.0 still support this?**
+**Q: My code uses `import dlt`. Does v0.1.x still support this?**
 
 The underlying Databricks API is now `pyspark.pipelines` (imported as `dp`). SDP-META handles this internally — you do not write `import dlt` or `import pyspark.pipelines` in your own code. `DataflowPipeline.invoke_dlt_pipeline()` is unchanged from the user's perspective.
 
@@ -174,7 +170,7 @@ Use the DAB interface (`bundle-init`, `bundle-add-flow`, `bundle-validate`, `bun
 
 **Q: What does `bundle-init --quickstart` do?**
 
-Scaffolds a bundle with developer-friendly defaults (Autoloader + bronze_silver + split pipeline mode + PyPI dependency) so you can get a working bundle in one command. Edit `resources/variables.yml` afterwards to point at your real catalog/schema.
+Scaffolds a bundle with developer-friendly defaults (Autoloader + bronze_silver + split pipeline mode + PyPI dependency) so you can get a working bundle in one command. Prefer `--quickstart=true` so the Labs CLI string-flag parser does not consume the next token as the flag value. Edit `resources/variables.yml` afterwards to point at your real catalog/schema and replace the `__SET_ME__` sentinel for `sdp_meta_dependency`.
 
 **Q: What is `pipeline_mode` and when should I use each?**
 
@@ -284,7 +280,7 @@ See the [MCP Getting Started guide](./getting-started/mcp) for configuration det
 
 **Q: Do I need to run an initial setup before using the SDP-META App?**
 
-Yes. Click the **Setup** button when the app first loads. This initializes the SDP-META project environment (creates required schemas, uploads notebooks, etc.) before any other feature is usable.
+Configure a SQL warehouse from the top-bar **Warehouse** chip, then use **Demos → Test App access** to verify that the App service principal has `USE CATALOG` and `CREATE SCHEMA` on the target catalog. After that, choose an onboarding mode in the **Onboarding** panel. The App does not create all schemas or upload notebooks through a single Setup button.
 
 **Q: Who can access the SDP-META App?**
 
@@ -298,21 +294,24 @@ The app uses a dedicated Service Principal with `USE CATALOG`, `USE SCHEMA`, and
 
 Yes:
 ```bash
-cd databricks_app
-pip install -r requirements.txt
-databricks configure --host YOUR_WORKSPACE_URL --token YOUR_TOKEN
-python App.py
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r databricks_app/requirements.txt
+pip install -e .
+databricks auth login --host YOUR_WORKSPACE_URL
+export SDP_META_HOME="$PWD"
+export SDP_META_NO_BROWSER=1
+flask --app databricks_app/app.py run --host 127.0.0.1 --port 8000
 ```
-The app is then available at `http://127.0.0.1:5000`. It connects to your real workspace, so onboarding and pipeline operations work exactly as in the deployed version.
+The App is then available at `http://127.0.0.1:8000`. It connects to your real workspace using the Databricks SDK credential chain. See the [App README](https://github.com/databrickslabs/sdp-meta/tree/main/databricks_app#run-locally-macos--linux) for named-profile, service-principal, and token authentication.
 
-**Q: What is the difference between the UI tab and the CLI tab in the App?**
+**Q: How is the App organized?**
 
-- **UI tab** — form-based interface for onboarding (fill in catalog, schema, onboarding file path, layer, group) and deploying pipelines. Designed for non-engineers.
-- **CLI tab** — exposes `databricks labs sdp-meta` commands directly in the browser for users who prefer command-line operations but want a browser interface.
+The primary flow is **Onboarding → DataflowSpecs → Deployment**. Separate **Monitor**, **Metadata**, and **Demos** panels support pipeline operations, Unity Catalog browsing and spec editing, and runnable demonstrations. The current App does not expose a CLI tab.
 
 **Q: My pipeline doesn't appear in the App's Monitor view. Why?**
 
-The Monitor view identifies SDP-META pipelines by a tag (`sdp_meta=true`) set during deployment. Pipelines created before tagging was introduced (DLT-META era) fall back to a config-key check (`sdp_meta_schema`). If neither is present, the pipeline won't be listed. Re-run the onboarding job via the App or CLI to re-register the pipeline with the correct tag.
+The Monitor view includes a pipeline when it has a non-empty `sdp_meta` tag (including legacy `sdp_meta=true`) or when its configuration contains one of `bronze.dataflowspecTable`, `silver.dataflowspecTable`, `bronze.group`, or `silver.group`. If neither signal is present, redeploy or recreate the pipeline through SDP-META so its pipeline definition contains the current tag or configuration keys. Rerunning onboarding alone does not change pipeline metadata.
 
 **Q: Can I use the App to edit the onboarding spec after the pipeline is deployed?**
 

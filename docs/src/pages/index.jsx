@@ -7,15 +7,20 @@ import Layout from '@theme/Layout';
 // feature cards removed — replaced by WhatIsSection below
 
 const quickstart = `# Install
-pip install 'databricks-labs-sdp-meta[mcp]'
+pip install databricks-labs-sdp-meta
 databricks labs install sdp-meta
 
-# Scaffold a bundle (zero prompts, dev-friendly defaults)
-databricks labs sdp-meta bundle-init --quickstart
+# Authenticate
+databricks auth login --host YOUR_WORKSPACE_URL
+
+# Scaffold (prefer --quickstart=true)
+databricks labs sdp-meta bundle-init --quickstart=true
+cd my_sdp_meta_pipeline
+# Edit resources/variables.yml (catalog/schema + sdp_meta_dependency)
 
 # Validate and deploy
 databricks labs sdp-meta bundle-validate
-databricks bundle deploy`;
+databricks bundle deploy --target dev`;
 
 function HeroBanner() {
   return (
@@ -112,56 +117,41 @@ function HeroBanner() {
             flexWrap: 'wrap',
             gap: '0.5rem',
             justifyContent: 'center',
+            alignItems: 'center',
             marginTop: '2rem',
           }}
         >
           {[
-            { label: 'docs', color: '#00A972', value: 'passing' },
-            { label: 'pypi', color: '#0075c2', value: 'v0.1.0' },
+            {
+              label: 'docs',
+              src: 'https://img.shields.io/github/actions/workflow/status/databrickslabs/sdp-meta/gh_pages.yml?branch=main&label=docs',
+              to: '/docs/intro',
+            },
+            {
+              label: 'pypi',
+              src: 'https://img.shields.io/pypi/v/databricks-labs-sdp-meta?label=pypi',
+              href: 'https://pypi.org/project/databricks-labs-sdp-meta/',
+            },
             {
               label: 'downloads',
-              color: '#0075c2',
-              value: '225k/mo',
-              href: 'https://pepy.tech/projects/dlt-meta',
+              src: 'https://static.pepy.tech/badge/databricks-labs-sdp-meta/month',
+              href: 'https://pepy.tech/projects/databricks-labs-sdp-meta',
             },
-            { label: 'license', color: '#FF3621', value: 'Databricks Labs' },
+            {
+              label: 'license',
+              src: 'https://img.shields.io/badge/license-Databricks%20Labs-FF3621',
+              href: 'https://github.com/databrickslabs/sdp-meta/blob/main/LICENSE.txt',
+            },
           ].map((b) => {
-            const badge = (
-              <span
-                style={{
-                  display: 'inline-flex',
-                  fontSize: '0.75rem',
-                  borderRadius: '4px',
-                  overflow: 'hidden',
-                }}
-              >
-                <span
-                  style={{
-                    background: '#555',
-                    color: '#fff',
-                    padding: '0.2rem 0.5rem',
-                  }}
-                >
-                  {b.label}
-                </span>
-                <span
-                  style={{
-                    background: b.color,
-                    color: '#fff',
-                    padding: '0.2rem 0.5rem',
-                    fontWeight: 600,
-                  }}
-                >
-                  {b.value}
-                </span>
-              </span>
-            );
-            return b.href ? (
-              <a key={b.label} href={b.href} style={{ textDecoration: 'none' }}>
+            const badge = <img src={b.src} alt={b.label} style={{ height: '20px', display: 'block' }} />;
+            return b.to ? (
+              <Link key={b.label} to={b.to} style={{ display: 'inline-flex', lineHeight: 0 }}>
+                {badge}
+              </Link>
+            ) : (
+              <a key={b.label} href={b.href} style={{ display: 'inline-flex', lineHeight: 0 }}>
                 {badge}
               </a>
-            ) : (
-              <span key={b.label}>{badge}</span>
             );
           })}
         </div>
@@ -347,10 +337,10 @@ function MigrationNoticeSection() {
               textTransform: 'uppercase',
             }}
           >
-            v0.1.0
+            v0.1.1
           </span>
           <span style={{ color: 'var(--ifm-color-emphasis-800)' }}>
-            DLT-META is now SDP-META; existing onboarding files still work.
+            Compatibility fixes for upgrades and serverless installs; existing onboarding files still work.
           </span>
           <Link to="/docs/operations/migration" style={{ fontWeight: 700, whiteSpace: 'nowrap' }}>
             Migration guide →

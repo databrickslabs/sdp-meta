@@ -19,7 +19,7 @@ All SDP-META operations are available through the Databricks Labs CLI extension.
 |---|---|
 | `onboard` | Interactive onboarding wizard — prompts for config, pushes code, creates onboarding job |
 | `deploy` | Deploy bronze/silver Declarative Pipeline interactively |
-| `bundle-init` | Scaffold a new DAB bundle (`--quickstart` for zero-prompt fast path) |
+| `bundle-init` | Scaffold a new DAB bundle (`--quickstart=true` for zero-prompt fast path) |
 | `bundle-prepare-wheel` | Build and upload the sdp-meta wheel to a UC Volume |
 | `bundle-add-flow` | Add a new flow to an existing bundle from UC, Volumes, Kafka topics, or CSV inventory |
 | `bundle-add-pipeline` | Add an independently configured pipeline topology and job wiring |
@@ -56,7 +56,7 @@ Scaffolds a new Databricks Asset Bundle (DAB) configured for SDP-META.
 
 ```bash
 databricks labs sdp-meta bundle-init
-databricks labs sdp-meta bundle-init --quickstart
+databricks labs sdp-meta bundle-init --quickstart=true
 ```
 
 The generated bundle includes `databricks.yml`, `resources/variables.yml`, `resources/sdp_meta_pipelines.yml`, `resources/sdp_meta_onboarding_job.yml`, and `notebooks/init_sdp_meta_pipeline.py`.
@@ -71,10 +71,9 @@ databricks labs sdp-meta bundle-prepare-wheel
 
 | Flag | Description |
 |---|---|
-| `--volume-path` | Target Volume path, e.g. `/Volumes/my_catalog/my_schema/my_volume/` |
 | `--profile` | Databricks CLI profile to use |
 
-After running, update `sdp_meta_dependency` in `resources/variables.yml` to the uploaded wheel path.
+The command prompts for the target catalog, schema, and volume. After running, update `sdp_meta_dependency` in `resources/variables.yml` to the uploaded wheel path.
 
 ## `bundle-add-flow`
 

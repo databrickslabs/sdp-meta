@@ -32,9 +32,14 @@ com.databricks.pipelines.common.errors.DLTAnalysisException: Materializing table
 is not supported. Please remove the database qualifier from table 'catalog_name.schema_name.table_name'
 ```
 
-**Cause:** The pipeline was created in Legacy Publishing Mode.
+**Cause:** A Legacy Publishing Mode pipeline received a schema-qualified
+dataset name. SDP-META v0.1.1 normally detects this mode and emits bare table
+names, so this can indicate an older installed wheel or a custom declaration
+path that bypasses the compatibility logic.
 
-**Fix:** Migrate to the default publishing mode: [Migrate to the default publishing mode](https://docs.databricks.com/aws/en/ldp/migrate-to-dpm#migrate-to-the-default-publishing-mode).
+**Fix:** Confirm the pipeline resolves SDP-META v0.1.1 and uses the standard
+runner. If qualified targets are required, migrate to default publishing mode:
+[Migrate to the default publishing mode](https://docs.databricks.com/aws/en/ldp/migrate-to-dpm#migrate-to-the-default-publishing-mode).
 
 :::note
 This migration is one-way. Verify in a non-production environment first.

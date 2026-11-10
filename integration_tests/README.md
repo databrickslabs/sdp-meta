@@ -119,7 +119,7 @@
 
 
 10. Once finished integration output file will be copied locally to
-```integration-test-output_<run_id>.txt```
+```integration_test_output_<run_id>.csv```
 
 11. Output of a successful run should have the following in the file
 ```
@@ -424,7 +424,7 @@ What the runner does, in order:
     - `onboarding_A2_file_path` → `integration_tests/conf/yml/onboarding_A2.yml`
 2. `generate_onboarding_file` reads the YAML template as text, substitutes placeholders, and writes the rendered YAML to `integration_tests/conf/yml/onboarding.yml`.
 3. The rendered onboarding YAML is uploaded to the UC volume alongside its referenced YAML DQE and silver-transformation files.
-4. The pipeline runs and validates row counts. The output file `integration-test-output_<run_id>.txt` is identical in shape to the JSON-mode output.
+4. The pipeline runs and validates row counts. The output file `integration_test_output_<run_id>.csv` is identical in shape to the JSON-mode output.
 
 ### Troubleshooting
 
