@@ -257,7 +257,9 @@ guarantee.
   tables and pipeline outputs.
 - Update package names, CLI commands, imports, runner notebooks, and
   layer-specific callback argument names using the steps above.
-- Migrate pipelines from legacy DPM publishing mode before upgrading.
+- Legacy Publishing Mode pipelines can upgrade to v0.1.1 through its
+  unqualified-table-name compatibility path. Migrate to default publishing
+  mode first if the pipeline requires catalog- or schema-qualified targets.
 - Prefer the `sdp_meta_*` workspace config keys. v0.1.1 accepts the four
   `dlt_meta_*` aliases with warnings, but the aliases are temporary.
 - Run append onboarding once in a non-production environment and verify that
@@ -290,7 +292,11 @@ guarantee.
 
 ### DPM Mode removal
 
-Pipelines using Legacy (DPM) publishing mode must be migrated before upgrading. Follow the Databricks guide: [Migrate to the default publishing mode](https://docs.databricks.com/aws/en/dlt/migrate-to-dpm#migrate-to-the-default-publishing-mode).
+v0.0.10 removed the earlier DPM flag-based behavior. SDP-META v0.1.1 restores
+a compatibility path for existing Legacy Publishing Mode pipelines by emitting
+unqualified table names into the pipeline's configured target schema. Migrate
+to default publishing mode when you need catalog- or schema-qualified targets:
+[Migrate to the default publishing mode](https://docs.databricks.com/aws/en/dlt/migrate-to-dpm#migrate-to-the-default-publishing-mode).
 
 :::warning
 This migration is irreversible. Test in a non-production environment first.

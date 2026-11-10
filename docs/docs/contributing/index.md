@@ -35,18 +35,12 @@ Use Python 3.10, 3.11, or 3.12. Python 3.13+ is not compatible with `pyspark==3.
 ### 3. Install Dependencies
 
 ```bash
-# Core dependencies
-pip install "PyYAML>=6.0" setuptools databricks-sdk
-
-# Development and test dependencies
-pip install flake8==6.0 delta-spark==3.0.0 pytest>=7.0.0 coverage>=7.0.0 pyspark==3.5.5
+# Install the project and its maintained development/test dependencies.
+python -m pip install -e .
+python -m pip install -r requirements-dev.txt
 ```
 
-### 4. Set PYTHONPATH
-
-```bash
-export PYTHONPATH=$(pwd)
-```
+The editable install makes the package importable without setting `PYTHONPATH`.
 
 ---
 

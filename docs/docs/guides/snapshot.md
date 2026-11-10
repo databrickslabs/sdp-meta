@@ -71,11 +71,9 @@ Configure `silver_apply_changes_from_snapshot` for snapshot-apply semantics on t
 ## Running the snapshot demo
 
 ```bash
-python demo/launch_af_cloudfiles_demo.py \
-  --cloud_provider_name=aws \
-  --dbr_version=15.3.x-scala2.12 \
+python -m demo.launch_acfs_demo \
   --uc_catalog_name=<your_catalog> \
-  --source=snapshot
+  --profile=<profile-name>
 ```
 
 ## Related

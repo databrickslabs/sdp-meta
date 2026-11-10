@@ -20,6 +20,7 @@ skills/sdp-meta/
     ├── onboarding-spec.md                   # every dataflowspec field, DQ, CDC, formats
     ├── cli-and-bundles.md                   # onboard/deploy + DAB workflow + wheel flags
     ├── ci-cd-automation.md                  # OAuth, GitOps, promotion, and rollback
+    ├── migration.md                         # DLT-META compatibility and migration guidance
     └── mcp-tools.md                         # the MCP tools + how to register the server
 ```
 

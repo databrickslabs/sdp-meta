@@ -18,7 +18,7 @@ A [Databricks Declarative Automation Bundle](https://docs.databricks.com/aws/en/
 
 ```bash
 # Fast path: zero prompts, developer-friendly defaults.
-databricks labs sdp-meta bundle-init --quickstart
+databricks labs sdp-meta bundle-init --quickstart=true
 
 # Interactive (recommended the first time):
 databricks labs sdp-meta bundle-init
@@ -77,7 +77,7 @@ databricks labs sdp-meta bundle-init
 wheel_source:
   default: pypi
 sdp_meta_dependency:
-  default: databricks-labs-sdp-meta==0.1.1
+  default: databricks-labs-sdp-meta==0.1.1  # pin the current PyPI release
 ```
 
 ### Option B — UC Volume wheel
@@ -93,7 +93,7 @@ Then paste the printed path into `resources/variables.yml`:
 wheel_source:
   default: volume_path
 sdp_meta_dependency:
-  default: /Volumes/<catalog>/<schema>/<volume>/databricks_labs_sdp_meta-0.1.1-py3-none-any.whl
+  default: /Volumes/<catalog>/<schema>/<volume>/databricks_labs_sdp_meta-<version>-py3-none-any.whl
 ```
 
 ## Validate → deploy → run

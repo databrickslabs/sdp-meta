@@ -14,7 +14,6 @@ Row filters restrict which rows a pipeline materializes at runtime via the `wher
 [
   {
     "target_table": "customers_silver",
-    "source_format": "delta",
     "select_exp": [
       "customer_id",
       "name",
@@ -22,12 +21,12 @@ Row filters restrict which rows a pipeline materializes at runtime via the `wher
       "region",
       "status"
     ],
-    "where_clause": "status = 'active'"
+    "where_clause": ["status = 'active'"]
   }
 ]
 ```
 
-The `where_clause` value is any valid Spark SQL boolean expression.
+Each `where_clause` item is a valid Spark SQL boolean expression. Multiple items are applied in order, so rows must match every expression.
 
 ## Example: region-filtered silver tables
 
@@ -39,9 +38,8 @@ Produce one silver table per region from a single bronze table:
 [
   {
     "target_table": "customers_us_silver",
-    "source_format": "delta",
     "select_exp": ["customer_id", "name", "email"],
-    "where_clause": "region = 'US'"
+    "where_clause": ["region = 'US'"]
   }
 ]
 ```
@@ -52,9 +50,8 @@ Produce one silver table per region from a single bronze table:
 [
   {
     "target_table": "customers_eu_silver",
-    "source_format": "delta",
     "select_exp": ["customer_id", "name", "email"],
-    "where_clause": "region = 'EU'"
+    "where_clause": ["region = 'EU'"]
   }
 ]
 ```

@@ -24,17 +24,15 @@ The file is a top-level array of transformation objects. Each object defines the
 [
   {
     "target_table": "customers_silver",
-    "source_format": "delta",
     "select_exp": [
       "id as customer_id",
       "name",
       "upper(email) as email"
     ],
-    "where_clause": "is_active = true"
+    "where_clause": ["is_active = true"]
   },
   {
     "target_table": "transactions_silver",
-    "source_format": "delta",
     "select_exp": [
       "transaction_id",
       "customer_id",
@@ -49,15 +47,14 @@ The file is a top-level array of transformation objects. Each object defines the
 
 ```yaml
 - target_table: customers_silver
-  source_format: delta
   select_exp:
     - "id as customer_id"
     - "name"
     - "upper(email) as email"
-  where_clause: "is_active = true"
+  where_clause:
+    - "is_active = true"
 
 - target_table: transactions_silver
-  source_format: delta
   select_exp:
     - transaction_id
     - customer_id
@@ -72,10 +69,8 @@ The file is a top-level array of transformation objects. Each object defines the
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `target_table` | string | Yes | Name of the silver target table. Must match the `silver_table` value in the onboarding file. |
-| `source_format` | string | No | Source format hint — typically `delta` for bronze-to-silver flows |
 | `select_exp` | array of strings | Yes | SQL column expressions applied to the source data. Each element is a valid Spark SQL expression, e.g. `"id as customer_id"`, `"upper(email) as email"` |
-| `where_clause` | string | No | Optional SQL filter expression applied before writing to the silver table. Rows that do not match are excluded from the silver output. |
-| `target_partition_cols` | array of strings | No | Partition columns for the silver table output |
+| `where_clause` | array of strings | No | Optional SQL filter expressions applied in order before writing to the silver table. Rows that do not match every expression are excluded from the silver output. |
 
 ---
 

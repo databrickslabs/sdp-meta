@@ -126,7 +126,7 @@ Example:
 | `bronze_apply_changes_from_snapshot` | object | Snapshot CDC configuration. Mandatory fields: `keys` (array), `scd_type` (`1` or `2`). Optional: `track_history_column_list`, `track_history_except_column_list` |
 | `bronze_table_path_{env}` | string | External storage path for the bronze table (optional, uses managed table if omitted) |
 | `bronze_table_properties` | object | Declarative Pipeline table properties, e.g. `{"pipelines.autoOptimize.managed": "false", "pipelines.reset.allowed": "false"}` |
-| `bronze_sink` | object | Declarative Pipeline Sink API configuration for writing to an external Delta table or Kafka topic — see [DLT Sink guide](../guides/dlt-sink) |
+| `bronze_sinks` | array | Declarative Pipeline Sink API configurations for writing to external Delta tables or Kafka topics — see [Declarative Pipeline Sink guide](../guides/dlt-sink) |
 | `bronze_data_quality_expectations_json_{env}` | string | Path to the DQE rules JSON/YAML file for bronze — see [DQ Rules](./dq-rules) |
 | `bronze_catalog_quarantine_{env}` | string | Unity Catalog name for the quarantine table |
 | `bronze_database_quarantine_{env}` | string | Schema name for the quarantine table |
@@ -154,5 +154,5 @@ Example:
 | `silver_cluster_by_auto` | boolean | Enable automatic liquid clustering on the silver table |
 | `silver_data_quality_expectations_json_{env}` | string | Path to the DQE rules file for silver — see [DQ Rules](./dq-rules) |
 | `silver_append_flows` | array | Additional `append_flow` definitions for the silver layer |
-| `silver_sink` | object | Declarative Pipeline Sink API configuration for silver output — see [DLT Sink guide](../guides/dlt-sink) |
+| `silver_sinks` | array | Declarative Pipeline Sink API configurations for silver output — see [Declarative Pipeline Sink guide](../guides/dlt-sink) |
 | `silver_transformation_json_{env}` | string | Path to the silver transformations JSON/YAML file — see [Silver Transformations](./silver-transformations) |

@@ -13,7 +13,13 @@ SDP-META supports streaming ingestion from Apache Kafka and Azure Event Hubs. Ev
 ### Prerequisites
 
 - A running Kafka broker reachable from your Databricks cluster
-- A Kafka topic already created
+- A source topic plus two sink topics already created. With the example below, create `sdp-meta-source`, `sdp-meta-sink_1`, and `sdp-meta-sink_2`; `--kafka_sink_topic` is the prefix used for both sink topic names.
+- The broker address stored in Databricks Secrets:
+
+```bash
+databricks secrets create-scope kafka_creds
+databricks secrets put-secret kafka_creds broker --string-value "host:9092"
+```
 
 ### Onboarding configuration
 
@@ -51,12 +57,15 @@ SDP-META supports streaming ingestion from Apache Kafka and Azure Event Hubs. Ev
 
 ```bash
 python integration_tests/run_integration_tests.py \
-  --cloud_provider_name=aws \
-  --dbr_version=15.3.x-scala2.12 \
   --source=kafka \
   --uc_catalog_name=<your_catalog> \
-  --kafka_topic_name=sdp-meta-integration-test \
-  --kafka_broker=host:9092
+  --kafka_source_topic=sdp-meta-source \
+  --kafka_sink_topic=sdp-meta-sink \
+  --kafka_source_servers_secrets_scope_name=kafka_creds \
+  --kafka_source_servers_secrets_scope_key=broker \
+  --kafka_sink_servers_secret_scope_name=kafka_creds \
+  --kafka_sink_servers_secret_scope_key=broker \
+  --profile=<profile-name>
 ```
 
 ## Azure Event Hubs
@@ -65,13 +74,13 @@ Azure Event Hubs exposes a Kafka-compatible endpoint. SDP-META uses Databricks S
 
 ### Prerequisites
 
-1. An Azure Event Hubs namespace with a topic (Event Hub) and a SAS policy with `Listen` permission
-2. The SAS key stored in Databricks Secrets:
+1. An Azure Event Hubs namespace with the source, append-flow, and sink Event Hubs used below
+2. One shared SAS policy named `sdp-meta-access` with both `Listen` and `Send` permissions
+3. That policy's SAS key stored in Databricks Secrets:
 
 ```bash
 databricks secrets create-scope eventhubs_creds
-databricks secrets put-secret eventhubs_creds consumer --string-value "<your-sas-key>"
-databricks secrets put-secret eventhubs_creds producer --string-value "<your-sas-key>"
+databricks secrets put-secret eventhubs_creds sdp-meta-access --string-value "<shared-policy-sas-key>"
 ```
 
 ### Onboarding configuration
@@ -83,8 +92,8 @@ databricks secrets put-secret eventhubs_creds producer --string-value "<your-sas
   "source_format": "eventhub",
   "source_details": {
     "source_schema_path": "/Volumes/my_catalog/my_schema/my_volume/schema/iot.ddl",
-    "eventhub.accessKeyName": "consumer",
-    "eventhub.accessKeySecretName": "consumer",
+    "eventhub.accessKeyName": "sdp-meta-access",
+    "eventhub.accessKeySecretName": "sdp-meta-access",
     "eventhub.name": "iot-events",
     "eventhub.secretsScopeName": "eventhubs_creds",
     "kafka.sasl.mechanism": "PLAIN",
@@ -120,16 +129,18 @@ databricks secrets put-secret eventhubs_creds producer --string-value "<your-sas
 
 ```bash
 python integration_tests/run_integration_tests.py \
-  --cloud_provider_name=azure \
-  --dbr_version=15.3.x-scala2.12 \
   --source=eventhub \
   --uc_catalog_name=<your_catalog> \
   --eventhub_name=iot \
+  --eventhub_name_append_flow=iot-af \
+  --eventhub_sink_name=iot-sink \
   --eventhub_secrets_scope_name=eventhubs_creds \
+  --eventhub_accesskey_secret_name=sdp-meta-access \
   --eventhub_namespace=my-eventhubs-namespace \
   --eventhub_port=9093 \
-  --eventhub_producer_accesskey_name=producer \
-  --eventhub_consumer_accesskey_name=consumer
+  --eventhub_producer_accesskey_name=sdp-meta-access \
+  --eventhub_consumer_accesskey_name=sdp-meta-access \
+  --profile=<profile-name>
 ```
 
 ## Related
