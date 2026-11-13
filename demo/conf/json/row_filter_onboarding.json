@@ -5,10 +5,10 @@
         "source_system": "rls_demo",
         "source_format": "cloudFiles",
         "source_details": {
-            "source_path_demo": "/Volumes/ravi_dlt_meta_uc/sdp_meta_dataflowspecs_rls_demo_b4eed1e6feaa4d73b6cd1b2fa7d24a8a/dlt_meta_files//demo/resources/data/row_filter_demo/data/customers",
-            "source_schema_path": "/Volumes/ravi_dlt_meta_uc/sdp_meta_dataflowspecs_rls_demo_b4eed1e6feaa4d73b6cd1b2fa7d24a8a/dlt_meta_files//demo/resources/data/row_filter_demo/ddl/customers.ddl"
+            "source_path_demo": "/Volumes/sdp_meta_uc/sdp_meta_dataflowspecs_rls_demo_b4eed1e6feaa4d73b6cd1b2fa7d24a8a/sdp_meta_files/demo/resources/data/row_filter_demo/data/customers",
+            "source_schema_path": "/Volumes/sdp_meta_uc/sdp_meta_dataflowspecs_rls_demo_b4eed1e6feaa4d73b6cd1b2fa7d24a8a/sdp_meta_files/demo/resources/data/row_filter_demo/ddl/customers.ddl"
         },
-        "bronze_catalog_demo": "ravi_dlt_meta_uc",
+        "bronze_catalog_demo": "sdp_meta_uc",
         "bronze_database_demo": "sdp_meta_bronze_rls_demo_b4eed1e6feaa4d73b6cd1b2fa7d24a8a",
         "bronze_table": "customers",
         "bronze_table_comment": "customers bronze table (UC row-filter demo)",
@@ -18,13 +18,13 @@
             "header": "true"
         },
         "bronze_cluster_by_auto": true,
-        "bronze_row_filter": "ROW FILTER ravi_dlt_meta_uc.sdp_meta_bronze_rls_demo_b4eed1e6feaa4d73b6cd1b2fa7d24a8a.region_filter ON (region)",
-        "silver_catalog_demo": "ravi_dlt_meta_uc",
+        "bronze_row_filter": "ROW FILTER sdp_meta_uc.sdp_meta_bronze_rls_demo_b4eed1e6feaa4d73b6cd1b2fa7d24a8a.region_filter ON (region)",
+        "silver_catalog_demo": "sdp_meta_uc",
         "silver_database_demo": "sdp_meta_silver_rls_demo_b4eed1e6feaa4d73b6cd1b2fa7d24a8a",
         "silver_table": "customers",
         "silver_table_comment": "customers silver table (UC row-filter demo)",
         "silver_cluster_by_auto": true,
-        "silver_transformation_json_demo": "/Volumes/ravi_dlt_meta_uc/sdp_meta_dataflowspecs_rls_demo_b4eed1e6feaa4d73b6cd1b2fa7d24a8a/dlt_meta_files//demo/conf/json/row_filter_silver_transformations.json",
-        "silver_row_filter": "ROW FILTER ravi_dlt_meta_uc.sdp_meta_bronze_rls_demo_b4eed1e6feaa4d73b6cd1b2fa7d24a8a.region_filter ON (region)"
+        "silver_transformation_json_demo": "/Volumes/sdp_meta_uc/sdp_meta_dataflowspecs_rls_demo_b4eed1e6feaa4d73b6cd1b2fa7d24a8a/sdp_meta_files/demo/conf/json/row_filter_silver_transformations.json",
+        "silver_row_filter": "ROW FILTER sdp_meta_uc.sdp_meta_bronze_rls_demo_b4eed1e6feaa4d73b6cd1b2fa7d24a8a.region_filter ON (region)"
     }
 ]

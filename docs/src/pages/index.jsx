@@ -117,12 +117,12 @@ function HeroBanner() {
         >
           {[
             { label: 'docs', color: '#00A972', value: 'passing' },
-            { label: 'pypi', color: '#0075c2', value: 'v0.1.0' },
+            { label: 'pypi', color: '#0075c2', value: 'v0.2.0' },
             {
               label: 'downloads',
               color: '#0075c2',
-              value: '225k/mo',
-              href: 'https://pepy.tech/projects/dlt-meta',
+              value: 'view',
+              href: 'https://pepy.tech/projects/databricks-labs-sdp-meta',
             },
             { label: 'license', color: '#FF3621', value: 'Databricks Labs' },
           ].map((b) => {

@@ -1,5 +1,32 @@
 # Changelog
 
+## [v0.2.0]
+### Breaking Changes
+- **Legacy naming compatibility removed**: the `dlt-meta` compatibility
+  distribution, `dlt_meta` and `src.*` imports, `databricks labs dlt-meta`
+  forwarding, and `DLTMeta` alias are no longer supported. Use
+  `databricks-labs-sdp-meta`, the
+  `databricks.labs.sdp_meta` namespace, `databricks labs sdp-meta`, `SDPMeta`,
+  and canonical task metadata.
+- **Persisted workspace configuration remains readable**: legacy
+  `dlt_meta_*` keys are migrated to `sdp_meta_*` during deserialization with
+  deprecation warnings. Saving the configuration writes canonical keys.
+  Existing `onboarding_job_details.json` files using `dlt_meta_schema` also
+  remain deployable; the CLI warns and prefers `sdp_meta_schema` when both
+  keys are present.
+- **Mandatory clean migration**: uninstall `dlt-meta` before installing
+  `databricks-labs-sdp-meta==0.2.0`; older installations can leave a stale
+  `dlt_meta.pth` startup hook. Update runner notebooks to
+  `init_sdp_meta_pipeline.py`, wheel configuration to `sdp_meta_whl`, and
+  `PythonWheelTask.package_name` to `databricks_labs_sdp_meta`.
+
+### Migration
+- Existing onboarding JSON/YAML, dataflow-spec tables, pipeline output data,
+  pipeline IDs, storage, and checkpoints can be preserved. Update active jobs
+  and pipelines in place and validate the migration in non-production.
+- Historical changelog entries and backward-compatibility test fixtures retain
+  old names to describe and test their original releases.
+
 ## [v0.1.1]
 ### Added
 - **Multiple pipeline topologies per DAB bundle**: `bundle-add-pipeline` adds independently configured bronze, silver, split, or combined pipelines with their own data-flow groups and target schemas. `bundle-validate` validates each pipeline and its job wiring independently. [Issue #446](https://github.com/databrickslabs/sdp-meta/issues/446)

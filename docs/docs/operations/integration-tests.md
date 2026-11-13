@@ -124,51 +124,11 @@ python integration_tests/run_backward_compat_tests.py \
   --profile=<profile-name>
 ```
 
-### Testing the `dlt-meta` compatibility redirect
-
-The `compat_wheelhouse` target surface verifies that installing the legacy
-`dlt-meta` distribution resolves the new `databricks-labs-sdp-meta`
-distribution and keeps `dlt_meta` and `src.*` compatibility available:
-
-```bash
-python integration_tests/run_backward_compat_tests.py \
-  --uc_catalog_name=<your_catalog> \
-  --install_mode=local \
-  --build_target_from_worktree \
-  --target_install_surface=compat_wheelhouse \
-  --profile=<profile-name>
-```
-
-This mode is limited to local-wheel, legacy-to-current upgrades. Before
-creating workspace resources, the runner:
-
-- builds the target primary and redirect wheels;
-- derives their shared package version and fails if they disagree;
-- downloads a complete binary runtime wheelhouse for the target interpreter;
-- verifies the primary wheel's unconditional runtime dependencies are present;
-- uploads the wheelhouse to the run's Unity Catalog volume.
-
-Phase 1 uses the source notebook's original wheel install. At the phase
-boundary, only the uploaded notebook copy is replaced with a Phase 2 install
-that uses `--force-reinstall --no-index --find-links`. The pipeline therefore
-resolves `dlt-meta==<derived-version>` entirely from the uploaded wheelhouse
-without requiring PyPI access from serverless compute.
-
-`--target_package_version=<version>` is optional. When omitted, the version is
-derived from the built target wheels. When supplied, it acts as an assertion
-and the run fails before upload if it does not match both wheels.
-
-`--compat_python_version` selects the CPython minor version used when
-downloading binary dependencies and defaults to `3.12`. Override it when the
-target Databricks runtime uses another supported Python minor version:
-
-```bash
---compat_python_version=3.11
-```
-
-The dependency download runs on the machine launching the test and requires
-PyPI or package-mirror access there. It times out after 600 seconds with a
-diagnostic instead of hanging indefinitely.
+For v0.2.0 targets, Phase 2 uses only the canonical
+`databricks-labs-sdp-meta` distribution, namespace imports, runner, and
+`sdp_meta_*` configuration. Historical source fixtures remain available to
+prove that data, checkpoints, and persisted specifications survive a
+controlled in-place migration; they are not a supported v0.2 runtime surface.
 
 ## Test output
 

@@ -145,14 +145,14 @@
 
 ## Backward-compatibility upgrade test (any source → any target)
 
-`integration_tests/run_backward_compat_tests.py` is a separate orchestrator that proves a customer's existing pipeline keeps working when the wheel is swapped from `--source_version` to `--target_version`. No notebook edits, no onboarding redo, no DLT checkpoint resets.
+`integration_tests/run_backward_compat_tests.py` is a separate orchestrator that proves a customer's existing pipeline can be migrated from `--source_version` to `--target_version` without re-onboarding, changing pipeline IDs, or resetting checkpoints. Phase 2 explicitly replaces legacy runner/configuration surfaces with their canonical SDP-META equivalents.
 
-The test runs in **two phases against the same DLT pipelines** (same pipeline IDs across both phases — only the wheel path attached to each pipeline's `configuration` changes between Phase 1 and Phase 2):
+The test runs in **two phases against the same DLT pipelines**:
 
 | Phase | Wheel install spec | What runs |
 |---|---|---|
 | 1 | SOURCE main wheel only | onboard A1 → bronze A1 → silver → onboard A2 → bronze A2 → silver → validate Phase 1 row counts and persist them |
-| 2 | TARGET main wheel only (one config key, one `%pip install`, byte-for-byte the customer's source-version notebook) | drop a small new incremental seed batch → bronze → silver → validate row counts (data preserved + grew), and dataclass compatibility (SOURCE-persisted dataflowspec rows materialize through TARGET's dataclasses with new fields backfilled to defaults) |
+| 2 | TARGET main wheel with canonical runner, `sdp_meta_whl`, imports, and task package metadata | when the install surface changes, migrate the existing onboarding task to environment version 2 → migrate pipeline definitions in place → drop a small incremental seed batch → bronze → silver → validate preserved/growing data, unchanged pipeline IDs/checkpoints, and SOURCE-persisted dataflowspec compatibility → smoke-test A1 with `overwrite=False` (the append-onboarding path performs this check itself) |
 
 ### Version profiles
 
@@ -160,10 +160,10 @@ Two version-line profiles ship in [`integration_tests/version_profiles.py`](vers
 
 | Profile | Refs it owns | Distribution | Pipeline-config key | Runner notebook | Cross-namespace compatibility |
 |---|---|---|---|---|---|
-| `legacy` | `v0.0.1` … `v0.0.10`, `main` | `dlt_meta` | `dlt_meta_whl` (single) | imports `from src.*` | — |
-| `current` | `v0.1`+, `feature/sdp-meta` | `databricks_labs_sdp_meta` | `sdp_meta_whl` (single) | imports `from databricks.labs.sdp_meta.*` | When the TARGET wheel comes from this profile and the SOURCE was `legacy`, the primary wheel ships real `dlt_meta` and `src` compatibility packages from `compat/`. The real `src` package is load-bearing for serverless `%pip install`, where imports continue in the same interpreter and a newly installed `.pth` is not processed. The standalone `dlt-meta` wrapper ships a best-effort `.pth` for normal installs followed by a fresh interpreter, but that `.pth` is not load-bearing on serverless. Same-namespace upgrades (`current → current`, e.g. `v0.1.0 → v0.1.1`) install one wheel and don't need any of this. |
+| `legacy` | `v0.0.1` … `v0.0.10` | `dlt_meta` | `dlt_meta_whl` | imports `from src.*` | Historical Phase 1 input only |
+| `current` | `v0.1`+, `main`, `feature/sdp-meta` | `databricks_labs_sdp_meta` | `sdp_meta_whl` | canonical imports | Canonical source or target shape; v0.1.x wheels may also contain compatibility shims |
 
-**Why one wheel + one `%pip install`, not two?** The first cut of this test installed two wheels (main + a separate compat shim) under two pipeline-config keys, which forced either a `%pip install $a $b` magic shape or two separate `%pip install` lines. Both failed on serverless DLT: `%pip install` magic substitution is fragile when composing multiple wheels in one line (variables quote as single args), and two install lines in one cell don't reliably compose (only the last seems to survive). Bundling the shim into the main wheel sidesteps both — one wheel install satisfies both the canonical namespace and the legacy-namespace import surface in one shot.
+Phase 1 intentionally preserves the selected source profile. Phase 2 always updates the existing pipelines to the target profile's canonical runner and single wheel install. The harness tests migration, not continued availability of the removed compatibility shim.
 
 Profiles are resolved from each git ref by prefix match; pass `--source_profile=<name>` / `--target_profile=<name>` to force resolution for custom branches the registry doesn't recognize.
 
@@ -173,27 +173,24 @@ Profiles are resolved from each git ref by prefix match; pass `--source_profile=
 
 - **`local` (default)** — build wheels via [`integration_tests/wheel_builder.py`](wheel_builder.py) (which uses `git worktree` + `python setup.py bdist_wheel` against the source/target refs), upload them to the per-run UC volume, and reference UC volume paths in both `JobEnvironment.dependencies` and the runner notebook's `%pip install`. This matches what real customers do (install a pre-built artifact); does NOT require workspace egress to GitHub.
 - **`git`** — skip the local build entirely. `JobEnvironment.dependencies` and `%pip install` resolve `git+https://github.com/databrickslabs/sdp-meta.git@<ref>` directly. Faster local iteration. The cluster MUST have egress to `--git_repo_url`.
-- **`pypi`** — post-release verification. No build, no upload: Phase 1 installs `dlt-meta==<source_package_version>` and Phase 2 installs `dlt-meta==<target_package_version>` from the **live PyPI index** (through the workspace's PyPI proxy), proving the *published* redirect + primary packages upgrade a running deployment in place. Versions derive from the `--source_version`/`--target_version` tags with the `v` stripped (pip versions never carry a `v` prefix), or pin them with `--source_package_version`/`--target_package_version`. The uploaded runner/validate notebooks get `%pip install --force-reinstall`: serverless environment reuse can expose base-runtime (or prior-update) distribution metadata to pip without making the module importable from the isolated pipeline environment, so a plain install may be skipped as "already satisfied" and `databricks.labs.sdp_meta` then fails to import. Requires cluster egress to the PyPI proxy, and the proxy must have synced the freshly published packages (verify with `pip download dlt-meta==<ver> -d /tmp/x --index-url <proxy>/simple` before blaming the harness).
-
-### Phase 2 install surface — `--target_install_surface`
-
-- **`primary_wheel` (default)** — Phase 2 installs the target install spec directly (wheel path, git URL, or PyPI coordinate per `--install_mode`).
-- **`compat_wheelhouse`** (requires `--install_mode=local`, legacy→current upgrades only) — builds the target primary wheel *and* the `compat/` dlt-meta redirect wheel, downloads all runtime dependencies, uploads everything to a UC-volume wheelhouse, and Phase 2 installs `dlt-meta==<target_package_version>` through offline pip resolution (`--no-index --find-links`). This simulates the customer's `pip install dlt-meta==<ver>` **before** the release is published.
+- **`pypi`** — post-release verification. No build or upload: the canonical target installs `databricks-labs-sdp-meta==<target_package_version>` from the live PyPI index. Versions derive from tags with the `v` stripped, or can be pinned with the package-version flags. Requires cluster egress to the workspace PyPI proxy.
 
 ### Choosing a scenario
 
 | Scenario | Flags | Phase 1 installs | Phase 2 installs |
 |---|---|---|---|
 | Pre-release, iterate on uncommitted code | `--install_mode=local --build_target_from_worktree` | wheel built from `--source_version` tag | wheel built from working tree |
-| Pre-release, simulate `pip install dlt-meta==<ver>` | add `--target_install_surface=compat_wheelhouse` | wheel built from tag | `dlt-meta==<ver>` via offline UC-volume wheelhouse |
-| Post-release smoke test | `--install_mode=pypi` | `dlt-meta==<src ver>` from live PyPI | `dlt-meta==<tgt ver>` from live PyPI |
+| Post-release smoke test | `--install_mode=pypi` | source release from live PyPI | `databricks-labs-sdp-meta==<target ver>` from live PyPI |
 | Branch iteration, no builds | `--install_mode=git` | `git+repo@<source ref>` | `git+repo@<target ref>` |
 
-Recommended release workflow: run `compat_wheelhouse` before tagging (hermetic, no live-index dependency), then `pypi` immediately after publishing (verifies exactly what customers download).
+Recommended release workflow: run the local canonical-wheel scenario before
+tagging, then `pypi` immediately after publishing.
 
 ### Iterating on uncommitted target-side changes — `--build_target_from_worktree`
 
-While developing the bundled compat shim or post-rename CLI aliases on a feature branch, you'll want to test changes that aren't pushed to `--target_version` yet. Pass `--build_target_from_worktree` (requires `--install_mode=local`) to build the TARGET main wheel from your local working tree instead of from the git ref:
+While developing target-side changes on a feature branch, pass
+`--build_target_from_worktree` (requires `--install_mode=local`) to build the
+TARGET main wheel from your local working tree instead of from the git ref:
 
 ```commandline
 python integration_tests/run_backward_compat_tests.py \
@@ -202,17 +199,23 @@ python integration_tests/run_backward_compat_tests.py \
     --profile=<<DEFAULT>>
 ```
 
-The SOURCE wheel still comes from `--source_version` (e.g. `v0.0.10`) — that's the customer's already-released artifact and has nothing to do with local edits. Only the TARGET side honours the working tree, because that's where the unreleased bundled compat shim and CLI work live.
+The SOURCE wheel still comes from `--source_version` (for example,
+`v0.0.10`) and has nothing to do with local edits. Only the TARGET side
+honours the working tree.
 
 Use ONLY for development. Production runs should pin a real git ref so the test artifact is reproducible from version control.
 
 ### Common upgrade scenarios
 
 ```commandline
-# Default (legacy → current): v0.0.10 → v0.1.0. Local wheel build.
+# Default: v0.0.10 -> main (pre-release canonical target).
 python integration_tests/run_backward_compat_tests.py \
     --uc_catalog_name=<<uc catalog name>> \
     --profile=<<DEFAULT>>
+
+# `main` is intentionally a moving pre-release default. For reproducible
+# results, pass an immutable target tag or SHA. Before v0.2.0 is tagged, use
+# --build_target_from_worktree to test uncommitted local target changes.
 
 # Legacy publishing mode on pipeline-managed standard compute. This creates
 # pipelines with `target=` and `serverless=False`, then upgrades their wheel
@@ -240,31 +243,30 @@ python integration_tests/run_backward_compat_tests.py \
     --phase2_append_onboarding \
     --profile=<<DEFAULT>>
 
-# Post-release smoke test: both phases from the LIVE PyPI index
-# (Phase 1: dlt-meta==0.0.10, Phase 2: dlt-meta==0.1.0 via the redirect).
+# Post-release smoke test from the live PyPI index.
 python integration_tests/run_backward_compat_tests.py \
     --uc_catalog_name=<<uc catalog name>> \
     --install_mode=pypi \
     --source_version=v0.0.10 \
-    --target_version=v0.1.0 \
+    --target_version=v0.2.0 \
     --profile=<<DEFAULT>>
 
-# Future release pair (current → current, e.g. v0.1.0 → v0.1.1).
+# Current release pair (post-shim → post-shim, e.g. v0.2.0 → a later release).
 # Same one-wheel/one-key contract — the namespace does not change,
 # so no compat shim is needed in the wheel either way.
 python integration_tests/run_backward_compat_tests.py \
     --uc_catalog_name=<<uc catalog name>> \
-    --source_version=v0.1.0 \
-    --target_version=v0.1.1 \
+    --source_version=v0.2.0 \
+    --target_version=<later-version> \
     --profile=<<DEFAULT>>
 
 # Custom branches with explicit profile pins (used when the branch
 # name doesn't match a registered prefix). Source ≠ target so the test
-# actually exercises the legacy → current shim path:
+# exercises the historical-source migration path:
 python integration_tests/run_backward_compat_tests.py \
     --uc_catalog_name=<<uc catalog name>> \
     --source_version=v0.0.10            --source_profile=legacy \
-    --target_version=feature/sdp-meta   --target_profile=current \
+    --target_version=feature/remove-shims --target_profile=current \
     --profile=<<DEFAULT>>
 
 # Skip cleanup on success/failure so the run state is debuggable;
@@ -292,24 +294,25 @@ standard pipeline compute and whose identity can create schemas, volumes, and
 pipelines in `--uc_catalog_name`. Start with two workers; increase the count
 only when the input size or your workspace policy requires it.
 
-The test retains the source runner notebook, source `dlt_meta_whl`
-configuration key, pipeline IDs, and checkpoints. It fails immediately if the
-service returns a serverless or DPM (`schema=`) pipeline for this mode. After
-a successful run, inspect the two emitted `backward_compat_phase*.csv` files:
-every Phase 2 validation line must end in `Passed!`.
+The test retains pipeline IDs and checkpoints while migrating the runner,
+wheel configuration key, and task package metadata. It fails immediately if
+the service returns a serverless or DPM (`schema=`) pipeline for this mode.
+After a successful run, inspect the two emitted
+`backward_compat_phase*.csv` files: every Phase 2 validation line must end in
+`Passed!`.
 
 ### What changes between phases (and what doesn't)
 
 **Stays identical across both phases:**
 - The three DLT pipeline IDs (created in Phase 1, reused in Phase 2 via `pipelines.update()`).
 - Per-pipeline DLT checkpoints — Auto Loader picks up Phase 2's incremental seed by checkpoint, not by re-listing.
-- The runner notebook contents — uploaded once from the SOURCE profile's runner. For legacy → current upgrades, the SOURCE's `from src.*` imports are kept verbatim and resolve in Phase 2 via the legacy-namespace compat shim BUNDLED into the target wheel (proving zero-code-change upgrade end-to-end).
-- The pipeline-config KEY the runner notebook reads (`dlt_meta_whl` for legacy source, `sdp_meta_whl` for current source).
 - The dataflowspec table — Phase 2 reads what Phase 1 persisted; new fields are backfilled to documented defaults by `populate_additional_df_cols`.
 
-**Changes between Phase 1 and Phase 2 (and only this):**
-- The value behind the SOURCE profile's pipeline-config key in each pipeline's `configuration` flips from the SOURCE main wheel path to the TARGET main wheel path. That's it — one key, one swap, per pipeline.
-- The runner notebook itself is not touched — the same single `%pip install $key` line that ran in Phase 1 runs again in Phase 2, with `$key` resolving to the new wheel path.
+**Changes between Phase 1 and Phase 2:**
+- The install coordinate changes from the SOURCE package to `databricks-labs-sdp-meta`.
+- The runner changes to `init_sdp_meta_pipeline.py` with canonical imports.
+- The pipeline configuration key changes from the source profile's key to `sdp_meta_whl`.
+- Python wheel tasks use `databricks_labs_sdp_meta` as `package_name`.
 
 ### Output
 

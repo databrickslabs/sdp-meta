@@ -7,7 +7,6 @@ from databricks.sdk.core import Config
 from .__about__ import __version__
 from databricks.sdk import WorkspaceClient
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -181,9 +180,6 @@ class WorkspaceConfig(_Config["WorkspaceConfig"]):
 
     @classmethod
     def from_dict(cls, raw: dict):
-        # Config deserialization must not consume fields from the caller's
-        # dictionary. This is especially important while normalizing legacy
-        # files because callers may retain the parsed payload for diagnostics.
         raw = dict(raw)
         cls._verify_version(raw)
         for legacy_key, current_key in _LEGACY_WORKSPACE_CONFIG_KEYS.items():
@@ -198,8 +194,8 @@ class WorkspaceConfig(_Config["WorkspaceConfig"]):
                 )
             else:
                 logger.warning(
-                    "Migrating deprecated workspace config key %r to %r; "
-                    "update config.json before v0.2.0.",
+                    "Migrating deprecated workspace config key %r to %r. "
+                    "Save the configuration to persist the canonical key.",
                     legacy_key,
                     current_key,
                 )

@@ -2,9 +2,11 @@
 
 Goal
 ----
-A customer's existing pipeline running on SOURCE_VERSION must keep working
-unchanged when the wheel is swapped to TARGET_VERSION. No notebook edits,
-no onboarding redo, and no DLT checkpoint resets.
+A customer's existing pipeline running on SOURCE_VERSION must preserve its
+data, pipeline IDs, and checkpoints while being migrated in place to
+TARGET_VERSION. The v0.2.0 boundary requires replacing legacy runner
+notebooks, imports, wheel keys, and task package metadata; onboarding and
+checkpoint resets are not required.
 
 Two profiles ship out of the box -- see ``version_profiles.py``:
 
@@ -12,16 +14,7 @@ Two profiles ship out of the box -- see ``version_profiles.py``:
                     runner imports, ``dlt_meta_whl`` config key).
   * ``CURRENT``  -- v0.1.0 and later (databricks_labs_sdp_meta dist,
                     ``from databricks.labs.sdp_meta.*`` runner imports,
-                    ``sdp_meta_whl`` config key). The v0.1.0 main wheel
-                    BUNDLES a legacy-namespace compat surface: a real
-                    top-level ``src`` package (plus a ``dlt_meta``
-                    package), both re-exporting
-                    ``databricks.labs.sdp_meta.*``. So a LEGACY-source
-                    customer who flips their ``dlt_meta_whl`` config from
-                    a v0.0.10 wheel to a v0.1.0 wheel keeps working
-                    without any other change -- their
-                    ``from src.* import …`` resolves through the real
-                    ``src`` package via normal import machinery.
+                    ``sdp_meta_whl`` config key).
 
 Profile resolution is git-ref-prefix based. Pass ``--source_version`` and
 ``--target_version`` (any git tag, branch, or SHA the wheel builder can
@@ -41,10 +34,15 @@ Phase 1 (SOURCE wheel):
   6. Validate row counts and persist them for Phase 2.
 
 [Local: build TARGET wheel, upload to the SAME UC volume, then
- ``pipelines.update()`` each pipeline's configuration to swap the value
- behind the SOURCE profile's pipeline-config key from the SOURCE wheel
- path to the TARGET wheel path. Pipeline IDs DO NOT change, so DLT
- checkpoints (which are pipeline-scoped) are preserved.]
+ ``pipelines.update()`` each pipeline to use the TARGET profile's canonical
+ runner and configuration. Pipeline IDs DO NOT change, so DLT checkpoints
+ (which are pipeline-scoped) are preserved.]
+
+When the target profile or install spec changes, migrate the existing
+onboarding wheel-task metadata before Phase 2. After Phase 2 validates every
+SOURCE-persisted row, submit one cloned A1 onboarding task with
+``overwrite=False`` to verify the target entry point and dependencies. The
+optional append-onboarding path performs that verification itself.
 
 Phase 2 (TARGET wheel):
   1. Drop a small new batch of customers + transactions JSON files
@@ -57,57 +55,32 @@ Phase 2 (TARGET wheel):
      silver did not regress, dataflowspec persisted by SOURCE reads
      cleanly through TARGET's dataclasses.
 
-One config key, one wheel, one ``%pip install``
------------------------------------------------
-The runner notebook is the SOURCE profile's runner -- byte-for-byte the
-file the customer would have on the source version. It reads exactly
-ONE pipeline-config key (``dlt_meta_whl`` for LEGACY) and runs ONE
-``%pip install $dlt_meta_whl`` line. For LEGACY -> CURRENT cross-
-namespace upgrades the source runner's ``from src.* import …`` keeps
-resolving because the v0.1.0 wheel bundles a real top-level ``src``
-package: once ``%pip install`` lands the wheel, the runner's
-``from src.dataflow_pipeline import …`` walks normal import machinery,
-finds ``src/`` in site-packages, runs its ``__init__`` (which registers
-the ``src.<sub>`` -> ``databricks.labs.sdp_meta.<sub>`` aliases), and
-resolves. This does NOT depend on a ``.pth`` firing -- serverless
-``%pip install`` does not re-trigger ``site.py``'s ``.pth`` scan, which
-is exactly why resolution goes through a real package rather than a
-startup hook.
-
-An opt-in ``compat_wheelhouse`` target surface separately exercises the
-pre-release PyPI redirect contract. It builds the primary and compatibility
-wheels, downloads the primary wheel's complete runtime dependency set, uploads
-the resulting wheelhouse to one UC Volume directory, and changes Phase 2's
-value behind ``dlt_meta_whl`` to ``dlt-meta==<version>``. The uploaded notebook
-copy gets literal ``--force-reinstall --no-index --find-links`` arguments
-because Databricks treats a substituted ``$var`` as one pip argument; source
-files in the working tree are unchanged.
+Phase 1 preserves the historical source contract (including ``dlt-meta``,
+``dlt_meta_whl``, and the legacy runner where applicable). Phase 2 explicitly
+migrates the existing pipeline IDs to ``init_sdp_meta_pipeline.py``, the
+``sdp_meta_whl`` key, canonical imports, and ``databricks-labs-sdp-meta`` task
+metadata. This validates data, checkpoint, and persisted-spec continuity
+without retaining the removed compatibility packaging.
 
 Usage
 -----
 
-    # Default: v0.0.10 -> v0.1.0 (legacy -> current)
+    # Default: v0.0.10 -> main (pre-release canonical target)
     python integration_tests/run_backward_compat_tests.py \\
         --uc_catalog_name=<catalog>
 
-    # Future: v0.1.0 -> v0.1.1 (current -> current)
+    # Canonical migration: v0.1.1 -> v0.2.0 (shim era -> post-shim)
     python integration_tests/run_backward_compat_tests.py \\
         --uc_catalog_name=<catalog> \\
-        --source_version=v0.1.0 \\
-        --target_version=v0.1.1
+        --source_version=v0.1.1 \\
+        --target_version=v0.2.0
 
     # Custom branches with explicit profile pins
     python integration_tests/run_backward_compat_tests.py \\
         --uc_catalog_name=<catalog> \\
         --source_version=feature/legacy-bugfix --source_profile=legacy \\
-        --target_version=feature/sdp-meta     --target_profile=current
+        --target_version=feature/remove-shims --target_profile=current
 
-    # Pre-release: exercise ``pip install dlt-meta==0.1.0`` using local wheels
-    python integration_tests/run_backward_compat_tests.py \\
-        --uc_catalog_name=<catalog> \\
-        --install_mode=local \\
-        --build_target_from_worktree \\
-        --target_install_surface=compat_wheelhouse
 """
 
 from __future__ import annotations
@@ -118,17 +91,14 @@ import csv
 import json
 import os
 import re
-import shutil
-import subprocess
 import sys
 import time
 import traceback
 import uuid
-import warnings
 import webbrowser
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 # Add project root to Python path so ``databricks.labs.sdp_meta`` resolves
 # (we only use it for the WorkspaceInstaller helper, not anything that's
@@ -145,6 +115,7 @@ from databricks.sdk.service.pipelines import (  # noqa: E402
     PipelineLibrary,
 )
 from databricks.sdk.service.workspace import ImportFormat, Language  # noqa: E402
+from packaging.utils import canonicalize_name  # noqa: E402
 
 from databricks.labs.sdp_meta.identifiers import validate_uc_identifier  # noqa: E402
 # Aliased to disambiguate from the class-level ``BCRunner.create_pipeline``
@@ -160,7 +131,6 @@ from integration_tests.version_profiles import (  # noqa: E402
     DEFAULT_TARGET_REF,
     KNOWN_PROFILES,
     VersionProfile,
-    is_cross_namespace_upgrade,
     resolve_profile,
 )
 from integration_tests.wheel_builder import GitRefWheelBuilder  # noqa: E402
@@ -174,7 +144,7 @@ class BCRunnerConf:
     pared down to the surface this test actually uses (cloudfiles +
     bronze/silver), and adds the wheel-swap fields. Profile-driven --
     every version-line knob (distribution, runner notebook, onboarding
-    template, pipeline-config key, compat shim) lives on
+    template, pipeline-config key) lives on
     ``source_profile`` / ``target_profile``, never on this dataclass.
     """
 
@@ -201,16 +171,14 @@ class BCRunnerConf:
     #               Faster local iteration; requires the cluster to
     #               have egress to ``git_repo_url``.
     #   ``pypi``:     post-release verification. No wheels are built or
-    #                 uploaded; Phase 1 installs
-    #                 ``dlt-meta==<source_package_version>`` and Phase 2
-    #                 installs ``dlt-meta==<target_package_version>``
-    #                 straight from the live PyPI index, proving the
-    #                 published redirect + primary packages upgrade a
-    #                 running deployment in place. Requires cluster
+    #                 uploaded; Phase 1 installs the SOURCE profile's
+    #                 distribution and Phase 2 installs
+    #                 ``databricks-labs-sdp-meta==<target_package_version>``
+    #                 straight from the live PyPI index. Requires cluster
     #                 egress to pypi.org.
     install_mode: str = "local"
     git_repo_url: str = "https://github.com/databrickslabs/sdp-meta.git"
-    # Exact ``dlt-meta`` version Phase 1 installs when
+    # Exact SOURCE package version Phase 1 installs when
     # ``install_mode == "pypi"``. Derived from ``source_ref`` (a ``vX.Y.Z``
     # tag with the ``v`` stripped) unless passed explicitly.
     source_package_version: Optional[str] = None
@@ -230,37 +198,13 @@ class BCRunnerConf:
     # When True, skip the git-worktree checkout for the TARGET main
     # wheel and run ``setup.py bdist_wheel`` against the developer's
     # working tree instead. Use ONLY for iterating on uncommitted
-    # target-side changes (bundled compat shim, post-rename CLI
-    # aliases, etc.) before they're pushed to ``target_ref``. Source
+    # target-side changes before they're pushed to ``target_ref``. Source
     # ALWAYS comes from the pinned ref -- the source side is the
     # customer's already-released wheel and has nothing to do with
     # local edits.
     build_target_from_worktree: bool = False
-    # Phase 2 install surface:
-    #
-    #   ``primary_wheel`` (default) installs the target primary wheel
-    #   directly, preserving the original backward-compatibility test.
-    #
-    #   ``compat_wheelhouse`` builds and uploads both the target primary
-    #   wheel and the ``compat/`` dlt-meta redirect wheel, together with
-    #   the primary wheel's runtime dependencies. Phase 2 then installs
-    #   ``dlt-meta==<target_package_version>`` through pip's resolver,
-    #   proving the pre-release PyPI redirect path without publishing.
-    target_install_surface: str = "primary_wheel"
-    # Exact ``dlt-meta`` version the compat_wheelhouse offline install
-    # pins (``dlt-meta==<target_package_version>``). ``None`` means
-    # "derive it from the version the TARGET wheels actually build" --
-    # ``build_wheels`` fills this in and verifies the primary and compat
-    # wheels agree, so the pinned version can never drift from the built
-    # artifacts. Pass an explicit value only to assert a specific version
-    # (a mismatch with the built wheels then fails the run at build time).
+    # Exact canonical target package version for ``install_mode == "pypi"``.
     target_package_version: Optional[str] = None
-    # Interpreter the compat_wheelhouse is downloaded for. Drives both the
-    # ``--python-version`` and the ``cpXY`` ABI tag passed to ``pip
-    # download``. Override when serverless/DBR runs a different CPython
-    # minor version than the default so ABI-specific dependency wheels
-    # (e.g. PyYAML's C extension) resolve for the right interpreter.
-    compat_python_version: str = "3.12"
 
     # Schema names (one per layer + one for dataflowspec). Per-run
     # suffix avoids collisions when two devs hit the same UC catalog.
@@ -269,7 +213,7 @@ class BCRunnerConf:
     silver_schema: str = ""
 
     # Volume + workspace paths.
-    uc_volume_name: str = "dlt_meta_files"
+    uc_volume_name: str = "sdp_meta_files"
     volume_info: Optional[VolumeInfo] = None
     uc_volume_path: str = ""
     runners_nb_path: str = ""
@@ -280,18 +224,10 @@ class BCRunnerConf:
     # ``source_main_whl`` -- main wheel built from --source_version.
     # ``target_main_whl`` -- main wheel built from --target_version.
     #
-    # The target wheel bundles the legacy Python import surface. The separate
-    # compatibility distribution is built only for ``compat_wheelhouse`` so
-    # Phase 2 can also exercise the legacy ``package_name=dlt_meta`` Python
-    # wheel task contract.
     source_main_whl_local: str = ""
     target_main_whl_local: str = ""
-    target_compat_whl_local: str = ""
-    target_dependency_whls_local: List[str] = field(default_factory=list)
     source_main_whl_remote: str = ""
     target_main_whl_remote: str = ""
-    target_compat_whl_remote: str = ""
-    target_wheelhouse_remote: str = ""
 
     # Generated onboarding-file output paths (one per group) --
     # gitignored.
@@ -339,26 +275,13 @@ class BCRunnerConf:
         )
 
     @property
-    def is_cross_namespace_upgrade(self) -> bool:
-        """Whether SOURCE and TARGET use different runner-import namespaces.
-
-        Used purely for logging and gate decisions; no separate compat
-        shim wheel is built or installed -- the target wheel is
-        responsible for bundling its own legacy-namespace compat
-        surface when the namespace changes.
-        """
-        return is_cross_namespace_upgrade(
-            source=self.source_profile, target=self.target_profile
-        )
-
-    @property
     def is_standard_legacy_mode(self) -> bool:
         return self.pipeline_mode == "standard_legacy"
 
     @property
     def source_supports_append_flow_source_metadata(self) -> bool:
         """Whether SOURCE includes the append-flow metadata fix from #444."""
-        if self.source_profile.name != "current":
+        if self.source_profile.name == "legacy":
             return False
         match = re.match(r"^v?(\d+)\.(\d+)\.(\d+)(?:$|[.+-])", self.source_ref)
         if match is None:
@@ -386,10 +309,6 @@ class BackwardCompatRunner:
     # if a slow workspace pushes Phase 1 past the wall.
     DEFAULT_PHASE_TIMEOUT_MIN = 30
 
-    # Wall-clock ceiling for the ``pip download`` that populates the
-    # compat_wheelhouse. Without it a stalled PyPI/proxy fetch would hang
-    # the whole orchestrator with no diagnostic.
-    COMPAT_DOWNLOAD_TIMEOUT_SEC = 600
     PHASE_OUTPUT_DOWNLOAD_ATTEMPTS = 3
     PHASE_OUTPUT_RETRY_DELAY_SEC = 2
     # Contract with validate_phase1.py and validate_phase2.py: validation
@@ -433,13 +352,16 @@ class BackwardCompatRunner:
             """Derive a PyPI version from a ``vX.Y.Z``-style tag."""
             match = re.fullmatch(r"v?(\d+(?:\.\d+)+(?:[.\-+][A-Za-z0-9.]+)?)", ref)
             if not match:
+                package_flag = flag.replace(
+                    "_version", "_package_version"
+                )
                 raise ValueError(
-                    f"--install_mode=pypi could not derive a PyPI version "
-                    f"from {flag}={ref!r}. Pass a release tag (e.g. "
-                    f"'v0.1.0') or set the corresponding "
-                    "--source_package_version/--target_package_version "
-                    "explicitly. Note: pip versions carry no 'v' prefix "
-                    "(dlt-meta==0.1.0, not ==v0.1.0)."
+                    "--install_mode=pypi requires a released package "
+                    f"version, but {flag}={ref!r} is not a version tag. "
+                    f"Pass a release tag with {flag} (for example v0.2.0) "
+                    f"or set {package_flag} explicitly. Pip versions carry "
+                    "no 'v' prefix "
+                    "(databricks-labs-sdp-meta==0.2.0, not ==v0.2.0)."
                 )
             return match.group(1)
 
@@ -466,39 +388,6 @@ class BackwardCompatRunner:
                 f"install_mode={install_mode!r}."
             )
 
-        target_install_surface = (
-            self.args.get("target_install_surface") or "primary_wheel"
-        ).lower()
-        if target_install_surface not in ("primary_wheel", "compat_wheelhouse"):
-            raise ValueError(
-                "--target_install_surface must be 'primary_wheel' or "
-                f"'compat_wheelhouse'; got {target_install_surface!r}."
-            )
-        if target_install_surface == "compat_wheelhouse":
-            if install_mode != "local":
-                raise ValueError(
-                    "--target_install_surface=compat_wheelhouse requires "
-                    "--install_mode=local."
-                )
-            if not is_cross_namespace_upgrade(
-                source=source_profile, target=target_profile
-            ):
-                raise ValueError(
-                    "--target_install_surface=compat_wheelhouse is intended "
-                    "for a legacy-to-current cross-namespace upgrade."
-                )
-            if self.args.get("phase2_append_onboarding"):
-                raise ValueError(
-                    "--phase2_append_onboarding requires "
-                    "--target_install_surface=primary_wheel because the "
-                    "offline wheelhouse is installed inside pipeline "
-                    "notebooks, not Job Environments."
-                )
-
-        # ``None`` (the default) means "derive the pinned version from the
-        # TARGET wheels at build time" -- see BCRunnerConf.target_package_version
-        # and _resolve_target_package_version. Only validate the token shape
-        # when the user pins an explicit version.
         target_package_version = self.args.get("target_package_version")
         if target_package_version is not None and not re.fullmatch(
             r"[A-Za-z0-9][A-Za-z0-9.!+_-]*", target_package_version
@@ -510,21 +399,6 @@ class BackwardCompatRunner:
         if install_mode == "pypi" and target_package_version is None:
             target_package_version = _pypi_version_from_ref(
                 target_ref, flag="--target_version"
-            )
-
-        compat_python_version = (
-            self.args.get("compat_python_version")
-            or BCRunnerConf.__dataclass_fields__["compat_python_version"].default
-        )
-        # Must be a bare CPython MAJOR.MINOR: it feeds pip download's
-        # --python-version verbatim and derives the ``cpXY`` ABI tag
-        # (``"cp" + value.replace(".", "")``). A patch-level or dotless
-        # value would produce an invalid ABI (e.g. ``cp3121``) and only
-        # surface as an opaque pip resolution error at build time.
-        if not re.fullmatch(r"\d+\.\d+", compat_python_version):
-            raise ValueError(
-                "--compat_python_version must be a CPython MAJOR.MINOR "
-                f"version (e.g. '3.12'); got {compat_python_version!r}."
             )
 
         pipeline_mode = (
@@ -563,13 +437,11 @@ class BackwardCompatRunner:
                 self.args.get("phase2_append_onboarding")
             ),
             build_target_from_worktree=build_target_from_worktree,
-            target_install_surface=target_install_surface,
             source_package_version=source_package_version,
             target_package_version=target_package_version,
-            compat_python_version=compat_python_version,
         )
         conf.runners_nb_path = (
-            f"/Users/{username}/dlt_meta_int_tests/backward_compat/{run_id}"
+            f"/Users/{username}/sdp_meta_int_tests/backward_compat/{run_id}"
         )
         conf.phase1_output_ws = (
             f"{conf.runners_nb_path}/integration-test-output_phase1.csv"
@@ -578,44 +450,18 @@ class BackwardCompatRunner:
             f"{conf.runners_nb_path}/integration-test-output_phase2.csv"
         )
 
-        if conf.is_cross_namespace_upgrade and not (
-            target_ref.startswith("v0.0.")
-            or target_ref.startswith("v0.1")
-            or target_ref == "feature/sdp-meta"
-        ):
-            # Cross-namespace upgrades only work when the target wheel
-            # bundles a legacy-namespace compat surface. v0.1.0 and later
-            # CURRENT-profile builds do; arbitrary unrecognised refs
-            # might not. Surface a warning so the user knows to verify
-            # the target wheel actually ships the real ``src`` package
-            # before running.
-            warnings.warn(
-                f"Cross-namespace upgrade requested ({source_profile.name!r} "
-                f"-> {target_profile.name!r}) with target_ref={target_ref!r}. "
-                "The target wheel MUST bundle a legacy-namespace compat "
-                "surface (a real `src` package + `dlt_meta` package "
-                "re-exporting `databricks.labs.sdp_meta.*`) for the source "
-                "runner notebook's "
-                "`from src.* import …` to keep resolving. Verify the "
-                "wheel before running, or pin source/target profiles "
-                "explicitly.",
-                stacklevel=2,
-            )
-
         return conf
 
     # ----- wheel build + upload ------------------------------------------
 
     def build_wheels(self, conf: BCRunnerConf) -> None:
-        """Build SOURCE main and the requested TARGET install surface.
+        """Build SOURCE and TARGET main wheels.
 
         Skipped entirely when ``install_mode == "git"`` -- in that case
         runners and wheel-tasks resolve git URLs at install time and
         nothing has to be uploaded.
 
-        The default surface builds one wheel per side. The opt-in
-        compatibility surface additionally builds the redirect wheel and
-        downloads all target runtime dependency wheels.
+        Historical package coordinates are retained only for the SOURCE.
         """
         if conf.install_mode == "git":
             print(
@@ -626,8 +472,9 @@ class BackwardCompatRunner:
         if conf.install_mode == "pypi":
             print(
                 "=== install_mode=pypi: skipping local wheel build; "
-                f"Phase 1 installs dlt-meta=={conf.source_package_version}, "
-                f"Phase 2 installs dlt-meta=={conf.target_package_version} "
+                f"Phase 1 installs {self.install_spec_source_main(conf)}, "
+                "Phase 2 installs databricks-labs-sdp-meta=="
+                f"{conf.target_package_version} "
                 "from the live PyPI index ==="
             )
             return
@@ -652,258 +499,14 @@ class BackwardCompatRunner:
                     "LOCAL WORKING TREE (--build_target_from_worktree) ==="
                 )
                 conf.target_main_whl_local = str(builder.build_from_worktree())
-                if conf.target_install_surface == "compat_wheelhouse":
-                    conf.target_compat_whl_local = str(
-                        builder.build_from_worktree(subdir="compat")
-                    )
             else:
                 print(
                     f"=== Building TARGET wheel ({conf.target_profile.name}) from "
                     f"ref={conf.target_ref!r} ==="
                 )
                 conf.target_main_whl_local = str(builder.build(conf.target_ref))
-                if conf.target_install_surface == "compat_wheelhouse":
-                    conf.target_compat_whl_local = str(
-                        builder.build(conf.target_ref, subdir="compat")
-                    )
-            if conf.target_install_surface == "compat_wheelhouse":
-                self._resolve_target_package_version(conf)
-                self._download_compat_runtime_wheels(conf)
         finally:
             builder.cleanup()
-
-    @staticmethod
-    def _wheel_version(wheel_path: str) -> str:
-        """Return the version field of a wheel filename.
-
-        Wheel names are ``{dist}-{version}(-{build})?-{py}-{abi}-{plat}.whl``
-        with ``-`` as the field separator; neither the distribution name
-        nor the (escaped) version contains a bare ``-``, so the second
-        ``-``-delimited field is always the version.
-        """
-        name = os.path.basename(wheel_path)
-        parts = name.split("-")
-        if not name.endswith(".whl") or len(parts) < 5:
-            raise ValueError(f"Unrecognized wheel filename: {name!r}")
-        return parts[1]
-
-    def _resolve_target_package_version(self, conf: BCRunnerConf) -> None:
-        """Pin ``target_package_version`` to what the TARGET wheels build.
-
-        The compat_wheelhouse Phase 2 install is ``dlt-meta==<version>``,
-        resolved offline (``--no-index``) against the uploaded wheelhouse.
-        For that to be satisfiable the pinned version MUST equal the
-        version baked into BOTH built wheels:
-
-          * the ``dlt-meta`` redirect wheel (provides the ``dlt-meta``
-            distribution the install names), and
-          * the ``databricks-labs-sdp-meta`` primary wheel (the redirect's
-            pinned dependency, and what validate_phase2 asserts on).
-
-        We derive the version from the built wheels (single source of
-        truth = the artifacts themselves), fail if the two wheels disagree,
-        and -- when the user pinned an explicit ``--target_package_version``
-        -- fail if it doesn't match, rather than letting the mismatch
-        surface much later as an unsatisfiable on-cluster install.
-        """
-        primary_version = self._wheel_version(conf.target_main_whl_local)
-        compat_version = self._wheel_version(conf.target_compat_whl_local)
-        if primary_version != compat_version:
-            raise RuntimeError(
-                "TARGET wheels disagree on version: "
-                f"databricks-labs-sdp-meta=={primary_version} vs "
-                f"dlt-meta=={compat_version}. The offline "
-                "'dlt-meta==<version>' install would be unsatisfiable; "
-                "rebuild both from the same ref/worktree."
-            )
-        if conf.target_package_version is None:
-            conf.target_package_version = primary_version
-            print(
-                "  target_package_version resolved from built wheels: "
-                f"{primary_version}"
-            )
-        elif conf.target_package_version != primary_version:
-            raise RuntimeError(
-                f"--target_package_version={conf.target_package_version!r} "
-                f"does not match the built TARGET wheels (version "
-                f"{primary_version!r}). Omit --target_package_version to "
-                "derive it automatically, or pass the version the wheels "
-                "actually build."
-            )
-
-    def _download_compat_runtime_wheels(self, conf: BCRunnerConf) -> None:
-        """Download a complete Linux wheelhouse for Phase 2.
-
-        Serverless pipelines cannot be assumed to have PyPI egress. Resolving
-        the local ``dlt-meta`` redirect therefore requires not just the two
-        project wheels, but every runtime dependency of the primary wheel.
-
-        The target interpreter is ``conf.compat_python_version`` (default
-        CPython 3.12). We accept the interpreter-specific ABI plus the
-        stable (``abi3``) and pure-Python (``none``) ABIs, and both a
-        conservative and a modern manylinux target plus pure-Python
-        (``any``), so a dependency that only ships, say, an ``abi3`` or a
-        ``manylinux_2_28`` wheel still resolves. ``--only-binary=:all:``
-        makes pip FAIL (rather than fall back to an sdist) if any
-        dependency in the closure has no wheel matching this target, so an
-        incomplete wheelhouse surfaces here at build time, not later as an
-        unsatisfiable on-cluster ``--no-index`` install.
-        """
-        wheelhouse_dir = os.path.join(
-            os.path.dirname(conf.target_main_whl_local),
-            f"compat-wheelhouse-{conf.run_id}",
-        )
-        shutil.rmtree(wheelhouse_dir, ignore_errors=True)
-        os.makedirs(wheelhouse_dir, exist_ok=True)
-        python_version = conf.compat_python_version
-        abi = "cp" + python_version.replace(".", "")
-        command = [
-            sys.executable,
-            "-m",
-            "pip",
-            "download",
-            "--dest",
-            wheelhouse_dir,
-            "--only-binary=:all:",
-            "--python-version",
-            python_version,
-            "--implementation",
-            "cp",
-            "--abi",
-            abi,
-            "--abi",
-            "abi3",
-            "--abi",
-            "none",
-            "--platform",
-            "manylinux2014_x86_64",
-            "--platform",
-            "manylinux_2_28_x86_64",
-            "--platform",
-            "any",
-            conf.target_main_whl_local,
-            conf.target_compat_whl_local,
-        ]
-        print(
-            "=== Downloading TARGET runtime dependency wheels "
-            f"(python={python_version}, abi={abi}/abi3/none) ==="
-        )
-        try:
-            proc = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=self.COMPAT_DOWNLOAD_TIMEOUT_SEC,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(
-                "Timed out after "
-                f"{self.COMPAT_DOWNLOAD_TIMEOUT_SEC}s building the "
-                "compatibility runtime wheelhouse.\n"
-                f"Command: {' '.join(command)}"
-            ) from exc
-        if proc.returncode != 0:
-            raise RuntimeError(
-                "Failed to build the compatibility runtime wheelhouse.\n"
-                f"Command: {' '.join(command)}\n"
-                f"stdout:\n{proc.stdout}\n"
-                f"stderr:\n{proc.stderr}"
-            )
-
-        project_wheels = {
-            os.path.basename(conf.target_main_whl_local),
-            os.path.basename(conf.target_compat_whl_local),
-        }
-        conf.target_dependency_whls_local = sorted(
-            os.path.join(wheelhouse_dir, name)
-            for name in os.listdir(wheelhouse_dir)
-            if name.endswith(".whl") and name not in project_wheels
-        )
-        self._assert_wheelhouse_complete(conf, wheelhouse_dir)
-        print(
-            "  -> downloaded "
-            f"{len(conf.target_dependency_whls_local)} runtime dependency wheels"
-        )
-
-    def _assert_wheelhouse_complete(
-        self, conf: BCRunnerConf, wheelhouse_dir: str
-    ) -> None:
-        """Fail if a direct dependency of the primary wheel is missing.
-
-        ``--only-binary=:all:`` already makes ``pip download`` fail on an
-        unresolvable closure, but that is a coarse net. This is a targeted
-        sanity check that every UNCONDITIONAL ``Requires-Dist`` the primary
-        wheel declares (no environment marker gating it out) actually landed
-        a wheel, so a gap is reported by name here rather than surfacing as
-        an ``ImportError`` on-cluster. Reads the requirement list from the
-        wheel's own metadata instead of hardcoding a single dependency name.
-        """
-        required = self._primary_wheel_required_dists(conf.target_main_whl_local)
-        present = {
-            self._canonical_dist(os.path.basename(path).split("-")[0])
-            for path in conf.target_dependency_whls_local
-        }
-        missing = sorted(name for name in required if name not in present)
-        if missing:
-            raise RuntimeError(
-                "Compatibility runtime wheelhouse is incomplete: no wheel "
-                f"downloaded for required dependency/-ies {missing}. "
-                f"Present dependency wheels: {sorted(present)}."
-            )
-
-    @staticmethod
-    def _canonical_dist(name: str) -> str:
-        """PEP 503-style normalized distribution name (``Foo.Bar`` -> ``foo_bar``).
-
-        Wheel filenames escape the distribution name with ``_``; project
-        metadata uses the original punctuation. Normalizing both sides to
-        runs-of-[-_.] -> single ``_`` lets them be compared directly.
-        """
-        return re.sub(r"[-_.]+", "_", name).lower()
-
-    @staticmethod
-    def _primary_wheel_required_dists(wheel_path: str) -> set:
-        """Unconditional ``Requires-Dist`` distribution names of a wheel.
-
-        Parses ``*.dist-info/METADATA`` from the wheel zip and returns the
-        canonicalized names of requirements that carry NO environment marker
-        (the part after ``;``) -- i.e. deps that are always installed and
-        therefore must be present in an offline wheelhouse. Requirements
-        gated by an ``extra`` or a marker are skipped (they aren't pulled by
-        a bare install). Returns an empty set if metadata can't be read, so
-        the coarse ``--only-binary`` guard remains the backstop.
-        """
-        import zipfile
-
-        try:
-            with zipfile.ZipFile(wheel_path) as zf:
-                metadata_name = next(
-                    (
-                        n
-                        for n in zf.namelist()
-                        if n.endswith(".dist-info/METADATA")
-                    ),
-                    None,
-                )
-                if metadata_name is None:
-                    return set()
-                metadata = zf.read(metadata_name).decode("utf-8", "replace")
-        except (OSError, zipfile.BadZipFile):
-            return set()
-
-        required = set()
-        for line in metadata.splitlines():
-            if not line.startswith("Requires-Dist:"):
-                continue
-            spec = line.split(":", 1)[1].strip()
-            if ";" in spec:  # has an environment marker / extra -> conditional
-                continue
-            # Name is the leading run of name chars before any version
-            # specifier, whitespace, or extras bracket.
-            match = re.match(r"[A-Za-z0-9._-]+", spec)
-            if match:
-                required.add(BackwardCompatRunner._canonical_dist(match.group(0)))
-        return required
 
     def upload_wheel(self, conf: BCRunnerConf, local_path: str, remote_subdir: str) -> str:
         """Upload a single .whl to ``<volume>/wheels/<remote_subdir>/<name>``.
@@ -924,105 +527,88 @@ class BackwardCompatRunner:
         self,
         conf: BCRunnerConf,
         ref: str,
-        *,
-        subdir: Optional[str] = None,
     ) -> str:
-        """Build a pip-compatible ``git+<url>@<ref>[#subdirectory=...]`` URL.
+        """Build a pip-compatible ``git+<url>@<ref>`` URL.
 
         Both ``%pip install`` and ``JobEnvironment.dependencies`` accept
         this form (assuming the cluster has egress to the repo host).
         """
-        spec = f"git+{conf.git_repo_url}@{ref}"
-        if subdir:
-            spec = f"{spec}#subdirectory={subdir}"
-        return spec
+        return f"git+{conf.git_repo_url}@{ref}"
+
+    @staticmethod
+    def _pypi_install_spec(profile: VersionProfile, version: str) -> str:
+        """Return a normalized PyPI requirement for a version profile."""
+        return f"{canonicalize_name(profile.distribution)}=={version}"
 
     def install_spec_source_main(self, conf: BCRunnerConf) -> str:
         """Pip-installable spec for the SOURCE main wheel."""
         if conf.install_mode == "pypi":
-            return f"dlt-meta=={conf.source_package_version}"
+            return self._pypi_install_spec(
+                conf.source_profile, conf.source_package_version
+            )
         if conf.install_mode == "git":
             return self._git_install_spec(conf, conf.source_ref)
         return conf.source_main_whl_remote
 
     def install_spec_target_main(self, conf: BCRunnerConf) -> str:
         """Pip-installable spec for the TARGET main wheel."""
-        if conf.target_install_surface == "compat_wheelhouse":
-            return f"dlt-meta=={conf.target_package_version}"
         if conf.install_mode == "pypi":
-            # The published ``dlt-meta`` redirect resolves the primary
-            # ``databricks-labs-sdp-meta`` distribution from live PyPI —
-            # exactly what an existing customer's unpinned upgrade does.
-            return f"dlt-meta=={conf.target_package_version}"
+            return self._pypi_install_spec(
+                conf.target_profile, conf.target_package_version
+            )
         if conf.install_mode == "git":
             return self._git_install_spec(conf, conf.target_ref)
         return conf.target_main_whl_remote
+
+    def _requires_job_migration(self, conf: BCRunnerConf) -> bool:
+        """Return whether Phase 2 changes the onboarding install surface."""
+        return (
+            conf.source_profile.name != conf.target_profile.name
+            or self.install_spec_source_main(conf)
+            != self.install_spec_target_main(conf)
+        )
 
     @staticmethod
     def _notebook_source_for_upload(
         conf: BCRunnerConf,
         notebook_name: str,
         content: bytes,
+        *,
+        phase2: bool,
     ) -> bytes:
-        """Force Phase 2 pip install cells to use the local wheelhouse.
+        """Force live-PyPI runner installs to reinstall the selected wheel.
 
-        Databricks notebook variable substitution passes each ``$var`` as
-        one quoted argument, so a multi-token ``--find-links`` value cannot
-        safely live inside the pipeline configuration. The wheelhouse path
-        is therefore rendered as a literal in the uploaded copy only.
-        ``--no-index`` proves that the uploaded wheelhouse is complete and
-        prevents serverless behavior from depending on public-index egress.
         ``--force-reinstall`` is required because serverless environment
         reuse can expose base-runtime distribution metadata to pip without
         making the corresponding module importable from the isolated
         pipeline environment.
         """
-        if (
-            conf.target_install_surface != "compat_wheelhouse"
-            and conf.install_mode != "pypi"
-        ):
+        if conf.install_mode != "pypi":
             return content
 
-        runner_name = os.path.basename(conf.source_profile.runner_notebook_local_path)
-        if notebook_name not in (runner_name, "validate_phase2.py"):
+        profile = conf.target_profile if phase2 else conf.source_profile
+        runner_name = os.path.basename(profile.runner_notebook_local_path)
+        validator_name = "validate_phase2.py" if phase2 else None
+        if notebook_name not in (runner_name, validator_name):
             return content
 
         text = content.decode("utf-8")
-        if conf.install_mode == "pypi":
-            # Live-PyPI installs keep index access but still need
-            # ``--force-reinstall``: serverless environment reuse can
-            # expose base-runtime (or prior-update) distribution
-            # metadata to pip without making the corresponding module
-            # importable from the isolated pipeline environment, so a
-            # plain install may be skipped as "already satisfied" and
-            # ``databricks.labs.sdp_meta`` then fails to import.
-            replacements = {
-                "%pip install $dlt_meta_whl": (
-                    "%pip install --force-reinstall $dlt_meta_whl"
-                ),
-                "%pip install $target_main_whl": (
-                    "%pip install --force-reinstall $target_main_whl"
-                ),
-            }
-        else:
-            replacements = {
-                "%pip install $dlt_meta_whl": (
-                    f"%pip install --force-reinstall --no-index --find-links "
-                    f"{conf.target_wheelhouse_remote} "
-                    "$dlt_meta_whl"
-                ),
-                "%pip install $target_main_whl": (
-                    f"%pip install --force-reinstall --no-index --find-links "
-                    f"{conf.target_wheelhouse_remote} "
-                    "$target_main_whl"
-                ),
-            }
-        old = next((line for line in replacements if line in text), None)
-        if old is None:
+        wheel_variable = (
+            profile.pipeline_config_whl_key
+            if notebook_name == runner_name
+            else "target_main_whl"
+        )
+        install_line = f"%pip install ${wheel_variable}"
+        if install_line not in text:
             raise RuntimeError(
                 f"Could not locate the expected %pip install line in {notebook_name!r}."
             )
-        return text.replace(old, replacements[old], 1).encode("utf-8")
+        force_reinstall_line = (
+            f"%pip install --force-reinstall ${wheel_variable}"
+        )
+        return text.replace(
+            install_line, force_reinstall_line, 1
+        ).encode("utf-8")
 
     # ----- UC + onboarding generation ------------------------------------
 
@@ -1205,33 +791,9 @@ class BackwardCompatRunner:
             conf.source_main_whl_remote = self.upload_wheel(
                 conf, conf.source_main_whl_local, "source"
             )
-            if conf.target_install_surface == "compat_wheelhouse":
-                # compat_wheelhouse Phase 2 installs
-                # ``dlt-meta==<version>`` via ``--find-links
-                # <wheelhouse dir>`` (see install_spec_target_main and
-                # _notebook_source_for_upload), so the driving path is the
-                # wheelhouse DIRECTORY, not any individual wheel's remote
-                # path. We upload the primary, redirect, and dependency
-                # wheels into that one directory. Both the pipeline notebook
-                # and the Phase 2 legacy-entrypoint Job Environment then
-                # resolve only ``dlt-meta==<version>`` from this directory.
-                conf.target_wheelhouse_remote = (
-                    f"{conf.uc_volume_path}wheels/target/wheelhouse/"
-                )
-                conf.target_main_whl_remote = self.upload_wheel(
-                    conf, conf.target_main_whl_local, "target/wheelhouse"
-                )
-                conf.target_compat_whl_remote = self.upload_wheel(
-                    conf, conf.target_compat_whl_local, "target/wheelhouse"
-                )
-                for dependency_whl in conf.target_dependency_whls_local:
-                    self.upload_wheel(
-                        conf, dependency_whl, "target/wheelhouse"
-                    )
-            else:
-                conf.target_main_whl_remote = self.upload_wheel(
-                    conf, conf.target_main_whl_local, "target"
-                )
+            conf.target_main_whl_remote = self.upload_wheel(
+                conf, conf.target_main_whl_local, "target"
+            )
 
         self.upload_runner_notebooks(conf)
 
@@ -1240,9 +802,8 @@ class BackwardCompatRunner:
     ) -> None:
         """Upload runner notebooks for the requested phase.
 
-        Phase 1 must retain the source wheel's original install command.
-        At the phase boundary, compatibility-wheelhouse mode replaces the
-        uploaded copies with target-only offline install arguments.
+        In PyPI mode, both the Phase 1 source runner and the Phase 2 target
+        runner use force-reinstall to avoid stale serverless environments.
         """
         self.ws.workspace.mkdirs(f"{conf.runners_nb_path}/runners")
         local_runners = f"{conf.int_tests_dir}/notebooks/backward_compat_runners"
@@ -1252,8 +813,9 @@ class BackwardCompatRunner:
                 continue
             with open(local_path, "rb") as fh:
                 content = fh.read()
-                if phase2:
-                    content = self._notebook_source_for_upload(conf, nb, content)
+                content = self._notebook_source_for_upload(
+                    conf, nb, content, phase2=phase2
+                )
                 self.ws.workspace.upload(
                     path=f"{conf.runners_nb_path}/runners/{nb}",
                     format=ImportFormat.SOURCE,
@@ -1264,14 +826,11 @@ class BackwardCompatRunner:
 
     # ----- pipeline create / update --------------------------------------
 
-    def _runner_notebook_filename(self, conf: BCRunnerConf) -> str:
-        """File name (basename) of the SOURCE profile's runner notebook.
-
-        Used by both ``create_pipeline`` (sets the library path) and
-        ``upload_files`` (decides which file to upload from the local
-        ``backward_compat_runners/`` directory).
-        """
-        return os.path.basename(conf.source_profile.runner_notebook_local_path)
+    @staticmethod
+    def _runner_path(conf: BCRunnerConf, profile: VersionProfile) -> str:
+        """Workspace path of a profile's uploaded pipeline runner."""
+        runner = os.path.basename(profile.runner_notebook_local_path)
+        return f"{conf.runners_nb_path}/runners/{runner}"
 
     def _build_phase1_pipeline_config(
         self,
@@ -1314,23 +873,13 @@ class BackwardCompatRunner:
     ) -> Dict[str, str]:
         """Pipeline configuration for Phase 2 (TARGET wheel).
 
-        Same SOURCE-profile pipeline-config key as Phase 1 -- the
-        runner notebook is the customer's source-version runner and
-        only knows the key IT was wired with. We swap the VALUE behind
-        that key from the SOURCE wheel path to the TARGET wheel path
-        so the same notebook installs the new wheel via the same
-        ``%pip install`` line. No second key, no second wheel.
-
-        For LEGACY -> CURRENT cross-namespace upgrades, the TARGET
-        wheel is responsible for bundling its own legacy-namespace
-        compat surface (a real ``src`` package + ``dlt_meta`` package)
-        so the SOURCE runner's ``from src.* import …`` keeps resolving
-        through normal import machinery. The orchestrator does not
-        deliver a separate companion wheel.
+        Phase 2 deliberately uses the TARGET profile's canonical wheel key.
+        The pipeline ID remains unchanged, preserving its checkpoints and
+        tables, while its runner/config contract moves off historical names.
         """
         return {
             "layer": layer,
-            conf.source_profile.pipeline_config_whl_key: (
+            conf.target_profile.pipeline_config_whl_key: (
                 self.install_spec_target_main(conf)
             ),
             f"{layer}.group": group,
@@ -1377,6 +926,7 @@ class BackwardCompatRunner:
         pipeline_id: str,
         target_schema: str,
         expected_configuration: Dict[str, str],
+        expected_profile: VersionProfile,
     ) -> None:
         """Fail fast if the API did not retain the requested pipeline mode.
 
@@ -1389,12 +939,40 @@ class BackwardCompatRunner:
         actual_configuration = getattr(spec, "configuration", None) or {}
 
         errors = []
-        wheel_key = conf.source_profile.pipeline_config_whl_key
+        wheel_key = expected_profile.pipeline_config_whl_key
         if actual_configuration.get(wheel_key) != expected_configuration.get(wheel_key):
             errors.append(
                 f"configuration[{wheel_key!r}]="
                 f"{actual_configuration.get(wheel_key)!r}, expected "
                 f"{expected_configuration.get(wheel_key)!r}"
+            )
+        unexpected_wheel_keys = {
+            profile.pipeline_config_whl_key
+            for profile in KNOWN_PROFILES.values()
+            if profile.pipeline_config_whl_key != wheel_key
+        }
+        retained_wheel_keys = sorted(
+            key for key in unexpected_wheel_keys
+            if key in actual_configuration
+        )
+        if retained_wheel_keys:
+            errors.append(
+                "legacy/foreign wheel configuration keys remain: "
+                f"{retained_wheel_keys}"
+            )
+        expected_runner = os.path.splitext(os.path.basename(
+            expected_profile.runner_notebook_local_path
+        ))[0]
+        actual_notebooks = [
+            os.path.splitext(os.path.basename(library.notebook.path))[0]
+            for library in (getattr(spec, "libraries", None) or [])
+            if getattr(library, "notebook", None)
+            and getattr(library.notebook, "path", None)
+        ]
+        if actual_notebooks != [expected_runner]:
+            errors.append(
+                f"notebook libraries={actual_notebooks!r}, expected "
+                f"[{expected_runner!r}]"
             )
 
         if conf.is_standard_legacy_mode:
@@ -1443,9 +1021,7 @@ class BackwardCompatRunner:
         """
         configuration = self._build_phase1_pipeline_config(conf, layer, group)
         conf._phase1_pipeline_configs[name] = configuration
-        runner_path = (
-            f"{conf.runners_nb_path}/runners/{self._runner_notebook_filename(conf)}"
-        )
+        runner_path = self._runner_path(conf, conf.source_profile)
         create_kwargs = {
             "catalog": conf.uc_catalog_name,
             "name": name,
@@ -1464,7 +1040,11 @@ class BackwardCompatRunner:
         if created is None or not created.pipeline_id:
             raise RuntimeError(f"Pipeline {name!r} creation failed")
         self._verify_pipeline_mode(
-            conf, created.pipeline_id, target_schema, configuration
+            conf,
+            created.pipeline_id,
+            target_schema,
+            configuration,
+            conf.source_profile,
         )
         print(f"  created pipeline {name!r} -> {created.pipeline_id}")
         return created.pipeline_id
@@ -1493,30 +1073,18 @@ class BackwardCompatRunner:
         )
 
     def swap_pipelines_to_target(self, conf: BCRunnerConf) -> None:
-        """Update every pipeline's configuration to point at TARGET wheel.
+        """Move existing pipelines to the canonical TARGET runner/config.
 
-        Pipeline IDs and DLT checkpoints are preserved; only the value
-        behind the SOURCE-defined pipeline-config key changes (from
-        SOURCE wheel path to TARGET wheel path). The runner notebook,
-        the libraries list, the publishing destination, and every other
-        pipeline attribute stay byte-identical.
-
-        Note on whl-typed PipelineLibrary entries: serverless DLT
-        rejects them with ``InvalidParameterValue: Whl libraries are
-        not supported``, so the legacy-namespace compat surface cannot
-        be delivered as a separate pipeline library. Bundling it
-        directly into the main wheel sidesteps that: the wheel ships a
-        real top-level ``src`` package, so after ``%pip install`` the
-        runner's ``from src.* import …`` resolves through normal import
-        machinery -- no separate library, and no reliance on a ``.pth``
-        startup hook (which serverless ``%pip install`` would not fire
-        anyway).
+        Pipeline IDs, publishing destinations, tables, and checkpoints are
+        preserved. The notebook library and wheel key are intentionally
+        replaced at the phase boundary.
         """
         targets = (
             (conf.bronze_a1_pipeline_id, "bronze", "A1", conf.bronze_schema),
             (conf.bronze_a2_pipeline_id, "bronze", "A2", conf.bronze_schema),
             (conf.silver_pipeline_id, "silver", "A1", conf.silver_schema),
         )
+        target_runner_path = self._runner_path(conf, conf.target_profile)
         for pid, layer, group, target_schema in targets:
             config = self._build_phase2_pipeline_config(conf, layer, group)
             existing = self.ws.pipelines.get(pid)
@@ -1525,10 +1093,20 @@ class BackwardCompatRunner:
                 catalog=existing.spec.catalog,
                 name=existing.spec.name,
                 configuration=config,
-                libraries=existing.spec.libraries,
+                libraries=[
+                    PipelineLibrary(
+                        notebook=NotebookLibrary(path=target_runner_path)
+                    )
+                ],
                 **self._pipeline_execution_kwargs(conf, target_schema),
             )
-            self._verify_pipeline_mode(conf, pid, target_schema, config)
+            self._verify_pipeline_mode(
+                conf,
+                pid,
+                target_schema,
+                config,
+                conf.target_profile,
+            )
             print(
                 f"  swapped pipeline {pid} -> "
                 f"{conf.target_profile.name} wheel spec"
@@ -1662,64 +1240,214 @@ class BackwardCompatRunner:
             tasks=tasks,
         )
 
-    def _phase2_legacy_entrypoint_dependencies(
+    def migrate_phase1_job_to_target(
         self, conf: BCRunnerConf
-    ) -> List[str]:
-        """Dependencies for exercising the target ``dlt_meta:run`` contract."""
-        if not conf.is_cross_namespace_upgrade:
-            return []
-        if conf.target_install_surface == "compat_wheelhouse":
-            required = {
-                "target wheelhouse": conf.target_wheelhouse_remote,
-                "target package version": conf.target_package_version,
-            }
-            missing = [name for name, value in required.items() if not value]
-            if missing:
-                raise ValueError(
-                    "Cannot test the target dlt_meta wheel entry point; "
-                    f"missing {', '.join(missing)}"
+    ) -> jobs.JobSettings:
+        """Migrate and verify existing wheel-task metadata in place.
+
+        The Phase 1 job models a customer's existing onboarding job. After
+        Phase 1 completes, retain its job ID and task graph while replacing
+        the source distribution, environment dependency, and environment
+        runtime version with the target profile's canonical values.
+        """
+        if conf.phase1_job_id is None:
+            raise RuntimeError("Phase 1 job ID is unavailable for migration")
+
+        existing = self.ws.jobs.get(conf.phase1_job_id)
+        settings = existing.settings
+        tasks = copy.deepcopy(settings.tasks or [])
+        environments = copy.deepcopy(settings.environments or [])
+        wheel_tasks = [
+            task for task in tasks
+            if task.python_wheel_task is not None
+        ]
+        if not wheel_tasks:
+            raise RuntimeError(
+                f"Phase 1 job {conf.phase1_job_id} has no Python wheel tasks "
+                "to migrate"
+            )
+
+        source_install_spec = self.install_spec_source_main(conf)
+        target_install_spec = self.install_spec_target_main(conf)
+        wheel_environment_keys = {
+            task.environment_key for task in wheel_tasks
+            if task.environment_key
+        }
+        for task in wheel_tasks:
+            task.python_wheel_task.package_name = (
+                conf.target_profile.distribution
+            )
+        for environment in environments:
+            if environment.environment_key not in wheel_environment_keys:
+                continue
+            if environment.spec is None:
+                raise RuntimeError(
+                    f"Job environment {environment.environment_key!r} "
+                    "has no environment spec"
                 )
-            return [
-                "--no-index",
-                f"--find-links={conf.target_wheelhouse_remote}",
-                f"dlt-meta=={conf.target_package_version}",
+            dependencies = list(environment.spec.dependencies or [])
+            if source_install_spec not in dependencies:
+                raise RuntimeError(
+                    f"Job environment {environment.environment_key!r} does "
+                    f"not contain source dependency {source_install_spec!r}"
+                )
+            environment.spec.environment_version = "2"
+            environment.spec.client = None
+            environment.spec.dependencies = [
+                target_install_spec
+                if dependency == source_install_spec
+                else dependency
+                for dependency in dependencies
             ]
-        if conf.install_mode == "pypi":
-            return [self.install_spec_target_main(conf)]
-        return []
+
+        self.ws.jobs.update(
+            job_id=conf.phase1_job_id,
+            new_settings=jobs.JobSettings(
+                tasks=tasks,
+                environments=environments,
+            ),
+        )
+
+        migrated = self.ws.jobs.get(conf.phase1_job_id).settings
+        migrated_wheel_tasks = [
+            task for task in (migrated.tasks or [])
+            if task.python_wheel_task is not None
+        ]
+        wrong_packages = {
+            task.python_wheel_task.package_name
+            for task in migrated_wheel_tasks
+            if task.python_wheel_task.package_name
+            != conf.target_profile.distribution
+        }
+        if len(migrated_wheel_tasks) != len(wheel_tasks) or wrong_packages:
+            raise RuntimeError(
+                f"Job {conf.phase1_job_id} did not retain canonical wheel "
+                f"task package metadata; unexpected packages={wrong_packages}"
+            )
+        migrated_environments = {
+            environment.environment_key: environment
+            for environment in (migrated.environments or [])
+        }
+        expected_dependencies = {
+            environment.environment_key: list(
+                environment.spec.dependencies or []
+            )
+            for environment in environments
+            if (
+                environment.environment_key in wheel_environment_keys
+                and environment.spec is not None
+            )
+        }
+        for environment_key in wheel_environment_keys:
+            environment = migrated_environments.get(environment_key)
+            dependencies = (
+                environment.spec.dependencies
+                if environment is not None and environment.spec is not None
+                else None
+            )
+            environment_version = (
+                environment.spec.environment_version
+                if environment is not None and environment.spec is not None
+                else None
+            )
+            client = (
+                environment.spec.client
+                if environment is not None and environment.spec is not None
+                else None
+            )
+            if environment_version != "2" and client != "2":
+                raise RuntimeError(
+                    f"Job environment {environment_key!r} has "
+                    f"environment_version={environment_version!r} and "
+                    f"client={client!r}; expected either field to be '2'"
+                )
+            expected = expected_dependencies[environment_key]
+            if dependencies != expected:
+                raise RuntimeError(
+                    f"Job environment {environment_key!r} dependencies="
+                    f"{dependencies!r}, expected {expected!r}"
+                )
+        print(
+            f"  migrated job {conf.phase1_job_id} wheel tasks -> "
+            f"{conf.target_profile.distribution}"
+        )
+        return migrated
+
+    def run_migrated_onboarding_smoke(
+        self,
+        conf: BCRunnerConf,
+        settings: jobs.JobSettings,
+    ) -> None:
+        """Run one migrated onboarding task without changing Phase 1 state."""
+        if conf.phase1_job_id is None:
+            raise RuntimeError("Phase 1 job ID is unavailable for smoke test")
+
+        source_task = next(
+            (
+                task
+                for task in (settings.tasks or [])
+                if (
+                    task.task_key == "phase1_onboard_A1"
+                    and task.python_wheel_task is not None
+                )
+            ),
+            None,
+        )
+        if source_task is None:
+            raise RuntimeError(
+                f"Migrated job {conf.phase1_job_id} has no "
+                "phase1_onboard_A1 wheel task to test"
+            )
+        named_parameters = dict(
+            source_task.python_wheel_task.named_parameters or {}
+        )
+        named_parameters["overwrite"] = "False"
+        python_wheel_task = copy.deepcopy(source_task.python_wheel_task)
+        python_wheel_task.named_parameters = named_parameters
+        task = jobs.SubmitTask(
+            task_key="migrated_onboarding_smoke",
+            python_wheel_task=python_wheel_task,
+            environment_key=source_task.environment_key,
+            depends_on=None,
+        )
+
+        environment = next(
+            (
+                copy.deepcopy(candidate)
+                for candidate in (settings.environments or [])
+                if candidate.environment_key == task.environment_key
+            ),
+            None,
+        )
+        if environment is None:
+            raise RuntimeError(
+                f"Migrated task environment {task.environment_key!r} "
+                "is unavailable"
+            )
+
+        print("=== Running migrated onboarding wheel-task smoke test ===")
+        run = self.ws.jobs.submit(
+            run_name=f"backward-compat-migrated-onboarding-{conf.run_id}",
+            tasks=[task],
+            environments=[environment],
+        ).result(timeout=timedelta(minutes=self.phase_timeout_min))
+        result_state = run.state.result_state if run.state else None
+        if result_state != jobs.RunResultState.SUCCESS:
+            raise RuntimeError(
+                "Migrated onboarding wheel-task smoke test finished with "
+                f"result_state={result_state!r}, expected SUCCESS"
+            )
+        print("=== Migrated onboarding wheel-task smoke test succeeded ===")
 
     def build_phase2_job(self, conf: BCRunnerConf):
         """Run optional onboarding checks, incremental pipelines, and validation.
 
         The dataflowspec persisted by Phase 1 remains the input to the target
-        pipelines. For cross-namespace upgrades installed through the
-        compatibility distribution, Phase 2 first re-runs A1 onboarding with
-        ``overwrite=False`` using the legacy ``dlt_meta`` package name and
-        ``run`` entry point. This proves an existing v0.0.10 wheel task remains
-        executable after the target wheel swap without replacing Phase 1 state.
-
-        ``phase2_append_onboarding`` additionally runs target-wheel onboarding
-        twice against the physical Phase 1 tables, proving Issue #460 schema
-        evolution and idempotency without changing the default test path.
+        pipelines. ``phase2_append_onboarding`` runs canonical target-wheel
+        onboarding twice against the physical Phase 1 tables, proving Issue
+        #460 schema evolution and idempotency without replacing Phase 1 state.
         """
-        legacy_dependencies = self._phase2_legacy_entrypoint_dependencies(conf)
-        legacy_env_key = "bc_phase2_legacy_entrypoint_env"
         environments = []
-        if legacy_dependencies:
-            environments.append(
-                jobs.JobEnvironment(
-                    environment_key=legacy_env_key,
-                    spec=compute.Environment(
-                        # Client v2 isolates task dependencies from the
-                        # serverless kernel's core packages. Client v1 lets
-                        # the target wheel's databricks-sdk dependency shadow
-                        # dbruntime dependencies and can prevent Python from
-                        # restarting before the entry point is invoked.
-                        client="2",
-                        dependencies=legacy_dependencies,
-                    ),
-                )
-            )
         bronze_dependency = "phase2_add_incremental"
         tasks = [
             jobs.Task(
@@ -1737,50 +1465,6 @@ class BackwardCompatRunner:
                 ),
             ),
         ]
-        if legacy_dependencies:
-            tasks.append(
-                jobs.Task(
-                    task_key="phase2_legacy_entrypoint_onboard",
-                    description=(
-                        f"Phase 2 ({conf.target_profile.name} / "
-                        f"{conf.target_ref}): exercise legacy dlt_meta:run"
-                    ),
-                    depends_on=[
-                        jobs.TaskDependency(
-                            task_key="phase2_add_incremental"
-                        )
-                    ],
-                    environment_key=legacy_env_key,
-                    python_wheel_task=jobs.PythonWheelTask(
-                        package_name="dlt_meta",
-                        entry_point="run",
-                        named_parameters={
-                            "database": (
-                                f"{conf.uc_catalog_name}."
-                                f"{conf.sdp_meta_schema}"
-                            ),
-                            "bronze_dataflowspec_table": (
-                                "bronze_dataflowspec"
-                            ),
-                            "silver_dataflowspec_table": (
-                                "silver_dataflowspec"
-                            ),
-                            "import_author": "backward_compat",
-                            "version": "v1",
-                            "env": "it",
-                            "uc_enabled": "True",
-                            "onboard_layer": "bronze_silver",
-                            "onboarding_file_path": (
-                                f"{conf.uc_volume_path}"
-                                f"{conf.a1_onboarding_file}"
-                            ),
-                            "overwrite": "False",
-                        },
-                    ),
-                )
-            )
-            bronze_dependency = "phase2_legacy_entrypoint_onboard"
-
         if conf.phase2_append_onboarding:
             environment_key = "bc_phase2_onboarding_env"
             environments.append(
@@ -1872,23 +1556,14 @@ class BackwardCompatRunner:
                         # validate_phase2 is a regular notebook_task (not
                         # a DLT runner), so it must %pip install the
                         # TARGET wheel itself before doing
-                        # ``from src.dataflow_spec import …``.
+                        # canonical package imports.
                         "target_main_whl": self.install_spec_target_main(conf),
-                        "target_install_surface": conf.target_install_surface,
                         "source_profile": conf.source_profile.name,
                         "source_ref": conf.source_ref,
                         "target_ref": conf.target_ref,
                         "phase2_append_onboarding": str(
                             conf.phase2_append_onboarding
                         ),
-                        "phase2_legacy_entrypoint_onboarding": str(
-                            bool(legacy_dependencies)
-                        ),
-                        # None in primary_wheel mode (validate_phase2 only
-                        # reads this in compat_wheelhouse mode, where
-                        # build_wheels has pinned it); coerce so the SDK
-                        # never sees a null base-parameter value.
-                        "target_package_version": conf.target_package_version or "",
                     },
                 ),
             ),
@@ -1997,7 +1672,7 @@ class BackwardCompatRunner:
                         except Exception as exc:
                             print(f"    warn: table delete failed: {exc}")
                     try:
-                        self.ws.schemas.delete(schema.full_name)
+                        self.ws.schemas.delete(schema.full_name, force=True)
                     except Exception as exc:
                         print(f"  warn: schema delete failed: {exc}")
         print("=== Cleanup complete ===")
@@ -2019,33 +1694,20 @@ class BackwardCompatRunner:
             if conf.build_target_from_worktree
             else ""
         )
+        target_note = (
+            " [TARGET: main pre-release]"
+            if conf.target_ref == "main"
+            else ""
+        )
         print(
             f"=== Backward-compat run_id={conf.run_id} "
             f"source={conf.source_ref!r} ({conf.source_profile.name}) -> "
             f"target={conf.target_ref!r} ({conf.target_profile.name}) "
             f"install_mode={conf.install_mode!r} "
-            f"target_install_surface={conf.target_install_surface!r}"
-            f"{worktree_note} ==="
+            f"{worktree_note}{target_note} ==="
         )
-        if conf.is_cross_namespace_upgrade:
-            install_note = (
-                "Phase 2 runs one %pip command that resolves the dlt-meta "
-                "redirect, primary, and runtime dependency wheels from the "
-                "local wheelhouse without public-index access."
-                if conf.target_install_surface == "compat_wheelhouse"
-                else "Phase 2 installs ONE wheel and runs ONE %pip install."
-            )
-            print(
-                f"  cross-namespace upgrade "
-                f"({conf.source_profile.runner_imports_namespace!r} -> "
-                f"{conf.target_profile.runner_imports_namespace!r}): "
-                "the TARGET wheel is expected to bundle a legacy-namespace "
-                "compat surface (a real `src` package + `dlt_meta` package "
-                "re-exporting `databricks.labs.sdp_meta.*`) so the source "
-                "runner notebook's `from src.* import …` keeps resolving "
-                f"via normal import machinery. {install_note}"
-            )
         rc = 0
+        migrated_settings = None
         try:
             self.build_wheels(conf)
             self.initialize_uc_resources(conf)
@@ -2063,11 +1725,11 @@ class BackwardCompatRunner:
                 conf.phase1_output_ws,
                 f"backward_compat_phase1_{conf.run_id}.csv",
             )
+            if self._requires_job_migration(conf):
+                print("=== Migrating existing job wheel-task metadata ===")
+                migrated_settings = self.migrate_phase1_job_to_target(conf)
 
-            if (
-                conf.target_install_surface == "compat_wheelhouse"
-                or conf.install_mode == "pypi"
-            ):
+            if conf.install_mode == "pypi":
                 print("=== Uploading Phase 2 target-install runner notebooks ===")
                 self.upload_runner_notebooks(conf, phase2=True)
 
@@ -2088,6 +1750,13 @@ class BackwardCompatRunner:
                 conf.phase2_output_ws,
                 f"backward_compat_phase2_{conf.run_id}.csv",
             )
+            if (
+                migrated_settings is not None
+                and not conf.phase2_append_onboarding
+            ):
+                self.run_migrated_onboarding_smoke(
+                    conf, migrated_settings
+                )
         except Exception:
             traceback.print_exc()
             rc = 1
@@ -2172,8 +1841,9 @@ def parse_cli() -> dict:
             "resolve via 'pip install git+<repo>@<ref>'. Faster local "
             "iteration; the cluster MUST have egress to --git_repo_url. "
             "'pypi': post-release verification -- no build, no upload; "
-            "Phase 1 installs dlt-meta==<source_package_version> and "
-            "Phase 2 installs dlt-meta==<target_package_version> from "
+            "Phase 1 installs the SOURCE profile's distribution and "
+            "Phase 2 installs databricks-labs-sdp-meta=="
+            "<target_package_version> from "
             "the LIVE PyPI index, proving the published packages "
             "upgrade a running deployment in place. Versions derive "
             "from --source_version/--target_version tags (v stripped) "
@@ -2184,7 +1854,7 @@ def parse_cli() -> dict:
         "--source_package_version",
         default=None,
         help=(
-            "Exact dlt-meta version Phase 1 installs when "
+            "Exact SOURCE package version Phase 1 installs when "
             "--install_mode=pypi (e.g. 0.0.10 -- no 'v' prefix; pip "
             "versions never carry one). Omit to derive it from "
             "--source_version."
@@ -2206,44 +1876,17 @@ def parse_cli() -> dict:
             "working tree instead of from --target_version. The "
             "SOURCE wheel still comes from --source_version (as a "
             "released customer would have). Use ONLY for iterating on "
-            "uncommitted target-side changes (bundled compat shim, "
-            "post-rename CLI aliases, etc.) before they're pushed. "
+            "uncommitted target-side changes before they're pushed. "
             "Requires --install_mode=local; the produced wheel is "
             "uploaded to UC volume the same way ref-built wheels are."
-        ),
-    )
-    p.add_argument(
-        "--target_install_surface",
-        default="primary_wheel",
-        choices=("primary_wheel", "compat_wheelhouse"),
-        help=(
-            "How Phase 2 installs the target. 'primary_wheel' (default) "
-            "installs the target wheel directly. 'compat_wheelhouse' "
-            "builds both local target wheels, downloads their runtime "
-            "dependencies, and installs dlt-meta through offline pip "
-            "resolution from their UC Volume directory."
         ),
     )
     p.add_argument(
         "--target_package_version",
         default=None,
         help=(
-            "Exact dlt-meta version installed by compat_wheelhouse. "
-            "Omit (the default) to derive it from the version the TARGET "
-            "wheels actually build -- the run then also verifies the "
-            "primary and redirect wheels agree. Pass a value only to "
-            "assert a specific version (a mismatch fails the run)."
-        ),
-    )
-    p.add_argument(
-        "--compat_python_version",
-        default=BCRunnerConf.__dataclass_fields__["compat_python_version"].default,
-        help=(
-            "CPython minor version the compat_wheelhouse is downloaded "
-            "for (default: %(default)s). Drives pip download's "
-            "--python-version and the cpXY ABI tag. Set this to match the "
-            "serverless/DBR interpreter when it differs, so ABI-specific "
-            "dependency wheels resolve for the right interpreter."
+            "Exact databricks-labs-sdp-meta version Phase 2 installs when "
+            "--install_mode=pypi. Omit to derive it from --target_version."
         ),
     )
     p.add_argument(

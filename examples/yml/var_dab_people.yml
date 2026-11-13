@@ -2,11 +2,11 @@ variables:
   dev_catalog_name:
     description: The catalog name for development environment
     type: string
-    default: ravi_sdp_meta_uc
+    default: sdp_meta_uc
   prod_catalog_name:
     description: The catalog name for production environment
     type: string
-    default: ravi_sdp_meta_uc
+    default: sdp_meta_uc
   sdp_meta_schema:
     description: The schema name for the pipelines
     type: string
@@ -38,15 +38,15 @@ variables:
   author:
     description: The author of the import
     type: string
-    default: ravi.gawai@databricks.com
+    default: user@databricks.com
   people_onboarding_file_path:
     description: The path to the onboarding file for people
     type: string
-    default: /Volumes/ravi_sdp_meta_uc/sdp_meta_dataflowspecs_demo_6d5fe507bd764d978bf89db089a570d8/sdp_meta_files/demo/dabs/conf/onboarding_bronze_silver_people.json
+    default: /Volumes/sdp_meta_uc/sdp_meta_dataflowspecs_demo_6d5fe507bd764d978bf89db089a570d8/sdp_meta_files/demo/dabs/conf/onboarding_bronze_silver_people.json
   people_fanout_onboarding_file_path:
     description: The path to the onboarding file for people
     type: string
-    default: /Volumes/ravi_sdp_meta_uc/sdp_meta_dataflowspecs_demo_6d5fe507bd764d978bf89db089a570d8/sdp_meta_files/demo/dabs/conf/onboarding_silver_fanout_people.json
+    default: /Volumes/sdp_meta_uc/sdp_meta_dataflowspecs_demo_6d5fe507bd764d978bf89db089a570d8/sdp_meta_files/demo/dabs/conf/onboarding_silver_fanout_people.json
   dummy_param:
     description: A dummy parameter for testing purposes
     type: string

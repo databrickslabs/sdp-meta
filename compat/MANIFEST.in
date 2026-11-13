@@ -1,4 +1,0 @@
-# ``python -m build`` builds the sdist first and then builds the wheel FROM
-# that sdist, so dlt_meta.pth must be in the sdist or
-# ``bdist_wheel_with_pth_file.write_wheelfile`` (see setup.py) cannot find it.
-include dlt_meta.pth
