@@ -180,7 +180,7 @@ if (Test-Path -LiteralPath (Join-Path $RepoRoot 'app.yaml') -PathType Leaf) {
 }
 
 # -- Stage repo into a temp directory ----------------------------------------
-$stagingName = 'dltmeta-deploy.' + [System.IO.Path]::GetRandomFileName()
+$stagingName = 'sdpmeta-deploy.' + [System.IO.Path]::GetRandomFileName()
 $Staging     = Join-Path ([System.IO.Path]::GetTempPath()) $stagingName
 New-Item -ItemType Directory -Path $Staging -Force | Out-Null
 
@@ -190,7 +190,6 @@ try {
     $RuntimeDirs = @(
         'src',                # wheel build source (python setup.py bdist_wheel)
         'examples',           # packaged MCP JSON/YAML examples required by setup.py
-        'compat',             # dlt_meta and src compatibility packages used by setup.py
         'demo',               # launch_*_demo.py + conf templates + sample data
         'integration_tests',  # imported by every demo launcher
         'databricks_app'      # the Flask app itself

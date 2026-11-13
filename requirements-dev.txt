@@ -20,7 +20,7 @@ delta-spark==3.0.0
 pytest>=9.1.1
 coverage>=7.16.1
 pyspark==3.5.5
-# Parse and compare wheel/setup requirement metadata in packaging tests.
+# Parse wheel metadata and normalize backward-compat integration dependencies.
 packaging>=24.0,<27
 
 # Integration-test CLI (IT_REQUIREMENTS in setup.py)

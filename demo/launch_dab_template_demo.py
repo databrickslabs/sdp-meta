@@ -550,7 +550,7 @@ def _upload_delta_seed_notebook(ws) -> str:
             "Did you delete demo/dab_template_demo/seed/seed_delta_source.py?"
         )
     me = ws.current_user.me().user_name
-    target_dir = f"/Users/{me}/.dlt_meta_demo"
+    target_dir = f"/Users/{me}/.sdp_meta_demo"
     ws.workspace.mkdirs(target_dir)
     target = f"{target_dir}/seed_delta_source"
     print(f"[STAGE 4 prep] Uploading seed notebook to {target}")
@@ -581,7 +581,7 @@ def _run_delta_seed_notebook(ws, *, notebook_path: str, source_catalog: str,
 
     print("[STAGE 4 prep] Submitting one-time seed job (serverless) ...")
     waiter = ws.jobs.submit(
-        run_name=f"dlt-meta-demo-seed-delta-source-{source_schema}",
+        run_name=f"sdp-meta-demo-seed-delta-source-{source_schema}",
         tasks=[
             jobs.SubmitTask(
                 task_key="seed_delta_source",
@@ -882,7 +882,7 @@ def stage_bundle_init(scenario: Scenario, out_dir: Path, uc_catalog_name: str,
 
     # DAB respects .gitignore from the nearest enclosing .git directory upward
     # when deciding what to upload. The launcher scaffolds bundles under
-    # `demo_runs/`, which is .gitignored at the dlt-meta repo root -- so
+    # `demo_runs/`, which is .gitignored at the sdp-meta repo root -- so
     # without our own git boundary, DAB sees EVERY file in the bundle as
     # ignored, syncs zero files, and the pipeline fails at runtime with
     # `NOTEBOOK_NOT_FOUND_EXCEPTION` because notebooks/init_sdp_meta_pipeline

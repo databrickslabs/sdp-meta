@@ -1156,7 +1156,7 @@ def _sdp_meta_sanity_checks(
         errors.append(
             "variables.yml: `sdp_meta_dependency` is still the `__SET_ME__` "
             "sentinel. Replace it with either a PyPI coordinate (e.g. "
-            "`databricks-labs-sdp-meta==0.1.1`) or a UC-volume wheel path "
+            "`databricks-labs-sdp-meta==0.2.0`) or a UC-volume wheel path "
             "(produced by `databricks labs sdp-meta bundle-prepare-wheel`)."
         )
     elif wheel_source == "volume_path" and not sdp_meta_dep.startswith("/Volumes/"):

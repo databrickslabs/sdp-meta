@@ -1,52 +1,9 @@
-"""Setup file for SDP-META (primary package).
-
-This is the primary package following Databricks Labs namespace conventions.
-Package structure: databricks.labs.sdp_meta
-
-For backwards compatibility wrapper (dlt-meta package), see the compat/ directory.
-
-Legacy v0.0.10 ``src.*`` import compatibility
----------------------------------------------
-The wheel produced by this setup also bundles two compat surfaces
-sourced from ``compat/``:
-
-  * ``dlt_meta`` (from ``compat/dlt_meta/``) -- flat re-export
-    package for v0.0.10 users who already migrated to
-    ``from dlt_meta import …``. Shipping it inside the v0.1.x main
-    wheel means ``pip install databricks-labs-sdp-meta`` is the only
-    thing customers need; they don't have to track a second package.
-  * ``src`` (from ``compat/src/``) -- real Python package whose
-    ``__init__.py`` populates ``sys.modules`` with ``src.<sub>`` ->
-    ``databricks.labs.sdp_meta.<sub>`` aliases at import time. This
-    is what makes a v0.0.10 customer's runner notebook keep working
-    unchanged after their wheel is upgraded to v0.1.x. The
-    customer's ``from src.dataflow_pipeline import …`` line resolves
-    through normal Python import machinery: load ``src/__init__.py``,
-    register aliases, fetch the canonical module from
-    ``sys.modules``.
-
-The earlier iteration of this surface relied on a ``dlt_meta.pth``
-file at the wheel's purelib root to lazy-load the alias map at
-interpreter startup via CPython's ``site.py``. That worked on a
-normal ``pip install`` followed by a fresh ``python`` process, but
-serverless DLT's ``%pip install`` magic does NOT trigger a fresh
-``site.py`` ``.pth`` scan -- it lays files into site-packages and
-hands the next cell back to the SAME interpreter, so the freshly-
-installed ``.pth`` is silently ignored. Resolving through a real
-package (``compat/src/``) sidesteps the ``.pth`` lifecycle entirely.
-
-The standalone ``compat/`` package remains a no-op PyPI redirect that directly
-declares the primary package (``databricks-labs-sdp-meta>=0.1.1,<0.2.0``) and
-its runtime requirements, so ``pip install dlt-meta`` also works in serverless
-Job Environment client 2, which does not reliably expose second-level
-transitive dependencies. The primary dependency owns the ``dlt_meta`` and
-``src`` compatibility files.
-"""
+"""Setup file for the canonical SDP-META package."""
 from pathlib import Path
 import shutil
 
 import re
-from setuptools import find_namespace_packages, find_packages, setup
+from setuptools import find_namespace_packages, setup
 from setuptools.command.build_py import build_py
 
 with open("README.md", "r") as fh:
@@ -85,7 +42,10 @@ DEV_REQUIREMENTS = [
     "pyspark==3.5.5"
 ]
 
-IT_REQUIREMENTS = ["typer[all]==0.27.2"]
+IT_REQUIREMENTS = [
+    "typer[all]==0.27.2",
+    "packaging>=24.0,<27",
+]
 
 MCP_REQUIREMENTS = ["mcp>=2.0.0,<3.0"]
 
@@ -115,13 +75,19 @@ class BuildPyWithExamples(build_py):
             raise FileNotFoundError(
                 f"Cannot package DAB templates: expected {templates_source}."
             )
-        package_root = (
-            Path(self.build_lib) / "databricks" / "labs" / "sdp_meta"
+        build_lib = Path(self.build_lib)
+        # Incremental builds can retain any package or module deleted from the
+        # source tree. Clean only the package roots this project owns: deleting
+        # all of build_lib could remove output produced by another build step.
+        owned_build_roots = (
+            build_lib / "databricks" / "labs" / "sdp_meta",
+            build_lib / "dlt_meta",
+            build_lib / "src",
         )
-        # Incremental builds can retain deleted modules (including the removed
-        # ``sdp_meta.mcp`` package). Rebuild this package subtree from source.
-        if package_root.exists():
-            shutil.rmtree(package_root)
+        for owned_build_root in owned_build_roots:
+            if owned_build_root.exists():
+                shutil.rmtree(owned_build_root)
+        package_root = build_lib / "databricks" / "labs" / "sdp_meta"
         super().run()
         destination_root = package_root / "_packaged_examples"
         for directory_name in ("json", "yml"):
@@ -139,14 +105,11 @@ class BuildPyWithExamples(build_py):
 
 setup(
     name="databricks-labs-sdp-meta",
-    version="0.1.1",
-    # databricks-sdk>=0.138.0 requires Python 3.10+. The ceiling matches
-    # compat/setup.py: the pyspark 3.5.5 stack this framework runs against is
-    # incompatible with Python 3.13+ (pickle/cloudpickle changes; see
-    # GETTING_STARTED.md prerequisites). Keeping both packages' bounds
-    # identical means `pip install dlt-meta` and
-    # `pip install databricks-labs-sdp-meta` succeed/fail on the same
-    # interpreters. Re-evaluate when pyspark ships a 3.13-compatible release.
+    version="0.2.0",
+    # databricks-sdk>=0.138.0 requires Python 3.10+. The pyspark 3.5.5 stack
+    # this framework runs against is incompatible with Python 3.13+
+    # (pickle/cloudpickle changes). Re-evaluate when the runtime stack supports
+    # Python 3.13.
     python_requires=">=3.10, <3.13",
     # No ``setup_requires``: it makes setuptools fetch build deps from PyPI
     # mid-build, which breaks the release workflow's ``--no-isolation`` build
@@ -158,7 +121,7 @@ setup(
     author="Ravi Gawai",
     author_email="databrickslabs@databricks.com",
     license="Databricks License",
-    description="Databricks Labs SDP-META Framework (formerly DLT-META)",
+    description="Databricks Labs SDP-META Framework",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/databrickslabs/sdp-meta",
@@ -168,31 +131,8 @@ setup(
         "Issues": "https://github.com/databrickslabs/sdp-meta/issues",
         "Changelog": "https://github.com/databrickslabs/sdp-meta/blob/main/CHANGELOG.md",
     },
-    # Three roots, one wheel:
-    #   ``""`` -> ``src/``           : canonical ``databricks.labs.sdp_meta``
-    #   ``dlt_meta`` -> ``compat/dlt_meta``  : flat re-export shim
-    #   ``src`` -> ``compat/src``    : v0.0.10 ``src.*`` re-export package
-    #
-    # The exact-match keys (``dlt_meta``, ``src``) win over the ``""``
-    # glob, so the source-layout ``src/`` dir (which holds the
-    # canonical namespace) is scanned via ``find_namespace_packages``
-    # while the legacy ``src`` PACKAGE is sourced from
-    # ``compat/src/__init__.py``. There is no on-disk collision -- the
-    # source-layout ``src/`` directory has no ``__init__.py`` so
-    # ``find_namespace_packages(where="src")`` can't accidentally pick
-    # it up as a package itself.
-    package_dir={
-        "": "src",
-        "dlt_meta": "compat/dlt_meta",
-        "src": "compat/src",
-    },
-    packages=(
-        find_namespace_packages(where="src", include=["databricks.*"])
-        + find_packages(
-            where="compat",
-            include=["dlt_meta", "dlt_meta.*", "src", "src.*"],
-        )
-    ),
+    package_dir={"": "src"},
+    packages=find_namespace_packages(where="src", include=["databricks.*"]),
     entry_points={
         "console_scripts": [
             "sdp-meta=databricks.labs.sdp_meta.__main__:main",

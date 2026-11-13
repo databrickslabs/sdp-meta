@@ -33,12 +33,12 @@ def main():
     # for job in job_list:
     #     print(f"Deleting job:{job.creator_user_name}")
     # workspace_client.jobs.delete(job.job_id)
-    # list = workspace_client.pipelines.list_pipelines(filter="name like 'dlt-meta-integration-test-silver-%'")
+    # list = workspace_client.pipelines.list_pipelines(filter="name like 'sdp-meta-integration-test-silver-%'")
     # print("List of pipelines:")
     # for pipeline in list:
     #     print(f"id = {pipeline.pipeline_id} , name = {pipeline.name}")
     #     workspace_client.pipelines.delete(pipeline.pipeline_id)
-    # list = workspace_client.pipelines.list_pipelines(filter="name like 'dlt-meta-integration-test-silver-%'")
+    # list = workspace_client.pipelines.list_pipelines(filter="name like 'sdp-meta-integration-test-silver-%'")
     # print("List of pipelines:")
     # for pipeline in list:
     #     print(f"id = {pipeline.pipeline_id} , name = {pipeline.name}")

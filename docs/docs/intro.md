@@ -12,7 +12,10 @@ SDP-META is a metadata-driven framework for building automated Bronze and Silver
 <span className="doc-highlight-card__badge">Migration</span>
 <h3>Upgrading from DLT-META?</h3>
 
-The v0.1.0 release renames DLT-META to SDP-META. Existing onboarding JSON/YAML files continue to work, but new installs should use `databricks-labs-sdp-meta`, `databricks labs sdp-meta`, and `databricks.labs.sdp_meta` imports.
+SDP-META was formerly named DLT-META. Version 0.2.0 requires the canonical
+`databricks-labs-sdp-meta` package, `databricks labs sdp-meta` commands, and
+`databricks.labs.sdp_meta` imports. Existing onboarding JSON/YAML can be
+preserved; follow the migration guide before upgrading an old installation.
 
 [Open the step-by-step migration guide →](./operations/migration.md)
 </aside>

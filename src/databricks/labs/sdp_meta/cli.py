@@ -255,7 +255,7 @@ def _path_to_file_uri(local_path: str) -> str:
 
 # Runner notebook template for the SDP/DLT pipeline. The ``{dependency}``
 # placeholder is replaced at deploy time with either:
-#   * a PyPI spec, e.g. ``databricks-labs-sdp-meta==0.1.1``
+#   * a PyPI spec, e.g. ``databricks-labs-sdp-meta==0.2.0``
 #   * a UC Volumes wheel path, e.g.
 #     ``/Volumes/<catalog>/<schema>/<volume>/databricks_labs_sdp_meta-<ver>-py3-none-any.whl``
 # The latter is the recommended path for air-gapped workspaces / private
@@ -269,9 +269,6 @@ layer = spark.conf.get("layer", None)
 from databricks.labs.sdp_meta.dataflow_pipeline import DataflowPipeline
 DataflowPipeline.invoke_dlt_pipeline(spark, layer)
 """
-
-# Backwards compatibility alias (deprecated)
-DLT_META_RUNNER_NOTEBOOK = SDP_META_RUNNER_NOTEBOOK
 
 cloud_node_type_id_dict = {"aws": "i3.xlarge", "azure": "Standard_D3_v2", "gcp": "n1-highmem-4"}
 
@@ -478,11 +475,11 @@ class SDPMeta:
 
     @staticmethod
     def _get_schema_from_json(oc_json: dict) -> str:
-        """Read the schema key from onboarding_job_details.json with backward compatibility.
+        """Read the schema key from onboarding_job_details.json.
 
-        Supports both the new key ``sdp_meta_schema`` and the legacy key
-        ``dlt_meta_schema`` so that JSON files produced by either version
-        of the CLI are accepted.
+        Prefer ``sdp_meta_schema``. Existing files may still use the
+        deprecated ``dlt_meta_schema`` key; it remains readable with a warning.
+        When both forms are present, the canonical key wins.
 
         Args:
             oc_json: Parsed onboarding job details JSON dict.
@@ -491,14 +488,21 @@ class SDPMeta:
             The schema name string.
 
         Raises:
-            KeyError: If neither key is found in the JSON.
+            KeyError: If neither the current nor legacy schema key is found.
         """
         if "sdp_meta_schema" in oc_json:
+            if "dlt_meta_schema" in oc_json:
+                logger.warning(
+                    "Ignoring deprecated key 'dlt_meta_schema' in "
+                    "onboarding_job_details.json because 'sdp_meta_schema' "
+                    "is also present."
+                )
             return oc_json["sdp_meta_schema"]
         if "dlt_meta_schema" in oc_json:
             logger.warning(
-                "Found legacy key 'dlt_meta_schema' in onboarding_job_details.json. "
-                "Please re-run onboarding with SDP-META to update the file."
+                "Reading deprecated key 'dlt_meta_schema' from "
+                "onboarding_job_details.json. Re-run onboarding to persist "
+                "'sdp_meta_schema'."
             )
             return oc_json["dlt_meta_schema"]
         raise KeyError(
@@ -1375,18 +1379,6 @@ def render_onboarding_template(content: str, source_ext: str, substitutions: dic
     return rendered, parsed
 
 
-# Backwards-compatibility alias for v0.0.10 customers.
-#
-# v0.0.10 published the entry-class as ``DLTMeta``; v0.1.0 renamed it to
-# ``SDPMeta``. The ``compat/dlt_meta`` shim's ``src.*`` import alias maps
-# ``src.cli`` to this module, so ``from src.cli import DLTMeta`` resolves
-# only if ``DLTMeta`` is bound here (the shim aliases module objects, not
-# individual symbols). Mirrors the ``DLT_META_RUNNER_NOTEBOOK`` rebind
-# at the top of this file. Will be removed in v0.2.0 alongside the rest
-# of the ``src.*`` shim.
-DLTMeta = SDPMeta
-
-
 def onboard(sdp_meta: SDPMeta, flags: dict = None):
     logger.info("Please answer a couple of questions to for launching SDP META onboarding job")
     flags = flags or {}
@@ -1930,10 +1922,6 @@ MAPPING = {
     "bundle-add-pipeline": bundle_add_pipeline,
     "mcp": mcp,
 }
-
-
-# Backwards compatibility alias for class name (deprecated)
-DLTMeta = SDPMeta
 
 
 def main(raw):

@@ -1,5 +1,5 @@
 # Databricks notebook source
-# Phase 2 validator -- runs AFTER the wheel has been swapped to v0.1.0
+# Phase 2 validator -- runs AFTER the pipeline has migrated to v0.2.0
 # AND a fresh incremental cycle has consumed the Phase 2 seed batch.
 #
 # Three classes of assertions:
@@ -12,7 +12,7 @@
 #       grow by AT LEAST those row deltas (DQE may quarantine some, so
 #       we use >= rather than ==).
 #   (3) Schema compatibility. The dataflowspec persisted by v0.0.10
-#       must read cleanly through v0.1.0's ``BronzeDataflowSpec`` /
+#       must read cleanly through v0.2.0's ``BronzeDataflowSpec`` /
 #       ``SilverDataflowSpec`` dataclasses, with new v0.1.0 fields
 #       materialized with the exact defaults for the exercised path:
 #       read-time backfills use ``None``; target onboarding persists
@@ -22,14 +22,13 @@
 #
 # Together (1)+(2)+(3) prove the customer-pipeline-doesn't-break
 # contract end-to-end: same job, same notebook, same dataflowspec --
-# only the wheel changed, and v0.0.10's persisted state is fully
-# consumable by v0.1.0.
+# the pipeline was migrated in place, and v0.0.10's persisted state is fully
+# consumable by v0.2.0.
 #
 # This notebook is a regular jobs ``notebook_task`` -- not a DLT
 # runner -- so it doesn't get the wheel for free from the pipeline's
-# ``configuration.dlt_meta_whl``. We install the v0.1.0 main wheel
-# explicitly at the top of cell 1 so cell 2's
-# ``from src.dataflow_spec import …`` actually has the package on
+# pipeline configuration. We install the target main wheel explicitly
+# at the top of cell 1 so cell 2's canonical imports have the package on
 # sys.path. Every other path in the notebook lives below the install
 # in cell 2 so it sees the freshly-installed package.
 target_main_whl = dbutils.widgets.get("target_main_whl")
@@ -38,8 +37,6 @@ target_main_whl = dbutils.widgets.get("target_main_whl")
 # COMMAND ----------
 
 import json
-from importlib.metadata import PackageNotFoundError, version
-
 import pandas as pd
 
 run_id = dbutils.widgets.get("run_id")
@@ -51,23 +48,12 @@ output_file_path = dbutils.widgets.get("output_file_path")
 uc_volume_path = dbutils.widgets.get("uc_volume_path").rstrip("/")
 phase2_customer_delta = int(dbutils.widgets.get("phase2_customer_delta"))
 phase2_transaction_delta = int(dbutils.widgets.get("phase2_transaction_delta"))
-target_install_surface = dbutils.widgets.get("target_install_surface")
-target_package_version = dbutils.widgets.get("target_package_version")
 source_profile = dbutils.widgets.get("source_profile")
 source_ref = dbutils.widgets.get("source_ref")
 target_ref = dbutils.widgets.get("target_ref")
 phase2_append_onboarding = (
     dbutils.widgets.get("phase2_append_onboarding").lower() == "true"
 )
-try:
-    phase2_legacy_entrypoint_onboarding = (
-        dbutils.widgets.get("phase2_legacy_entrypoint_onboarding").lower()
-        == "true"
-    )
-except Exception:
-    # Jobs created before this parameter was introduced did not define the
-    # widget. Defaulting to False preserves their pure read-time contract.
-    phase2_legacy_entrypoint_onboarding = False
 
 log_list = []
 log_list.append(
@@ -76,34 +62,6 @@ log_list.append(
 # Validation contract: run_backward_compat_tests.py scans persisted report cells
 # for the exact "Failed!" marker. Keep that wording on every failure written
 # to log_list; checks that raise directly are enforced by the failed task.
-
-# Whenever a target package version is pinned (compat_wheelhouse mode, or
-# install_mode=pypi where Phase 2 installed dlt-meta==<version> from the
-# live index), prove the legacy PyPI distribution resolved the primary
-# distribution at the same release version.
-if target_install_surface == "compat_wheelhouse" or (
-    target_package_version and target_main_whl.startswith("dlt-meta==")
-):
-    try:
-        compat_version = version("dlt-meta")
-        primary_version = version("databricks-labs-sdp-meta")
-    except PackageNotFoundError as exc:
-        raise AssertionError(
-            f"Compatibility redirect distribution missing: {exc}"
-        ) from exc
-
-    assert compat_version == target_package_version, (
-        f"dlt-meta={compat_version!r}, expected={target_package_version!r}"
-    )
-    assert primary_version == target_package_version, (
-        f"databricks-labs-sdp-meta={primary_version!r}, "
-        f"expected={target_package_version!r}"
-    )
-    log_list.append(
-        "Compatibility wheel resolution: "
-        f"dlt-meta=={compat_version} resolved "
-        f"databricks-labs-sdp-meta=={primary_version}. Passed!"
-    )
 
 # (1) Read Phase 1 counts back.
 phase1_counts_path = f"{uc_volume_path}/tmp/backward_compat_phase1_counts_{run_id}.json"
@@ -159,9 +117,8 @@ for table in silver_tables:
         )
 
 # (3) Schema-compatibility check: load SOURCE's persisted dataflowspec
-# rows through TARGET's dataclasses. Legacy sources must receive the
-# documented field backfills and import through the ``src.*`` shim;
-# current sources retain their canonical namespace and row shape.
+# rows through TARGET's canonical dataclasses. Legacy sources must receive
+# the documented field backfills; current sources retain their row shape.
 log_list.append(
     f"Verifying {source_ref} persisted dataflowspec rows are consumable "
     f"by {target_ref}..."
@@ -245,20 +202,12 @@ if phase2_append_onboarding:
         )
 
 try:
-    if source_profile == "legacy":
-        from src.dataflow_spec import (
-            BronzeDataflowSpec,
-            DataflowSpecUtils,
-            SilverDataflowSpec,
-        )
-        import_surface = "src.* compatibility shim"
-    else:
-        from databricks.labs.sdp_meta.dataflow_spec import (
-            BronzeDataflowSpec,
-            DataflowSpecUtils,
-            SilverDataflowSpec,
-        )
-        import_surface = "databricks.labs.sdp_meta"
+    from databricks.labs.sdp_meta.dataflow_spec import (
+        BronzeDataflowSpec,
+        DataflowSpecUtils,
+        SilverDataflowSpec,
+    )
+    import_surface = "databricks.labs.sdp_meta"
     log_list.append(
         "Imported BronzeDataflowSpec/SilverDataflowSpec via "
         f"{import_surface}. Passed!"
@@ -277,29 +226,21 @@ except Exception as exc:
     log_list.append(f"  traceback: {tb_text}")
     BronzeDataflowSpec = SilverDataflowSpec = DataflowSpecUtils = None
 
-if phase2_append_onboarding:
-    legacy_defaults_contract = (
-        "path-specific Phase 2 append-onboarding/read defaults"
-    )
-elif phase2_legacy_entrypoint_onboarding:
-    legacy_defaults_contract = (
-        "path-specific target legacy-entrypoint/read defaults"
-    )
-else:
-    legacy_defaults_contract = "read-time None backfills"
+legacy_defaults_contract = (
+    "path-specific Phase 2 append-onboarding/read defaults"
+    if phase2_append_onboarding
+    else "read-time None backfills"
+)
 
 
 def expected_legacy_defaults(data_flow_group, *, bronze):
     """Return exact defaults for rows touched by each Phase 2 path."""
-    reonboarded = data_flow_group == "A1" or (
+    phase2_reonboarded = (
         phase2_append_onboarding
-        and data_flow_group == "schema_evolution"
+        and data_flow_group in ("A1", "schema_evolution")
     )
-    if phase2_append_onboarding and reonboarded:
+    if phase2_reonboarded:
         cluster_by_auto = True
-        cdc_schemas = {}
-    elif phase2_legacy_entrypoint_onboarding and reonboarded:
-        cluster_by_auto = False
         cdc_schemas = {}
     else:
         # A2 is written in Phase 1 and is not part of either Phase 2

@@ -57,7 +57,7 @@ Usage examples
         --profile DEFAULT \\
         --install-source whl_file \\
         --whl-file-path /Volumes/main/sdp_meta_demo/sdp_meta_wheels/\\
-    databricks_labs_sdp_meta-0.1.1-py3-none-any.whl
+    databricks_labs_sdp_meta-0.2.0-py3-none-any.whl
 
     # Deterministic data path (recommended for CI):
     python demo/launch_interactive_demo.py \\
@@ -379,7 +379,7 @@ def main() -> int:
         "--pypi-version",
         default="",
         help="Optional version pin when --install-source=pypi (e.g. "
-             "``0.1.1``). Leave blank to install the latest published "
+             "``0.2.0``). Leave blank to install the latest published "
              "``databricks-labs-sdp-meta`` release.",
     )
     parser.add_argument(
@@ -525,7 +525,7 @@ def main() -> int:
     # *when* the run was launched), the target catalog (identifies
     # *where* it ran), and the per-run uuid suffix (guarantees
     # uniqueness even if two launches share the same second + catalog).
-    # Example: ``sdp-meta-demo-20260427T201112Z-ravi_dlt_meta_uc-a2b35bc8aa93``
+    # Example: ``sdp-meta-demo-20260427T201112Z-sdp_meta_uc-a2b35bc8aa93``
     launch_ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_name = (
         f"sdp-meta-demo-{launch_ts}-{args.uc_catalog_name}-{run_id}"

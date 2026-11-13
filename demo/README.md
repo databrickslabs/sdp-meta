@@ -182,7 +182,7 @@ Run `python demo/launch_interactive_demo.py --help` for the full flag surface. S
 | `--cleanup` | `cleanup` | `false` (default) or `true`. Set `true` for CI runs that need to leave the workspace clean. |
 | `--timeout-minutes` | n/a (driver) | Max wall-clock for the launcher to wait on the job. Default 90; for cold workspaces with all 5 pipelines, 25-35 is comfortable. |
 
-Each launch gets a unique, scannable name in the workspace **Job Runs** UI of the form `sdp-meta-demo-<UTC-timestamp>-<catalog>-<run-id>`, e.g. `sdp-meta-demo-20260427T201235Z-ravi_dlt_meta_uc-57f84fe925a1`. The same `<run-id>` flows through the per-run workspace path (`/Users/<me>/sdp_meta_demo_runs/<run-id>/demo/...`) and the per-run schema (`sdp_meta_demo_<run-id>`) so concurrent runs never collide on bronze / silver tables.
+Each launch gets a unique, scannable name in the workspace **Job Runs** UI of the form `sdp-meta-demo-<UTC-timestamp>-<catalog>-<run-id>`, e.g. `sdp-meta-demo-20260427T201235Z-sdp_meta_uc-57f84fe925a1`. The same `<run-id>` flows through the per-run workspace path (`/Users/<me>/sdp_meta_demo_runs/<run-id>/demo/...`) and the per-run schema (`sdp_meta_demo_<run-id>`) so concurrent runs never collide on bronze / silver tables.
 
 ## Cleanup
 
@@ -358,7 +358,7 @@ This demo will perform following tasks:
 - Create databricks secrets to store producer and consumer keys using the scope created in step 2
 
 - Following are the mandatory arguments for running EventHubs demo
-    - uc_catalog_name : unity catalog name e.g. ravi_sdp_meta_uc
+    - uc_catalog_name : Unity Catalog name, e.g. `sdp_meta_uc`
     - `eventhub_namespace`: Event Hubs namespace, for example `sdp_meta`
     - `eventhub_name`: primary Event Hub name, for example `sdp_meta_demo`
     - `eventhub_name_append_flow`: secondary Event Hub name for the append flow, for example `sdp_meta_demo_af`

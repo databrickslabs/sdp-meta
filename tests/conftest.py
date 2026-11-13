@@ -1,4 +1,4 @@
-"""Shared pytest configuration for the dlt-meta / sdp-meta unit-test suite.
+"""Shared pytest configuration for the SDP-META unit-test suite.
 
 Three pieces of cross-cutting test hygiene live here:
 

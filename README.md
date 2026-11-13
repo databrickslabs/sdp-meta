@@ -14,7 +14,7 @@
 
 ---
 
-[![Documentation](https://img.shields.io/badge/docs-passing-green)](https://databrickslabs.github.io/sdp-meta/) [![PyPI](https://img.shields.io/pypi/v/databricks-labs-sdp-meta?label=pypi)](https://pypi.org/project/databricks-labs-sdp-meta/) [![Build](https://img.shields.io/github/actions/workflow/status/databrickslabs/sdp-meta/onpush.yml?branch=main)](https://github.com/databrickslabs/sdp-meta/actions/workflows/onpush.yml) [![Coverage](https://img.shields.io/codecov/c/github/databrickslabs/sdp-meta)](https://codecov.io/gh/databrickslabs/sdp-meta) [![Style](https://img.shields.io/badge/code%20style-flake8-blue)](https://github.com/PyCQA/flake8) [![PyPI Downloads](https://static.pepy.tech/badge/dlt-meta/month)](https://pepy.tech/projects/dlt-meta)
+[![Documentation](https://img.shields.io/badge/docs-passing-green)](https://databrickslabs.github.io/sdp-meta/) [![PyPI](https://img.shields.io/pypi/v/databricks-labs-sdp-meta?label=pypi)](https://pypi.org/project/databricks-labs-sdp-meta/) [![Build](https://img.shields.io/github/actions/workflow/status/databrickslabs/sdp-meta/onpush.yml?branch=main)](https://github.com/databrickslabs/sdp-meta/actions/workflows/onpush.yml) [![Coverage](https://img.shields.io/codecov/c/github/databrickslabs/sdp-meta)](https://codecov.io/gh/databrickslabs/sdp-meta) [![Style](https://img.shields.io/badge/code%20style-flake8-blue)](https://github.com/PyCQA/flake8) [![PyPI Downloads](https://static.pepy.tech/badge/databricks-labs-sdp-meta/month)](https://pepy.tech/projects/databricks-labs-sdp-meta)
 
 ---
 
@@ -90,7 +90,10 @@ See **[GETTING_STARTED.md](GETTING_STARTED.md)** for prereqs, install commands, 
 
 ## Upgrading from DLT-META
 
-The v0.1.0 release renames **DLT-META** to **SDP-META**. Existing onboarding JSON/YAML files and pipeline behavior are unchanged, but new code should move to the new package, CLI, and import path:
+SDP-META v0.2.0 completes the rename from **DLT-META**. The compatibility
+package, legacy imports, command forwarding, runner name, and task package
+name are no longer supported. Persisted `dlt_meta_*` workspace keys are still
+read with a deprecation warning and normalized to `sdp_meta_*`.
 
 | Area | Old | New |
 |---|---|---|
@@ -98,9 +101,18 @@ The v0.1.0 release renames **DLT-META** to **SDP-META**. Existing onboarding JSO
 | Labs CLI | `databricks labs dlt-meta` | `databricks labs sdp-meta` |
 | Python imports | `from dlt_meta import ...` | `from databricks.labs.sdp_meta import ...` |
 
-The `dlt-meta` compatibility package remains available during v0.1.x, but it emits deprecation warnings and receives no new features. Legacy `src.*` imports are planned for removal in v0.2.0.
+Before installing v0.2.0, uninstall `dlt-meta` so its stale `dlt_meta.pth`
+startup hook cannot remain in the environment:
 
-See the **[DLT-META → SDP-META migration guide](https://databrickslabs.github.io/sdp-meta/docs/operations/migration)** for the step-by-step plan, compatibility details, and deprecation timeline.
+```bash
+python -m pip uninstall -y dlt-meta
+python -m pip install databricks-labs-sdp-meta==0.2.0
+```
+
+Existing onboarding specs, dataflow-spec tables, output data, and pipeline
+checkpoints can be preserved. Update the active runner and configuration in
+place; do not recreate the pipeline solely for the rename. See the
+**[mandatory v0.2 migration guide](https://databrickslabs.github.io/sdp-meta/docs/operations/migration)**.
 
 ## Resources
 
