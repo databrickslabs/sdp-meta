@@ -1,21 +1,27 @@
 """Unit tests for standard-compute legacy upgrade orchestration."""
 
+import copy
 import json
 import os
 import tempfile
-import zipfile
 from io import BytesIO
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import MagicMock, call as mock_call, patch
 
+from databricks.sdk.service import compute, jobs
 from databricks.sdk.service.pipelines import PipelineCluster
 
 from integration_tests.run_backward_compat_tests import (
     BCRunnerConf,
     BackwardCompatRunner,
 )
-from integration_tests.version_profiles import CURRENT, LEGACY
+from integration_tests.version_profiles import (
+    CURRENT,
+    DEFAULT_TARGET_REF,
+    LEGACY,
+    resolve_profile,
+)
 
 
 class BackwardCompatFixtureTests(TestCase):
@@ -98,8 +104,8 @@ class CurrentUpgradeRunnerTests(TestCase):
         )
 
         self.assertEqual(
-            self.runner._runner_notebook_filename(self.conf),
-            "init_sdp_meta_pipeline.py",
+            self.runner._runner_path(self.conf, self.conf.source_profile),
+            "/runners/init_sdp_meta_pipeline.py",
         )
         self.assertEqual(
             phase1["sdp_meta_whl"], self.conf.source_main_whl_remote
@@ -109,6 +115,18 @@ class CurrentUpgradeRunnerTests(TestCase):
         )
         self.assertNotIn("dlt_meta_whl", phase1)
         self.assertNotIn("dlt_meta_whl", phase2)
+
+    def test_current_profile_resolves_all_canonical_refs(self):
+        self.assertIs(resolve_profile("v0.2.0"), CURRENT)
+        self.assertIs(resolve_profile("v0.2.4"), CURRENT)
+        self.assertIs(resolve_profile("main"), CURRENT)
+        self.assertIs(resolve_profile("v0.1.1"), CURRENT)
+        self.assertEqual(DEFAULT_TARGET_REF, "main")
+
+    @patch("builtins.print")
+    def test_main_is_an_exact_ref_not_a_branch_prefix(self, warning):
+        self.assertIs(resolve_profile("main/feature"), CURRENT)
+        warning.assert_called_once()
 
     def test_current_upgrade_validator_receives_version_line_context(self):
         self.runner.build_phase2_job(self.conf)
@@ -122,10 +140,6 @@ class CurrentUpgradeRunnerTests(TestCase):
         self.assertEqual(parameters["source_profile"], "current")
         self.assertEqual(parameters["source_ref"], "v0.1.0")
         self.assertEqual(parameters["target_ref"], "v0.1.1")
-        self.assertEqual(
-            parameters["phase2_legacy_entrypoint_onboarding"],
-            "False",
-        )
 
     def test_v010_source_removes_unsupported_append_flow_metadata(self):
         payload = [
@@ -188,7 +202,7 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
             run_id="test-run",
             uc_catalog_name="catalog",
             source_ref="v0.0.10",
-            target_ref="v0.1.0",
+            target_ref="v0.2.0",
             source_profile=LEGACY,
             target_profile=CURRENT,
             pipeline_mode="standard_legacy",
@@ -201,7 +215,12 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
             target_main_whl_remote="/Volumes/test/target.whl",
         )
 
-    def _legacy_spec(self, target, wheel):
+    def _legacy_spec(self, target, wheel, *, wheel_key="dlt_meta_whl"):
+        runner = (
+            "init_dlt_meta_pipeline.py"
+            if wheel_key == "dlt_meta_whl"
+            else "init_sdp_meta_pipeline.py"
+        )
         return SimpleNamespace(
             catalog="catalog",
             name="pipeline",
@@ -209,8 +228,12 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
             schema=None,
             serverless=False,
             clusters=[PipelineCluster(label="default", num_workers=2)],
-            libraries=[],
-            configuration={"dlt_meta_whl": wheel},
+            libraries=[
+                SimpleNamespace(
+                    notebook=SimpleNamespace(path=f"/runners/{runner}")
+                )
+            ],
+            configuration={wheel_key: wheel},
         )
 
     def test_standard_legacy_execution_kwargs_use_target_and_cluster(self):
@@ -252,17 +275,94 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
         self.assertNotIn("schema", kwargs)
         self.assertEqual(kwargs["clusters"][0].num_workers, 2)
 
+    @patch("integration_tests.run_backward_compat_tests.sdk_create_pipeline")
+    def test_pipeline_verification_accepts_extensionless_workspace_path(
+        self, sdk_create
+    ):
+        self.ws.pipelines.create.return_value = SimpleNamespace(
+            pipeline_id="p1"
+        )
+        spec = self._legacy_spec(
+            "bronze", self.conf.source_main_whl_remote
+        )
+        spec.libraries[0].notebook.path = (
+            "/runners/init_dlt_meta_pipeline"
+        )
+        self.ws.pipelines.get.return_value = SimpleNamespace(spec=spec)
+
+        self.assertEqual(
+            self.runner.create_pipeline(
+                self.conf, "pipeline", "bronze", "A1", "bronze"
+            ),
+            "p1",
+        )
+        sdk_create.assert_not_called()
+
+    def test_pipeline_verification_uses_explicit_profile_for_shared_key(self):
+        target_profile = SimpleNamespace(
+            pipeline_config_whl_key="sdp_meta_whl",
+            runner_notebook_local_path="/local/target_runner.py",
+        )
+        spec = self._serverless_spec(
+            "bronze",
+            self.conf.target_main_whl_remote,
+            wheel_key="sdp_meta_whl",
+        )
+        spec.libraries[0].notebook.path = "/runners/target_runner"
+        self.ws.pipelines.get.return_value = SimpleNamespace(spec=spec)
+        self.conf.pipeline_mode = "serverless_dpm"
+
+        self.runner._verify_pipeline_mode(
+            self.conf,
+            "pipeline-id",
+            "bronze",
+            {"sdp_meta_whl": self.conf.target_main_whl_remote},
+            target_profile,
+        )
+
+    def test_pipeline_verification_rejects_retained_legacy_wheel_key(self):
+        self.conf.pipeline_mode = "serverless_dpm"
+        spec = self._serverless_spec(
+            "bronze",
+            self.conf.target_main_whl_remote,
+            wheel_key="sdp_meta_whl",
+        )
+        spec.configuration["dlt_meta_whl"] = (
+            self.conf.source_main_whl_remote
+        )
+        self.ws.pipelines.get.return_value = SimpleNamespace(spec=spec)
+
+        with self.assertRaisesRegex(
+            RuntimeError, "dlt_meta_whl"
+        ):
+            self.runner._verify_pipeline_mode(
+                self.conf,
+                "pipeline-id",
+                "bronze",
+                {"sdp_meta_whl": self.conf.target_main_whl_remote},
+                self.conf.target_profile,
+            )
+
     def test_swap_standard_legacy_pipeline_preserves_target_and_cluster(self):
         self.conf.bronze_a1_pipeline_id = "bronze-a1"
         self.conf.bronze_a2_pipeline_id = "bronze-a2"
         self.conf.silver_pipeline_id = "silver"
         self.ws.pipelines.get.side_effect = [
             SimpleNamespace(spec=self._legacy_spec("bronze", self.conf.source_main_whl_remote)),
-            SimpleNamespace(spec=self._legacy_spec("bronze", self.conf.target_main_whl_remote)),
+            SimpleNamespace(spec=self._legacy_spec(
+                "bronze", self.conf.target_main_whl_remote,
+                wheel_key="sdp_meta_whl",
+            )),
             SimpleNamespace(spec=self._legacy_spec("bronze", self.conf.source_main_whl_remote)),
-            SimpleNamespace(spec=self._legacy_spec("bronze", self.conf.target_main_whl_remote)),
+            SimpleNamespace(spec=self._legacy_spec(
+                "bronze", self.conf.target_main_whl_remote,
+                wheel_key="sdp_meta_whl",
+            )),
             SimpleNamespace(spec=self._legacy_spec("silver", self.conf.source_main_whl_remote)),
-            SimpleNamespace(spec=self._legacy_spec("silver", self.conf.target_main_whl_remote)),
+            SimpleNamespace(spec=self._legacy_spec(
+                "silver", self.conf.target_main_whl_remote,
+                wheel_key="sdp_meta_whl",
+            )),
         ]
 
         self.runner.swap_pipelines_to_target(self.conf)
@@ -276,8 +376,20 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
             self.assertFalse(call.kwargs["serverless"])
             self.assertNotIn("schema", call.kwargs)
             self.assertEqual(call.kwargs["clusters"][0].num_workers, 2)
+            self.assertEqual(
+                call.kwargs["configuration"]["sdp_meta_whl"],
+                self.conf.target_main_whl_remote,
+            )
+            self.assertNotIn("dlt_meta_whl", call.kwargs["configuration"])
+            notebook = call.kwargs["libraries"][0].notebook.path
+            self.assertTrue(notebook.endswith("/init_sdp_meta_pipeline.py"))
 
-    def _serverless_spec(self, schema, wheel):
+    def _serverless_spec(self, schema, wheel, *, wheel_key="dlt_meta_whl"):
+        runner = (
+            "init_dlt_meta_pipeline.py"
+            if wheel_key == "dlt_meta_whl"
+            else "init_sdp_meta_pipeline.py"
+        )
         return SimpleNamespace(
             catalog="catalog",
             name="pipeline",
@@ -285,8 +397,12 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
             schema=schema,
             serverless=True,
             clusters=[],
-            libraries=[],
-            configuration={"dlt_meta_whl": wheel},
+            libraries=[
+                SimpleNamespace(
+                    notebook=SimpleNamespace(path=f"/runners/{runner}")
+                )
+            ],
+            configuration={wheel_key: wheel},
         )
 
     @patch("integration_tests.run_backward_compat_tests.sdk_create_pipeline")
@@ -320,6 +436,21 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
                 self.conf, "pipeline", "bronze", "A1", "bronze"
             )
 
+    @patch("integration_tests.run_backward_compat_tests.sdk_create_pipeline")
+    def test_create_serverless_pipeline_fails_on_wrong_runner(self, sdk_create):
+        self.conf.pipeline_mode = "serverless_dpm"
+        sdk_create.return_value = SimpleNamespace(pipeline_id="p1")
+        spec = self._serverless_spec(
+            "bronze", self.conf.source_main_whl_remote
+        )
+        spec.libraries[0].notebook.path = "/runners/stale_runner.py"
+        self.ws.pipelines.get.return_value = SimpleNamespace(spec=spec)
+
+        with self.assertRaisesRegex(RuntimeError, "notebook libraries"):
+            self.runner.create_pipeline(
+                self.conf, "pipeline", "bronze", "A1", "bronze"
+            )
+
     def test_standard_legacy_requires_positive_worker_count(self):
         runner = BackwardCompatRunner(
             {
@@ -335,19 +466,6 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
         with self.assertRaisesRegex(ValueError, "pipeline_num_workers"):
             runner._build_runner_conf()
 
-    def test_compat_wheelhouse_uses_legacy_distribution_spec(self):
-        self.conf.target_install_surface = "compat_wheelhouse"
-        self.conf.target_package_version = "0.1.0"
-
-        self.assertEqual(
-            self.runner.install_spec_target_main(self.conf),
-            "dlt-meta==0.1.0",
-        )
-        config = self.runner._build_phase2_pipeline_config(
-            self.conf, "bronze", "A1"
-        )
-        self.assertEqual(config["dlt_meta_whl"], "dlt-meta==0.1.0")
-
     def test_phase2_validator_receives_source_profile(self):
         self.runner.build_phase2_job(self.conf)
 
@@ -361,52 +479,157 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
             "legacy",
         )
 
-    def test_phase2_compat_surface_runs_legacy_wheel_entrypoint(self):
-        self.conf.target_install_surface = "compat_wheelhouse"
-        self.conf.target_main_whl_remote = "/Volumes/test/target/main.whl"
-        self.conf.target_compat_whl_remote = "/Volumes/test/target/compat.whl"
-        self.conf.target_wheelhouse_remote = "/Volumes/test/target/wheelhouse/"
-        self.conf.target_package_version = "0.1.1"
-        self.conf.uc_volume_path = "/Volumes/catalog/specs/volume/"
-        self.conf.a1_onboarding_file = "conf/a1.json"
-        self.conf.bronze_a1_pipeline_id = "bronze-a1"
-        self.conf.silver_pipeline_id = "silver"
+    def test_migrate_phase1_job_updates_wheel_tasks_and_environment(self):
+        self.conf.phase1_job_id = 42
+        self.conf.source_main_whl_remote = (
+            "/Volumes/test/dlt_meta-0.0.10-py3-none-any.whl"
+        )
+        self.conf.target_main_whl_remote = (
+            "/Volumes/test/"
+            "databricks_labs_sdp_meta-0.2.0-py3-none-any.whl"
+        )
+        source_settings = jobs.JobSettings(
+            tasks=[
+                jobs.Task(
+                    task_key="onboard",
+                    environment_key="source-env",
+                    python_wheel_task=jobs.PythonWheelTask(
+                        package_name=LEGACY.distribution,
+                        entry_point="run",
+                    ),
+                ),
+                jobs.Task(
+                    task_key="pipeline",
+                    pipeline_task=jobs.PipelineTask(
+                        pipeline_id="pipeline-id"
+                    ),
+                ),
+            ],
+            environments=[
+                jobs.JobEnvironment(
+                    environment_key="source-env",
+                    spec=compute.Environment(
+                        client="1",
+                        dependencies=[
+                            self.conf.source_main_whl_remote,
+                            "customer-package==1.2.3",
+                        ],
+                    ),
+                )
+            ],
+        )
+        get_calls = 0
 
-        self.runner.build_phase2_job(self.conf)
+        def get_job(_job_id):
+            nonlocal get_calls
+            get_calls += 1
+            if get_calls == 1:
+                return SimpleNamespace(settings=source_settings)
+            api_settings = copy.deepcopy(
+                self.ws.jobs.update.call_args.kwargs["new_settings"]
+            )
+            api_settings.environments[0].spec.environment_version = None
+            api_settings.environments[0].spec.client = "2"
+            return SimpleNamespace(settings=api_settings)
 
-        kwargs = self.ws.jobs.create.call_args.kwargs
-        environment = kwargs["environments"][0]
-        self.assertEqual(environment.spec.client, "2")
+        self.ws.jobs.get.side_effect = get_job
+
+        migrated_from_api = self.runner.migrate_phase1_job_to_target(
+            self.conf
+        )
+
+        update = self.ws.jobs.update.call_args.kwargs
+        self.assertEqual(update["job_id"], 42)
+        migrated = update["new_settings"]
+        wheel_task = next(
+            task.python_wheel_task
+            for task in migrated.tasks
+            if task.python_wheel_task is not None
+        )
         self.assertEqual(
-            environment.spec.dependencies,
+            wheel_task.package_name,
+            self.conf.target_profile.distribution,
+        )
+        self.assertEqual(
+            migrated.environments[0].spec.dependencies,
             [
-                "--no-index",
-                "--find-links=/Volumes/test/target/wheelhouse/",
-                "dlt-meta==0.1.1",
+                self.conf.target_main_whl_remote,
+                "customer-package==1.2.3",
             ],
         )
-        tasks = {task.task_key: task for task in kwargs["tasks"]}
-        legacy_task = tasks["phase2_legacy_entrypoint_onboard"]
-        self.assertEqual(legacy_task.python_wheel_task.package_name, "dlt_meta")
-        self.assertEqual(legacy_task.python_wheel_task.entry_point, "run")
+        self.assertIsNone(migrated.environments[0].spec.client)
         self.assertEqual(
-            legacy_task.python_wheel_task.named_parameters[
-                "onboarding_file_path"
-            ],
-            "/Volumes/catalog/specs/volume/conf/a1.json",
+            migrated.environments[0].spec.environment_version,
+            "2",
         )
         self.assertEqual(
-            tasks["phase2_bronze"].depends_on[0].task_key,
-            "phase2_legacy_entrypoint_onboard",
+            source_settings.tasks[0].python_wheel_task.package_name,
+            LEGACY.distribution,
         )
         self.assertEqual(
-            tasks["phase2_validate"].notebook_task.base_parameters[
-                "phase2_legacy_entrypoint_onboarding"
-            ],
-            "True",
+            migrated_from_api.environments[0].spec.client,
+            "2",
         )
 
-    def test_phase2_primary_surface_keeps_existing_pipeline_only_flow(self):
+    def test_migrated_onboarding_smoke_submits_one_non_overwriting_task(self):
+        self.conf.phase1_job_id = 42
+        settings = jobs.JobSettings(
+            tasks=[
+                jobs.Task(
+                    task_key="phase1_onboard_A2",
+                    environment_key="target-env",
+                    python_wheel_task=jobs.PythonWheelTask(
+                        package_name=CURRENT.distribution,
+                        entry_point="run",
+                        named_parameters={
+                            "onboarding_file_path": "A2.json",
+                            "overwrite": "False",
+                        },
+                    ),
+                ),
+                jobs.Task(
+                    task_key="phase1_onboard_A1",
+                    environment_key="target-env",
+                    python_wheel_task=jobs.PythonWheelTask(
+                        package_name=CURRENT.distribution,
+                        entry_point="run",
+                        named_parameters={"overwrite": "True"},
+                    ),
+                )
+            ],
+            environments=[
+                jobs.JobEnvironment(
+                    environment_key="target-env",
+                    spec=compute.Environment(
+                        client="2",
+                        dependencies=[self.conf.target_main_whl_remote],
+                    ),
+                )
+            ],
+        )
+        self.ws.jobs.get.return_value = SimpleNamespace(settings=settings)
+        self.ws.jobs.submit.return_value.result.return_value = SimpleNamespace(
+            state=SimpleNamespace(result_state=jobs.RunResultState.SUCCESS)
+        )
+
+        self.runner.run_migrated_onboarding_smoke(self.conf, settings)
+
+        submit = self.ws.jobs.submit.call_args.kwargs
+        self.assertEqual(len(submit["tasks"]), 1)
+        task = submit["tasks"][0]
+        self.assertIsInstance(task, jobs.SubmitTask)
+        self.assertEqual(task.task_key, "migrated_onboarding_smoke")
+        self.assertEqual(
+            task.python_wheel_task.named_parameters["overwrite"],
+            "False",
+        )
+        self.assertNotIn(
+            "onboarding_file_path",
+            task.python_wheel_task.named_parameters,
+        )
+        self.assertEqual(len(submit["environments"]), 1)
+
+    def test_phase2_runs_incremental_load_before_pipelines(self):
         self.conf.bronze_a1_pipeline_id = "bronze-a1"
         self.conf.silver_pipeline_id = "silver"
 
@@ -414,8 +637,6 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
 
         kwargs = self.ws.jobs.create.call_args.kwargs
         self.assertIsNone(kwargs["environments"])
-        task_keys = [task.task_key for task in kwargs["tasks"]]
-        self.assertNotIn("phase2_legacy_entrypoint_onboard", task_keys)
         phase2_bronze = next(
             task for task in kwargs["tasks"]
             if task.task_key == "phase2_bronze"
@@ -423,38 +644,6 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
         self.assertEqual(
             phase2_bronze.depends_on[0].task_key,
             "phase2_add_incremental",
-        )
-
-    @patch("integration_tests.run_backward_compat_tests.os.walk")
-    def test_upload_compat_wheelhouse_retains_project_wheel_paths(
-        self, walk
-    ):
-        walk.return_value = []
-        self.conf.target_install_surface = "compat_wheelhouse"
-        self.conf.source_main_whl_local = "/tmp/source.whl"
-        self.conf.target_main_whl_local = "/tmp/target.whl"
-        self.conf.target_compat_whl_local = "/tmp/compat.whl"
-        self.conf.target_dependency_whls_local = [
-            "/tmp/sdk.whl",
-            "/tmp/yaml.whl",
-        ]
-        self.conf.uc_volume_path = "/Volumes/catalog/specs/volume/"
-        self.runner.upload_runner_notebooks = MagicMock()
-
-        def remote_path(_conf, local_path, destination):
-            return f"/Volumes/uploaded/{destination}/{os.path.basename(local_path)}"
-
-        self.runner.upload_wheel = MagicMock(side_effect=remote_path)
-
-        self.runner.upload_files(self.conf)
-
-        self.assertEqual(
-            self.conf.target_main_whl_remote,
-            "/Volumes/uploaded/target/wheelhouse/target.whl",
-        )
-        self.assertEqual(
-            self.conf.target_compat_whl_remote,
-            "/Volumes/uploaded/target/wheelhouse/compat.whl",
         )
 
     def test_phase2_append_onboarding_runs_twice_before_pipelines(self):
@@ -474,6 +663,10 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
         tasks = {task.task_key: task for task in kwargs["tasks"]}
         first = tasks["phase2_append_onboarding"]
         repeat = tasks["phase2_append_onboarding_idempotency"]
+        self.assertEqual(
+            first.python_wheel_task.package_name,
+            "databricks_labs_sdp_meta",
+        )
         self.assertEqual(
             first.python_wheel_task.named_parameters["overwrite"],
             "False",
@@ -497,6 +690,25 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
                 "phase2_append_onboarding"
             ],
             "True",
+        )
+
+    def test_phase2_append_onboarding_uses_target_distribution(self):
+        self.conf.target_profile = LEGACY
+        self.conf.phase2_append_onboarding = True
+        self.conf.phase2_onboarding_file = "conf/phase2.json"
+        self.conf.uc_volume_path = "/Volumes/catalog/specs/volume/"
+        self.conf.bronze_a1_pipeline_id = "bronze-a1"
+        self.conf.silver_pipeline_id = "silver"
+
+        self.runner.build_phase2_job(self.conf)
+
+        tasks = {
+            task.task_key: task
+            for task in self.ws.jobs.create.call_args.kwargs["tasks"]
+        }
+        self.assertEqual(
+            tasks["phase2_append_onboarding"].python_wheel_task.package_name,
+            LEGACY.distribution,
         )
 
     def test_phase2_append_onboarding_fixture_has_current_fields_and_new_row(
@@ -532,78 +744,26 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
         self.assertTrue(inserted["bronze_cluster_by_auto"])
         self.assertTrue(inserted["silver_cluster_by_auto"])
 
-    @patch.object(BackwardCompatRunner, "_download_compat_runtime_wheels")
     @patch("integration_tests.run_backward_compat_tests.GitRefWheelBuilder")
-    def test_compat_wheelhouse_builds_primary_redirect_and_dependency_wheels(
-        self, builder_cls, download_runtime_wheels
+    def test_build_wheels_builds_only_source_and_canonical_target(
+        self, builder_cls
     ):
-        self.conf.target_install_surface = "compat_wheelhouse"
         self.conf.build_target_from_worktree = True
         builder = builder_cls.return_value
         builder.build.return_value = "/tmp/dlt_meta-0.0.10-py3-none-any.whl"
-        builder.build_from_worktree.side_effect = [
-            "/tmp/databricks_labs_sdp_meta-0.1.0-py3-none-any.whl",
-            "/tmp/dlt_meta-0.1.0-py3-none-any.whl",
-        ]
+        builder.build_from_worktree.return_value = (
+            "/tmp/databricks_labs_sdp_meta-0.2.0-py3-none-any.whl"
+        )
 
         self.runner.build_wheels(self.conf)
 
         builder.build.assert_called_once_with("v0.0.10")
+        builder.build_from_worktree.assert_called_once_with()
         self.assertEqual(
-            builder.build_from_worktree.call_args_list,
-            [mock_call(), mock_call(subdir="compat")],
+            self.conf.target_main_whl_local,
+            "/tmp/databricks_labs_sdp_meta-0.2.0-py3-none-any.whl",
         )
-        self.assertEqual(
-            self.conf.target_compat_whl_local,
-            "/tmp/dlt_meta-0.1.0-py3-none-any.whl",
-        )
-        # target_package_version was left unset (None) -> derived from the
-        # built wheels' shared version.
-        self.assertEqual(self.conf.target_package_version, "0.1.0")
-        download_runtime_wheels.assert_called_once_with(self.conf)
         builder.cleanup.assert_called_once()
-
-    def test_compat_wheelhouse_renders_find_links_only_in_uploaded_copy(self):
-        self.conf.target_install_surface = "compat_wheelhouse"
-        self.conf.target_wheelhouse_remote = "/Volumes/test/wheelhouse/"
-        source = b"dlt_meta_whl = spark.conf.get('dlt_meta_whl')\n%pip install $dlt_meta_whl\n"
-
-        rendered = self.runner._notebook_source_for_upload(
-            self.conf, "init_dlt_meta_pipeline.py", source
-        )
-
-        self.assertIn(
-            b"%pip install --force-reinstall --no-index --find-links "
-            b"/Volumes/test/wheelhouse/ $dlt_meta_whl",
-            rendered,
-        )
-        self.assertNotEqual(rendered, source)
-        self.assertIn(b"%pip install $dlt_meta_whl", source)
-
-    def test_compat_install_flags_are_uploaded_only_for_phase2(self):
-        self.conf.target_install_surface = "compat_wheelhouse"
-        self.conf.target_wheelhouse_remote = "/Volumes/test/wheelhouse/"
-
-        self.runner.upload_runner_notebooks(self.conf)
-        phase1_upload = next(
-            call
-            for call in self.ws.workspace.upload.call_args_list
-            if call.kwargs["path"].endswith("/init_dlt_meta_pipeline.py")
-        )
-        self.assertIn(b"%pip install $dlt_meta_whl", phase1_upload.kwargs["content"])
-        self.assertNotIn(b"--force-reinstall", phase1_upload.kwargs["content"])
-
-        self.ws.workspace.upload.reset_mock()
-        self.runner.upload_runner_notebooks(self.conf, phase2=True)
-        phase2_upload = next(
-            call
-            for call in self.ws.workspace.upload.call_args_list
-            if call.kwargs["path"].endswith("/init_dlt_meta_pipeline.py")
-        )
-        self.assertIn(
-            b"%pip install --force-reinstall --no-index --find-links",
-            phase2_upload.kwargs["content"],
-        )
 
     def test_upload_runner_notebooks_ignores_non_file_entries(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -626,12 +786,34 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
     def test_pypi_phase2_rewrites_runner_with_force_reinstall(self):
         self.conf.install_mode = "pypi"
         source = (
+            b"sdp_meta_whl = spark.conf.get('sdp_meta_whl')\n"
+            b"%pip install $sdp_meta_whl\n"
+        )
+
+        rendered = self.runner._notebook_source_for_upload(
+            self.conf,
+            "init_sdp_meta_pipeline.py",
+            source,
+            phase2=True,
+        )
+
+        self.assertIn(
+            b"%pip install --force-reinstall $sdp_meta_whl",
+            rendered,
+        )
+
+    def test_pypi_phase1_rewrites_legacy_runner_with_force_reinstall(self):
+        self.conf.install_mode = "pypi"
+        source = (
             b"dlt_meta_whl = spark.conf.get('dlt_meta_whl')\n"
             b"%pip install $dlt_meta_whl\n"
         )
 
         rendered = self.runner._notebook_source_for_upload(
-            self.conf, "init_dlt_meta_pipeline.py", source
+            self.conf,
+            "init_dlt_meta_pipeline.py",
+            source,
+            phase2=False,
         )
 
         self.assertIn(
@@ -641,6 +823,7 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
 
     def test_pypi_run_reuploads_phase2_runner(self):
         self.conf.install_mode = "pypi"
+        self.conf.phase2_append_onboarding = True
         self.runner._build_runner_conf = MagicMock(return_value=self.conf)
         for method_name in (
             "build_wheels",
@@ -650,6 +833,8 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
             "create_all_pipelines",
             "launch_job",
             "download_phase_output",
+            "migrate_phase1_job_to_target",
+            "run_migrated_onboarding_smoke",
             "swap_pipelines_to_target",
         ):
             setattr(self.runner, method_name, MagicMock())
@@ -666,6 +851,74 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
         self.runner.upload_runner_notebooks.assert_called_once_with(
             self.conf, phase2=True
         )
+        self.assertEqual(
+            [call.args[0] for call in self.runner.launch_job.call_args_list],
+            [1, 2],
+        )
+        self.runner.migrate_phase1_job_to_target.assert_called_once_with(
+            self.conf
+        )
+        self.runner.run_migrated_onboarding_smoke.assert_not_called()
+
+    def test_current_cross_version_upgrade_runs_target_entry_point(self):
+        self.conf.source_profile = CURRENT
+        self.conf.source_ref = "v0.1.1"
+        self.runner._build_runner_conf = MagicMock(return_value=self.conf)
+        for method_name in (
+            "build_wheels",
+            "initialize_uc_resources",
+            "generate_onboarding_files",
+            "upload_files",
+            "create_all_pipelines",
+            "launch_job",
+            "download_phase_output",
+            "migrate_phase1_job_to_target",
+            "run_migrated_onboarding_smoke",
+            "swap_pipelines_to_target",
+        ):
+            setattr(self.runner, method_name, MagicMock())
+        self.runner.build_phase1_job = MagicMock(
+            return_value=SimpleNamespace(job_id=1)
+        )
+        self.runner.build_phase2_job = MagicMock(
+            return_value=SimpleNamespace(job_id=2)
+        )
+        migrated_settings = jobs.JobSettings()
+        self.runner.migrate_phase1_job_to_target.return_value = (
+            migrated_settings
+        )
+        events = []
+        self.runner.download_phase_output.side_effect = (
+            lambda *_args, **_kwargs: events.append("validate")
+        )
+        self.runner.run_migrated_onboarding_smoke.side_effect = (
+            lambda *_args, **_kwargs: events.append("smoke")
+        )
+
+        self.assertEqual(self.runner.run(), 0)
+
+        self.runner.migrate_phase1_job_to_target.assert_called_once_with(
+            self.conf
+        )
+        self.runner.run_migrated_onboarding_smoke.assert_called_once_with(
+            self.conf, migrated_settings
+        )
+        self.assertEqual(events, ["validate", "validate", "smoke"])
+
+    def test_same_ref_with_different_install_specs_requires_migration(self):
+        self.conf.source_profile = CURRENT
+        self.conf.target_profile = CURRENT
+        self.conf.source_ref = self.conf.target_ref = "main"
+
+        self.assertTrue(self.runner._requires_job_migration(self.conf))
+
+    def test_same_profile_and_install_spec_skips_job_migration(self):
+        self.conf.source_profile = CURRENT
+        self.conf.target_profile = CURRENT
+        self.conf.source_ref = self.conf.target_ref = "main"
+        self.conf.target_main_whl_remote = self.conf.source_main_whl_remote
+
+        self.assertFalse(self.runner._requires_job_migration(self.conf))
 
     def test_download_phase_output_rejects_failed_assertions(self):
         self.ws.workspace.download.return_value = BytesIO(
@@ -727,71 +980,6 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
         self.assertEqual(self.ws.workspace.download.call_count, 3)
         self.assertEqual(sleep.call_args_list, [mock_call(2), mock_call(4)])
 
-    def test_compat_wheelhouse_requires_local_cross_namespace_upgrade(self):
-        self.ws.current_user.me.return_value = SimpleNamespace(
-            user_name="test@example.com"
-        )
-        git_runner = BackwardCompatRunner(
-            {
-                "uc_catalog_name": "catalog",
-                "target_install_surface": "compat_wheelhouse",
-                "install_mode": "git",
-            },
-            self.ws,
-        )
-        with self.assertRaisesRegex(ValueError, "requires --install_mode=local"):
-            git_runner._build_runner_conf()
-
-        same_namespace_runner = BackwardCompatRunner(
-            {
-                "uc_catalog_name": "catalog",
-                "target_install_surface": "compat_wheelhouse",
-                "source_version": "v0.1.0",
-                "target_version": "v0.1.1",
-            },
-            self.ws,
-        )
-        with self.assertRaisesRegex(ValueError, "legacy-to-current"):
-            same_namespace_runner._build_runner_conf()
-
-    def test_phase2_append_onboarding_rejects_compat_wheelhouse(self):
-        self.ws.current_user.me.return_value = SimpleNamespace(
-            user_name="test@example.com"
-        )
-        runner = BackwardCompatRunner(
-            {
-                "uc_catalog_name": "catalog",
-                "target_install_surface": "compat_wheelhouse",
-                "phase2_append_onboarding": True,
-            },
-            self.ws,
-        )
-
-        with self.assertRaisesRegex(
-            ValueError, "requires --target_install_surface=primary_wheel"
-        ):
-            runner._build_runner_conf()
-
-    def test_compat_python_version_must_be_major_minor(self):
-        self.ws.current_user.me.return_value = SimpleNamespace(
-            user_name="test@example.com"
-        )
-        for bad in ("3.12.1", "312", "cp312"):
-            runner = BackwardCompatRunner(
-                {"uc_catalog_name": "catalog", "compat_python_version": bad},
-                self.ws,
-            )
-            with self.assertRaisesRegex(ValueError, "MAJOR.MINOR"):
-                runner._build_runner_conf()
-
-        ok_runner = BackwardCompatRunner(
-            {"uc_catalog_name": "catalog", "compat_python_version": "3.11"},
-            self.ws,
-        )
-        self.assertEqual(
-            ok_runner._build_runner_conf().compat_python_version, "3.11"
-        )
-
     def test_pypi_mode_derives_source_and_target_package_versions(self):
         self.ws.current_user.me.return_value = SimpleNamespace(
             user_name="test@example.com"
@@ -801,7 +989,7 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
                 "uc_catalog_name": "catalog",
                 "install_mode": "pypi",
                 "source_version": "v0.0.10",
-                "target_version": "v0.1.0",
+                "target_version": "v0.2.0",
             },
             self.ws,
         )
@@ -809,9 +997,63 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
         conf = runner._build_runner_conf()
 
         self.assertEqual(conf.source_package_version, "0.0.10")
-        self.assertEqual(conf.target_package_version, "0.1.0")
+        self.assertEqual(conf.target_package_version, "0.2.0")
         self.assertEqual(runner.install_spec_source_main(conf), "dlt-meta==0.0.10")
-        self.assertEqual(runner.install_spec_target_main(conf), "dlt-meta==0.1.0")
+        self.assertEqual(
+            runner.install_spec_target_main(conf),
+            "databricks-labs-sdp-meta==0.2.0",
+        )
+
+    def test_pypi_mode_requires_version_for_non_release_target_refs(self):
+        self.ws.current_user.me.return_value = SimpleNamespace(
+            user_name="test@example.com"
+        )
+        for target_ref in ("main", "origin/main", "feature/example"):
+            args = {
+                "uc_catalog_name": "catalog",
+                "install_mode": "pypi",
+            }
+            if target_ref != "main":
+                args["target_version"] = target_ref
+            runner = BackwardCompatRunner(args, self.ws)
+
+            with self.subTest(target_ref=target_ref), self.assertRaisesRegex(
+                ValueError,
+                r"requires a released package version.*--target_version",
+            ):
+                runner._build_runner_conf()
+
+    def test_pypi_mode_accepts_explicit_package_version_for_main(self):
+        self.ws.current_user.me.return_value = SimpleNamespace(
+            user_name="test@example.com"
+        )
+        runner = BackwardCompatRunner(
+            {
+                "uc_catalog_name": "catalog",
+                "install_mode": "pypi",
+                "target_package_version": "0.2.0rc1",
+            },
+            self.ws,
+        )
+
+        conf = runner._build_runner_conf()
+
+        self.assertEqual(conf.target_ref, "main")
+        self.assertEqual(conf.target_package_version, "0.2.0rc1")
+        self.assertEqual(
+            runner.install_spec_target_main(conf),
+            "databricks-labs-sdp-meta==0.2.0rc1",
+        )
+
+    def test_pypi_mode_uses_legacy_target_distribution(self):
+        self.conf.install_mode = "pypi"
+        self.conf.target_profile = LEGACY
+        self.conf.target_package_version = "0.0.10"
+
+        self.assertEqual(
+            self.runner.install_spec_target_main(self.conf),
+            "dlt-meta==0.0.10",
+        )
 
     def test_pypi_mode_rejects_invalid_source_package_version(self):
         self.ws.current_user.me.return_value = SimpleNamespace(
@@ -828,143 +1070,3 @@ class StandardLegacyUpgradeRunnerTests(TestCase):
 
         with self.assertRaisesRegex(ValueError, "source_package_version"):
             runner._build_runner_conf()
-
-
-class CompatWheelhouseVersionTests(TestCase):
-    """Version-pinning and wheelhouse-completeness guards for compat mode."""
-
-    def setUp(self):
-        self.ws = MagicMock()
-        self.runner = BackwardCompatRunner({}, self.ws)
-        self.conf = BCRunnerConf(
-            run_id="test-run",
-            uc_catalog_name="catalog",
-            source_ref="v0.0.10",
-            target_ref="v0.1.0",
-            source_profile=LEGACY,
-            target_profile=CURRENT,
-            target_install_surface="compat_wheelhouse",
-        )
-
-    def test_wheel_version_parses_version_field(self):
-        self.assertEqual(
-            BackwardCompatRunner._wheel_version(
-                "/tmp/databricks_labs_sdp_meta-0.2.0-py3-none-any.whl"
-            ),
-            "0.2.0",
-        )
-
-    def test_wheel_version_rejects_malformed_name(self):
-        with self.assertRaisesRegex(ValueError, "Unrecognized wheel filename"):
-            BackwardCompatRunner._wheel_version("/tmp/not_a_wheel-0.1.0.whl")
-
-    def test_resolve_version_derives_from_wheels_when_unset(self):
-        self.conf.target_package_version = None
-        self.conf.target_main_whl_local = (
-            "/tmp/databricks_labs_sdp_meta-0.2.0-py3-none-any.whl"
-        )
-        self.conf.target_compat_whl_local = "/tmp/dlt_meta-0.2.0-py3-none-any.whl"
-
-        self.runner._resolve_target_package_version(self.conf)
-
-        self.assertEqual(self.conf.target_package_version, "0.2.0")
-
-    def test_resolve_version_rejects_explicit_mismatch(self):
-        self.conf.target_package_version = "0.1.0"
-        self.conf.target_main_whl_local = (
-            "/tmp/databricks_labs_sdp_meta-0.2.0-py3-none-any.whl"
-        )
-        self.conf.target_compat_whl_local = "/tmp/dlt_meta-0.2.0-py3-none-any.whl"
-
-        with self.assertRaisesRegex(RuntimeError, "does not match the built"):
-            self.runner._resolve_target_package_version(self.conf)
-
-    def test_resolve_version_rejects_disagreeing_wheels(self):
-        self.conf.target_package_version = None
-        self.conf.target_main_whl_local = (
-            "/tmp/databricks_labs_sdp_meta-0.2.0-py3-none-any.whl"
-        )
-        self.conf.target_compat_whl_local = "/tmp/dlt_meta-0.1.0-py3-none-any.whl"
-
-        with self.assertRaisesRegex(RuntimeError, "disagree on version"):
-            self.runner._resolve_target_package_version(self.conf)
-
-    def _make_primary_wheel(self, tmp, requires):
-        """Write a minimal wheel zip carrying the given Requires-Dist lines."""
-        wheel_path = os.path.join(
-            tmp, "databricks_labs_sdp_meta-0.1.0-py3-none-any.whl"
-        )
-        metadata = ["Metadata-Version: 2.1", "Name: databricks-labs-sdp-meta"]
-        metadata += [f"Requires-Dist: {req}" for req in requires]
-        with zipfile.ZipFile(wheel_path, "w") as zf:
-            zf.writestr(
-                "databricks_labs_sdp_meta-0.1.0.dist-info/METADATA",
-                "\n".join(metadata) + "\n",
-            )
-        return wheel_path
-
-    def test_primary_wheel_required_dists_skips_conditional(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            wheel = self._make_primary_wheel(
-                tmp,
-                [
-                    "databricks-sdk>=0.138.0,<1",
-                    "PyYAML>=6.0,<7",
-                    'pytest; extra == "dev"',
-                    'tomli; python_version < "3.11"',
-                ],
-            )
-            self.assertEqual(
-                BackwardCompatRunner._primary_wheel_required_dists(wheel),
-                {"databricks_sdk", "pyyaml"},
-            )
-
-    def test_assert_wheelhouse_complete_passes_when_deps_present(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            self.conf.target_main_whl_local = self._make_primary_wheel(
-                tmp, ["databricks-sdk>=0.138.0,<1", "PyYAML>=6.0,<7"]
-            )
-            self.conf.target_dependency_whls_local = [
-                "/tmp/wh/databricks_sdk-0.30.0-py3-none-any.whl",
-                "/tmp/wh/PyYAML-6.0.1-cp312-cp312-manylinux2014_x86_64.whl",
-            ]
-            # Should not raise.
-            self.runner._assert_wheelhouse_complete(self.conf, tmp)
-
-    def test_assert_wheelhouse_complete_flags_missing_dep(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            self.conf.target_main_whl_local = self._make_primary_wheel(
-                tmp, ["databricks-sdk>=0.138.0,<1", "PyYAML>=6.0,<7"]
-            )
-            self.conf.target_dependency_whls_local = [
-                "/tmp/wh/databricks_sdk-0.30.0-py3-none-any.whl",
-            ]
-            with self.assertRaisesRegex(RuntimeError, "pyyaml"):
-                self.runner._assert_wheelhouse_complete(self.conf, tmp)
-
-    @patch.object(BackwardCompatRunner, "_assert_wheelhouse_complete")
-    @patch("integration_tests.run_backward_compat_tests.os.listdir", return_value=[])
-    @patch("integration_tests.run_backward_compat_tests.os.makedirs")
-    @patch("integration_tests.run_backward_compat_tests.shutil.rmtree")
-    @patch("integration_tests.run_backward_compat_tests.subprocess.run")
-    def test_download_uses_configured_interpreter_and_timeout(
-        self, mock_run, _rmtree, _makedirs, _listdir, _assert_complete
-    ):
-        self.conf.compat_python_version = "3.11"
-        self.conf.target_main_whl_local = (
-            "/tmp/databricks_labs_sdp_meta-0.1.0-py3-none-any.whl"
-        )
-        self.conf.target_compat_whl_local = "/tmp/dlt_meta-0.1.0-py3-none-any.whl"
-        mock_run.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
-
-        self.runner._download_compat_runtime_wheels(self.conf)
-
-        args, kwargs = mock_run.call_args
-        command = args[0]
-        self.assertIn("--python-version", command)
-        self.assertEqual(command[command.index("--python-version") + 1], "3.11")
-        self.assertIn("cp311", command)
-        self.assertIn("abi3", command)
-        self.assertEqual(
-            kwargs["timeout"], BackwardCompatRunner.COMPAT_DOWNLOAD_TIMEOUT_SEC
-        )

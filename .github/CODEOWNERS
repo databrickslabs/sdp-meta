@@ -7,6 +7,4 @@
 
 # Package build definitions (what actually ships to PyPI)
 /setup.py            @ravi-databricks
-/compat/setup.py     @ravi-databricks
-/compat/MANIFEST.in  @ravi-databricks
 /labs.yml            @ravi-databricks

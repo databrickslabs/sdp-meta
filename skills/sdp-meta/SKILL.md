@@ -16,8 +16,8 @@ Add a table by adding a metadata entry — not by writing another pipeline.
 
 - **Package:** `databricks-labs-sdp-meta` (formerly `dlt-meta`).
 - **CLI:** `databricks labs sdp-meta <command>`.
-- **Canonical imports:** `from databricks.labs.sdp_meta.dataflow_pipeline import DataflowPipeline`
-  (v0.0.10 `from src.*` still resolves via the bundled compat shim).
+- **Canonical imports:** `from databricks.labs.sdp_meta.dataflow_pipeline import DataflowPipeline`.
+  Version 0.2.0 does not support `dlt_meta` or `src.*` imports.
 - **Relationship to plain SDP:** SDP-META *generates* SDP pipelines. Use this
   skill when the user wants config-driven fan-out across many tables/layers;
   hand-authored streaming tables / materialized views are plain SDP.
@@ -128,6 +128,7 @@ Full field reference: [references/onboarding-spec.md](references/onboarding-spec
 | CLI commands (`onboard`/`deploy`), the DAB workflow, wheel delivery flags | [references/cli-and-bundles.md](references/cli-and-bundles.md) |
 | GitHub Actions/Azure DevOps, OAuth, targets, permissions, promotion, rollback | [references/ci-cd-automation.md](references/ci-cd-automation.md) |
 | MCP tools + registering the sdp-meta MCP server for agents | [references/mcp-tools.md](references/mcp-tools.md) |
+| Migrating DLT-META or SDP-META v0.1.x to v0.2.0 | [references/migration.md](references/migration.md) |
 
 ## Common issues
 

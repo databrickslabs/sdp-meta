@@ -2308,15 +2308,34 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result, "my_schema")
 
     def test_get_schema_from_json_with_legacy_dlt_meta_key(self):
-        """Test _get_schema_from_json returns value for legacy dlt_meta_schema key."""
+        """Legacy onboarding details remain deployable after upgrading."""
         oc_json = {"dlt_meta_schema": "legacy_schema"}
-        with self.assertLogs('databricks.labs.sdp_meta', level='WARNING') as cm:
+        with self.assertLogs(
+            "databricks.labs.sdp_meta", level="WARNING"
+        ) as captured:
             result = SDPMeta._get_schema_from_json(oc_json)
         self.assertEqual(result, "legacy_schema")
-        self.assertTrue(any("legacy key 'dlt_meta_schema'" in msg for msg in cm.output))
+        self.assertTrue(
+            any("deprecated key 'dlt_meta_schema'" in msg for msg in captured.output)
+        )
+
+    def test_get_schema_from_json_prefers_sdp_meta_key(self):
+        """Canonical schema wins when both spellings are present."""
+        oc_json = {
+            "sdp_meta_schema": "current_schema",
+            "dlt_meta_schema": "legacy_schema",
+        }
+        with self.assertLogs(
+            "databricks.labs.sdp_meta", level="WARNING"
+        ) as captured:
+            result = SDPMeta._get_schema_from_json(oc_json)
+        self.assertEqual(result, "current_schema")
+        self.assertTrue(
+            any("Ignoring deprecated key" in msg for msg in captured.output)
+        )
 
     def test_get_schema_from_json_missing_key_raises(self):
-        """Test _get_schema_from_json raises KeyError when neither key is present."""
+        """Test _get_schema_from_json raises when both keys are absent."""
         oc_json = {"some_other_key": "value"}
         with self.assertRaises(KeyError) as context:
             SDPMeta._get_schema_from_json(oc_json)

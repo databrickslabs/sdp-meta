@@ -27,7 +27,7 @@
 #                       — wheel build inputs referenced by setup.py
 #                       — needed by `python setup.py bdist_wheel` at boot
 #
-# Everything else at the repo root (docs/, tests/, compat/,
+# Everything else at the repo root (docs/, tests/,
 # lakehouse_app/, scripts/, coverage_html_report/, demo_runs/, …) is NOT
 # read at runtime and is deliberately excluded — was 350+ MB of dead weight
 # in the App container before this allow-list change.
@@ -125,7 +125,7 @@ if [[ -f app.yaml ]]; then
 fi
 
 # ── Stage repo into a temp directory ─────────────────────────────────────────
-STAGING="$(mktemp -d -t dltmeta-deploy.XXXXXX)"
+STAGING="$(mktemp -d -t sdpmeta-deploy.XXXXXX)"
 trap 'rm -rf "$STAGING"' EXIT
 
 # Allow-list, NOT exclude-list. Previous versions of this script rsynced the
@@ -133,7 +133,7 @@ trap 'rm -rf "$STAGING"' EXIT
 # unrelated content (docs/ at 336 MB, tests/ at 29 MB, plus coverage_html_report/,
 # examples/, lakehouse_app/, demo_runs/, spark-warehouse/, …) into the App
 # source-code-path on every deploy. None of that is read at runtime: start.sh
-# only requires demo/, src/, compat/, examples/, integration_tests/ and the
+# only requires demo/, src/, examples/, integration_tests/ and the
 # databricks_app/ Flask app, plus the setup.py + MANIFEST.in pair (and the
 # files MANIFEST.in references) to build the sdp-meta wheel. Staging is now
 # exactly that subset,
@@ -142,7 +142,6 @@ trap 'rm -rf "$STAGING"' EXIT
 APP_RUNTIME_DIRS=(
     src                 # wheel build source (python setup.py bdist_wheel)
     examples            # packaged MCP JSON/YAML examples required by setup.py
-    compat              # dlt_meta and src compatibility packages used by setup.py
     demo                # launch_*_demo.py + conf templates + sample data
     integration_tests   # imported by every demo launcher
     databricks_app      # the Flask app itself

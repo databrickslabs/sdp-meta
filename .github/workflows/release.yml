@@ -53,12 +53,12 @@ jobs:
           fi
 
   # ------------------------------------------------------------------
-  # 2) Build both wheels on the protected runner.
+  # 2) Build the distribution on the protected runner.
   #    Build deps are hash-pinned; build runs with --no-isolation so
   #    nothing is fetched from pypi.org at build time.
   # ------------------------------------------------------------------
   build:
-    name: Build sdp-meta packages
+    name: Build sdp-meta package
     needs: authorize
     runs-on:
       group: databrickslabs-protected-runner-group
@@ -105,64 +105,23 @@ jobs:
           missing = required - names
           if missing:
               raise SystemExit(f"MCP wheel assets missing: {sorted(missing)}")
+          forbidden = [
+              name
+              for name in names
+              if name.startswith(("dlt_meta/", "src/")) or name == "dlt_meta.pth"
+          ]
+          if forbidden:
+              raise SystemExit(
+                  f"Compatibility shim files found in primary wheel: {sorted(forbidden)}"
+              )
           if any(name.startswith("databricks/labs/sdp_meta/mcp/") for name in names):
               raise SystemExit("Removed sdp_meta.mcp package would shadow the MCP SDK")
           PY
           verify_env="$(mktemp -d)"
           python -m venv "${verify_env}"
           "${verify_env}/bin/python" -m pip install --no-deps "${wheel}"
-          (
-            cd /tmp
-            "${verify_env}/bin/python" - <<'PY'
-          from importlib.resources import files
-          import databricks.labs.sdp_meta
-          import databricks.labs.sdp_meta._packaged_examples
-
-          root = files("databricks.labs.sdp_meta._packaged_examples")
-          templates = [
-              path
-              for directory in ("json", "yml")
-              for path in root.joinpath(directory).rglob("*")
-              if path.is_file()
-          ]
-          if len(templates) != 34:
-              raise SystemExit(
-                  f"Installed MCP package exposes {len(templates)} templates, expected 34"
-              )
-          print("primary wheel import and packaged assets verified")
-          PY
-          )
-
-      - name: Build compat redirect (dlt-meta)
-        working-directory: compat
-        run: python -m build --no-isolation --outdir ../dist/compat
-
-      - name: Verify compatibility wheel import and startup
-        run: |
-          verify_env="$(mktemp -d)"
-          python -m venv "${verify_env}"
-          "${verify_env}/bin/python" -m pip install --no-deps \
-            dist/primary/databricks_labs_sdp_meta-*.whl \
-            dist/compat/dlt_meta-*.whl
-          err=$("${verify_env}/bin/python" -c "print('ok')" 2>&1 >/dev/null)
-          if [[ -n "${err}" ]]; then
-            echo "python startup wrote to stderr after wheel installation:"
-            echo "${err}"
-            exit 1
-          fi
-          (
-            cd /tmp
-            "${verify_env}/bin/python" - <<'PY'
-          import warnings
-          warnings.simplefilter("ignore", DeprecationWarning)
-
-          import databricks.labs.sdp_meta
-          import dlt_meta
-          import src.dataflow_pipeline
-
-          print("primary and compatibility wheel imports verified")
-          PY
-          )
+          bash .github/scripts/verify-installed-wheel.sh \
+            "${verify_env}/bin/python"
 
       # A tag is the only thing that names the release, but the versions live
       # in setup.py. Without this, tagging v0.2.0 would happily publish 0.1.0.
@@ -177,7 +136,7 @@ jobs:
           TAG_NAME: ${{ github.ref_name }}
         run: |
           expected="${TAG_NAME#v}"
-          for whl in dist/primary/databricks_labs_sdp_meta-*.whl dist/compat/dlt_meta-*.whl; do
+          for whl in dist/primary/databricks_labs_sdp_meta-*.whl; do
             # Wheel filename: {name}-{version}-{python}-{abi}-{platform}.whl
             actual="$(basename "$whl" | cut -d- -f2)"
             if [[ "$actual" != "$expected" ]]; then
@@ -186,14 +145,12 @@ jobs:
               exit 1
             fi
           done
-          echo "OK: both packages built as version ${expected}."
+          echo "OK: package built as version ${expected}."
 
       - name: Generate SLSA build provenance attestation
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: |
-            dist/primary/*
-            dist/compat/*
+          subject-path: dist/primary/*
 
       - name: Upload built artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -276,7 +233,7 @@ jobs:
         run: |
           # gh attestation verify takes exactly ONE subject per invocation.
           shopt -s nullglob
-          files=(dist/primary/* dist/compat/*)
+          files=(dist/primary/*)
           (( ${#files[@]} > 0 )) || { echo "ERROR: no artifacts to verify"; exit 1; }
           for f in "${files[@]}"; do
             echo "Verifying $(basename "$f") ..."
@@ -289,19 +246,11 @@ jobs:
       - name: Verify PyPI auth (OIDC Trusted Publishing — no upload)
         run: bash .github/scripts/pypi-verify-auth.sh
 
-      # skip-existing makes a rerun idempotent: if the compat upload fails
-      # after the primary succeeded, rerunning this job skips the
-      # already-published primary files instead of erroring on them.
+      # skip-existing makes a rerun idempotent.
       - name: Publish databricks-labs-sdp-meta to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: dist/primary
-          skip-existing: true
-
-      - name: Publish dlt-meta compat redirect to PyPI
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
-        with:
-          packages-dir: dist/compat
           skip-existing: true
 
   # ==================================================================
@@ -332,8 +281,6 @@ jobs:
           files: |
             dist/primary/databricks_labs_sdp_meta-*.whl
             dist/primary/databricks_labs_sdp_meta-*.tar.gz
-            dist/compat/dlt_meta-*.whl
-            dist/compat/dlt_meta-*.tar.gz
 
       - name: Sign artifacts with Sigstore
         uses: sigstore/gh-action-sigstore-python@790bc6befb9d733738f18d8f895854b453640ec9 # v3.5.0
@@ -341,6 +288,4 @@ jobs:
           inputs: |
             dist/primary/databricks_labs_sdp_meta-*.whl
             dist/primary/databricks_labs_sdp_meta-*.tar.gz
-            dist/compat/dlt_meta-*.whl
-            dist/compat/dlt_meta-*.tar.gz
           release-signing-artifacts: true

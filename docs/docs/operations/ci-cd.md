@@ -384,7 +384,7 @@ configured package index:
 wheel_source:
   default: pypi
 sdp_meta_dependency:
-  default: databricks-labs-sdp-meta==0.1.1
+  default: databricks-labs-sdp-meta==0.2.0
 ```
 
 This is the simplest strategy for public releases. Always pin a version; do
@@ -400,7 +400,7 @@ build:
 wheel_source:
   default: volume_path
 sdp_meta_dependency:
-  default: /Volumes/<catalog>/<schema>/<volume>/databricks_labs_sdp_meta-0.1.1-py3-none-any.whl
+  default: /Volumes/<catalog>/<schema>/<volume>/databricks_labs_sdp_meta-0.2.0-py3-none-any.whl
 ```
 
 For a released version, download and upload the pinned wheel in a separate
@@ -411,10 +411,10 @@ python -m pip download \
   --only-binary=:all: \
   --no-deps \
   --dest dist \
-  databricks-labs-sdp-meta==0.1.1
+  databricks-labs-sdp-meta==0.2.0
 databricks fs cp \
-  dist/databricks_labs_sdp_meta-0.1.1-py3-none-any.whl \
-  dbfs:/Volumes/<catalog>/<schema>/<volume>/databricks_labs_sdp_meta-0.1.1-py3-none-any.whl \
+  dist/databricks_labs_sdp_meta-0.2.0-py3-none-any.whl \
+  dbfs:/Volumes/<catalog>/<schema>/<volume>/databricks_labs_sdp_meta-0.2.0-py3-none-any.whl \
   --overwrite
 ```
 

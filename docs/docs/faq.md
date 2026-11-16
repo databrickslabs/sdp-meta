@@ -51,7 +51,8 @@ Configure `source_metadata` inside `source_details`. See [Autoloader — File me
 
 **Q: What is the new CLI command? I was using `databricks labs dlt-meta`.**
 
-The command is now `databricks labs sdp-meta`. The old `dlt-meta` commands are forwarded automatically with a deprecation banner, so existing scripts keep working — but update them before v0.2.0 when the forwarding is removed.
+The command is `databricks labs sdp-meta`. Version 0.2.0 no longer forwards
+the old command, so update scripts before upgrading.
 
 ```bash
 # Before
@@ -67,7 +68,12 @@ The install command also changes: `databricks labs install sdp-meta`.
 
 **Q: My onboarding file was written for DLT-META. Is it compatible?**
 
-Yes — the onboarding file format (JSON or YAML) is fully backward-compatible. Field names are unchanged. The only things that need updating are the workspace config keys, which were renamed from their `dlt_meta_*` spellings to `sdp_meta_*`: `dlt_meta_operation` → `sdp_meta_operation`, `dlt_meta_schema` → `sdp_meta_schema`, `dlt_meta_layer` → `sdp_meta_layer`, and `dlt_meta_onboard_group` → `sdp_meta_onboard_group` (the old keys are still accepted with a logged warning until v0.2.0; if both spellings are present, the `sdp_meta_*` value wins).
+Yes. Preserve the onboarding JSON/YAML and its dataflow fields. Before
+upgrading to v0.2.0, you should rename the workspace config keys:
+`dlt_meta_operation` → `sdp_meta_operation`, `dlt_meta_schema` →
+`sdp_meta_schema`, `dlt_meta_layer` → `sdp_meta_layer`, and
+`dlt_meta_onboard_group` → `sdp_meta_onboard_group`. Version 0.2.0 still reads
+the old keys with deprecation warnings and normalizes them in memory.
 
 **Q: My runner notebook uses `init_dlt_meta_pipeline.py`. Do I need to update it?**
 
@@ -75,19 +81,25 @@ Yes. The runner notebook was renamed to `init_sdp_meta_pipeline.py`. Re-run `dat
 
 **Q: My existing DLT-META pipelines are running in production. Will they break?**
 
-They keep running as-is — the pipeline graph is unchanged. However, if you upgrade the wheel to `databricks-labs-sdp-meta` you must also migrate away from Legacy Publishing Mode (see below) and update any `PythonWheelTask` `package_name` from `dlt_meta` to `databricks_labs_sdp_meta`. The safest upgrade path is: migrate to default publishing mode first → test in non-prod → upgrade the wheel → update the runner notebook.
+Do not replace a production pipeline just for the rename. Preserve its
+pipeline ID, tables, storage, and checkpoints, but update its wheel dependency,
+runner notebook, and configuration before starting it on v0.2.0. Change every
+`PythonWheelTask.package_name` from `dlt_meta` to
+`databricks_labs_sdp_meta`. Test the in-place update in non-production first.
 
-**Q: My pipeline runs in Legacy Publishing Mode (DPM). Can I upgrade to v0.1.0?**
+**Q: My pipeline runs in Legacy Publishing Mode. Can I upgrade to v0.2.0?**
 
-No — not yet. You must migrate to the default publishing mode first, then upgrade. Legacy DPM pipelines with custom schemas will fail at runtime in v0.1.0 with:
-```
-DLTAnalysisException: Materializing tables in custom schemas is not supported.
-```
-Follow the Databricks guide to [migrate to the default publishing mode](https://docs.databricks.com/aws/en/ldp/migrate-to-dpm#migrate-to-the-default-publishing-mode) before upgrading. Test in a non-production environment — the migration is one-way.
+Yes. SDP-META v0.2.0 supports updating an existing legacy-publishing-mode
+pipeline in place while retaining its pipeline ID, target schema, tables, and
+checkpoints. Update the wheel, runner, and configuration together and validate
+the upgrade in non-production. Migrating separately to
+[default publishing mode](https://docs.databricks.com/aws/en/ldp/migrate-to-dpm#migrate-to-the-default-publishing-mode)
+is optional and irreversible.
 
 **Q: My notebooks use `from src.dataflow_pipeline import DataflowPipeline`. Will they break?**
 
-No. A `sys.modules` shim maps all `src.*` imports to `databricks.labs.sdp_meta.*` automatically. Your notebooks keep working without changes. This shim will be removed in v0.2.0 — update imports before then.
+Yes, on v0.2.0. Replace `src.*` and `dlt_meta.*` imports with
+`databricks.labs.sdp_meta.*` imports before upgrading.
 
 **Q: My code uses `import dlt`. Does v0.1.0 still support this?**
 
@@ -121,8 +133,14 @@ DBFS paths still work, but the recommended approach for Unity Catalog workspaces
 
 The `dlt_meta_operation`, `dlt_meta_schema`, `dlt_meta_layer`, and
 `dlt_meta_onboard_group` keys were renamed to their `sdp_meta_*` equivalents.
-SDP-META v0.1.1 accepts the old names with logged warnings; when both names are
-present, the current `sdp_meta_*` value wins. Update them before v0.2.0.
+Version 0.2.0 continues reading the old names with deprecation warnings. If
+both forms are present, the canonical key wins. Saving the configuration emits
+only `sdp_meta_*` names.
+
+Existing `onboarding_job_details.json` files containing `dlt_meta_schema` also
+remain deployable. The CLI logs a deprecation warning and prefers
+`sdp_meta_schema` when both keys are present; newly generated files use only
+the canonical key.
 
 **Q: My pipeline uses `database` as a single schema name (not `catalog.schema`). Does UC mode still work?**
 
@@ -228,7 +246,7 @@ Change `wheel_source` and `sdp_meta_dependency` in `resources/variables.yml`, th
 wheel_source:
   default: volume_path
 sdp_meta_dependency:
-  default: /Volumes/my_catalog/my_schema/my_volume/databricks_labs_sdp_meta-0.1.1-py3-none-any.whl
+  default: /Volumes/my_catalog/my_schema/my_volume/databricks_labs_sdp_meta-0.2.0-py3-none-any.whl
 ```
 Run `bundle-prepare-wheel` first to build and upload the wheel if you don't have the path yet.
 
@@ -245,19 +263,19 @@ Per-target catalog, schema, and variable overrides live under `targets.prod.vari
 
 ## Installation & PyPI
 
-**Q: What is the difference between `databricks-labs-sdp-meta` and `dlt-meta` on PyPI?**
+**Q: I was using `pip install dlt-meta`. What must I change for v0.2.0?**
 
-`databricks-labs-sdp-meta` is the primary package with all code. `dlt-meta` is an empty compatibility wrapper that declares `databricks-labs-sdp-meta` as a dependency — so `pip install dlt-meta` keeps working for existing users without any notebook changes.
+Uninstall the old distribution first, then install the canonical package:
 
-**Q: I was using `pip install dlt-meta`. Do I need to change anything?**
+```bash
+python -m pip uninstall -y dlt-meta
+python -m pip install databricks-labs-sdp-meta==0.2.0
+```
 
-No. `pip install dlt-meta==0.1.1` installs
-`databricks-labs-sdp-meta==0.1.1` as a dependency automatically. Your existing
-`from dlt_meta import ...` imports continue to work with a deprecation warning.
-
-**Q: When will the `dlt-meta` compatibility package be removed?**
-
-The compat package will be maintained through v0.1.x with no new features. `src.*` imports (v0.0.10 style) will be removed in v0.2.0. The `dlt-meta` package itself will be removed in a future major version. See the full [deprecation timeline](./operations/migration#deprecation-timeline).
+The uninstall-first order is mandatory because older installations can leave a
+`dlt_meta.pth` startup hook in the environment. Then update imports, commands,
+runner names, task package names, and configuration keys according to the
+[migration guide](./operations/migration).
 
 ---
 

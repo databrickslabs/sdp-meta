@@ -2,11 +2,11 @@ variables:
   dev_catalog_name:
     description: The catalog name for development environment
     type: string
-    default: ravi_dlt_meta_uc
+    default: sdp_meta_uc
   prod_catalog_name:
     description: The catalog name for production environment
     type: string
-    default: ravi_dlt_meta_uc
+    default: sdp_meta_uc
   sdp_meta_schema:
     description: The schema name for the pipelines
     type: string
@@ -38,15 +38,15 @@ variables:
   author:
     description: The author of the import
     type: string
-    default: ravi.gawai@databricks.com
+    default: user@databricks.com
   people_onboarding_file_path:
     description: The path to the onboarding file for people
     type: string
-    default: /Volumes/ravi_dlt_meta_uc/sdp_meta_dataflowspecs_demo_d65f39ed6b6d4881977c595ee90e14f9/dlt_meta_files/demo/dabs/conf/yml/onboarding_bronze_silver_people.yml
+    default: /Volumes/sdp_meta_uc/sdp_meta_dataflowspecs_demo_d65f39ed6b6d4881977c595ee90e14f9/sdp_meta_files/demo/dabs/conf/yml/onboarding_bronze_silver_people.yml
   people_fanout_onboarding_file_path:
     description: The path to the onboarding file for people
     type: string
-    default: /Volumes/ravi_dlt_meta_uc/sdp_meta_dataflowspecs_demo_d65f39ed6b6d4881977c595ee90e14f9/dlt_meta_files/demo/dabs/conf/yml/onboarding_silver_fanout_people.yml
+    default: /Volumes/sdp_meta_uc/sdp_meta_dataflowspecs_demo_d65f39ed6b6d4881977c595ee90e14f9/sdp_meta_files/demo/dabs/conf/yml/onboarding_silver_fanout_people.yml
   dummy_param:
     description: A dummy parameter for testing purposes
     type: string
@@ -73,4 +73,4 @@ variables:
       notebooks via spark.conf.get('sdp_meta_whl'). Used because the package is not
       yet published to PyPI.
     type: string
-    default: /Volumes/ravi_dlt_meta_uc/sdp_meta_dataflowspecs_demo_d65f39ed6b6d4881977c595ee90e14f9/dlt_meta_files/wheels/databricks_labs_sdp_meta-0.1.1-py3-none-any.whl
+    default: /Volumes/sdp_meta_uc/sdp_meta_dataflowspecs_demo_d65f39ed6b6d4881977c595ee90e14f9/sdp_meta_files/wheels/databricks_labs_sdp_meta-0.2.0-py3-none-any.whl

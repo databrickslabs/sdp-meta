@@ -8,6 +8,29 @@ sidebar_position: 99
 
 ---
 
+## v0.2.0
+
+### Breaking Changes
+
+- **Legacy naming compatibility removed** — the `dlt-meta` compatibility
+  distribution, `dlt_meta` and `src.*` imports, old Labs CLI forwarding,
+  and the `DLTMeta` alias are unsupported.
+- **Persisted workspace configuration remains readable** — legacy
+  `dlt_meta_*` keys migrate to `sdp_meta_*` during deserialization with
+  deprecation warnings; saved configurations use canonical keys. Existing
+  `onboarding_job_details.json` files using `dlt_meta_schema` also remain
+  deployable; the canonical key wins when both forms are present.
+- **Clean migration required** — uninstall `dlt-meta` before installing
+  `databricks-labs-sdp-meta==0.2.0` to remove the old distribution and its
+  potentially stale `dlt_meta.pth` startup hook. Use the canonical runner,
+  `sdp_meta_whl` key, and `databricks_labs_sdp_meta` task package.
+
+Existing onboarding specs, dataflow-spec tables, output data, pipeline IDs,
+storage, and checkpoints can be preserved through an in-place resource update.
+See the [v0.2 migration guide](./operations/migration).
+
+---
+
 ## v0.1.1
 
 ### New Features

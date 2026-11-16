@@ -1,9 +1,10 @@
 """Git-ref-based wheel builder for backward-compatibility integration tests.
 
-The backward-compatibility test runs Phase 1 against a v0.0.10 wheel and
-Phase 2 against a wheel built from the ``v0.1.0`` tag.
-Building both wheels from the SAME local clone — without polluting the
-working tree — is what this module does.
+By default, the backward-compatibility test runs Phase 1 against a v0.0.10
+wheel and Phase 2 against the moving ``main`` pre-release target. Callers can
+pin any tag, branch, or SHA; after v0.2.0 is published, post-release checks
+should explicitly use the ``v0.2.0`` tag. Building both wheels from the SAME
+local clone — without polluting the working tree — is what this module does.
 
 Mechanism
 ---------
@@ -22,9 +23,8 @@ For each requested git ref:
 
 The builder is intentionally minimal: no virtualenv, no
 ``pip wheel . --no-deps``, no ``python -m build``. Just ``setup.py
-bdist_wheel`` because that's what every released ref of this repo (and
-the current ``feature/sdp-meta`` branch) supports out of the box without
-extra dependencies. Build dependencies (``setuptools``, ``wheel``) are
+bdist_wheel`` because supported historical and current refs can run it
+without extra project tooling. Build dependencies (``setuptools``, ``wheel``) are
 expected on the developer's PATH already — the same ``pip install -e .``
 they ran for unit tests covers it.
 """
@@ -90,7 +90,7 @@ class GitRefWheelBuilder:
 
         builder = GitRefWheelBuilder()
         source_whl = builder.build("v0.0.10")
-        target_whl = builder.build("v0.1.0")
+        target_whl = builder.build("v0.2.0")
         # Both paths are absolute, both wheels live under <repo>/.bc_wheels/dist/.
         builder.cleanup()
     """
@@ -116,7 +116,6 @@ class GitRefWheelBuilder:
         ref: str,
         *,
         fetch: bool = True,
-        subdir: Optional[str] = None,
     ) -> Path:
         """Build a wheel from ``ref`` and return its absolute path.
 
@@ -126,55 +125,41 @@ class GitRefWheelBuilder:
         ``git fetch origin <ref>`` first so freshly-pushed remote refs
         are visible locally.
 
-        ``subdir`` (optional) tells the builder to run ``setup.py
-        bdist_wheel`` inside ``<worktree>/<subdir>`` instead of the
-        worktree root. Use this to build sibling packages that ship
-        their own setup.py (e.g. the ``compat/`` directory of the
-        v0.1.0 ref builds the ``dlt_meta`` compatibility wheel).
-
-        Worktree paths are slugified per (ref, subdir) so two builds
-        from the same ref but different subdirs don't collide.
+        The wheel is always built from the repository root.
         """
         self._ensure_repo()
         if fetch:
             self._fetch(ref)
 
         slug = _slugify_ref(ref)
-        if subdir:
-            slug = f"{slug}__{_slugify_ref(subdir)}"
         worktree = self.build_root / "worktrees" / slug
         self._add_worktree(worktree, ref)
         try:
-            build_cwd = worktree / subdir if subdir else worktree
-            if not build_cwd.exists():
-                raise WheelBuilderError(
-                    f"subdir={subdir!r} not found in ref={ref!r} "
-                    f"(expected: {build_cwd})"
-                )
+            build_cwd = worktree
             self._build_in_worktree(build_cwd)
             built = self._collect_wheel(build_cwd)
             self.dist_dir.mkdir(parents=True, exist_ok=True)
             target = self.dist_dir / built.name
             shutil.copy2(built, target)
-            print(f"  -> built wheel for ref={ref!r}{f' subdir={subdir!r}' if subdir else ''}: {target}")
+            print(f"  -> built wheel for ref={ref!r}: {target}")
             return target.resolve()
         finally:
             self._remove_worktree(worktree)
 
-    def build_from_worktree(self, *, subdir: Optional[str] = None) -> Path:
+    def build_from_worktree(self) -> Path:
         """Build a wheel directly from the developer's working tree.
 
         ``ref``-less companion to :meth:`build` for the case where the
         contributor wants to test changes that are NOT yet committed
         to any git ref. No fetch, no ``git worktree add``, no extra
-        checkout: ``setup.py bdist_wheel`` runs in
-        ``<repo_root>[/<subdir>]`` directly, so any uncommitted edits
+        checkout: ``setup.py bdist_wheel`` runs in ``<repo_root>`` directly,
+        so any uncommitted edits
         in the working tree are picked up.
 
         The produced wheel is still copied into ``<build_root>/dist/``
         (the same location as ref-based builds) so callers can use it
         interchangeably. The wheel's filename is whatever the local
-        ``setup.py`` says (e.g. ``dlt_meta-0.1.0-py3-none-any.whl``);
+        ``setup.py`` says (e.g. ``databricks_labs_sdp_meta-0.2.0-py3-none-any.whl``);
         if a same-named wheel from a previous ref-based build is
         already in ``dist/``, this build silently overwrites it.
 
@@ -182,16 +167,8 @@ class GitRefWheelBuilder:
         specific git ref via :meth:`build` so the artifact is
         reproducible from version control.
         """
-        build_cwd = self.repo_root / subdir if subdir else self.repo_root
-        if not build_cwd.exists():
-            raise WheelBuilderError(
-                f"subdir={subdir!r} not found in working tree "
-                f"(expected: {build_cwd})"
-            )
-        print(
-            f"  building wheel from local working tree"
-            f"{f' subdir={subdir!r}' if subdir else ''} (no git checkout)"
-        )
+        build_cwd = self.repo_root
+        print("  building wheel from local working tree (no git checkout)")
         self._build_in_worktree(build_cwd)
         built = self._collect_wheel(build_cwd)
         self.dist_dir.mkdir(parents=True, exist_ok=True)
@@ -331,7 +308,7 @@ def main() -> int:
 
     Usage::
 
-        python integration_tests/wheel_builder.py v0.0.10 v0.1.0
+        python integration_tests/wheel_builder.py v0.0.10 v0.2.0
     """
     if len(sys.argv) < 2:
         print(__doc__)

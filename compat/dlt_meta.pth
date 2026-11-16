@@ -1,1 +1,0 @@
-import os; os.environ.get('SDP_META_DISABLE_SRC_ALIAS') == '1' or __import__('dlt_meta')

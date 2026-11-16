@@ -1109,7 +1109,7 @@ class CustomizedBundleValidationStageTests(unittest.TestCase):
                     "onboarding_file_name": {"default": "onboarding.yml"},
                     "wheel_source": {"default": "pypi"},
                     "sdp_meta_dependency": {
-                        "default": "databricks-labs-sdp-meta==0.1.1"
+                        "default": "databricks-labs-sdp-meta==0.2.0"
                     },
                 }
             })

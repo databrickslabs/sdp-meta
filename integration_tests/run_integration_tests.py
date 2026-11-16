@@ -147,7 +147,7 @@ class SDPMetaRunnerConf:
     username: str = None
     run_name: str = None
     uc_catalog_name: str = None
-    uc_volume_name: str = "dlt_meta_files"
+    uc_volume_name: str = "sdp_meta_files"
     onboarding_file_format: str = "json"  # "json" | "yaml"
     onboarding_file_path: str = "integration_tests/conf/json/onboarding.json"
     onboarding_A2_file_path: str = "integration_tests/conf/json/onboarding_A2.json"
@@ -303,9 +303,9 @@ class SDPMETARunner:
             username=self.wsi._my_username,
             uc_catalog_name=self.args["uc_catalog_name"],
             sdp_meta_schema=f"sdp_meta_dataflowspecs_it_{run_id}",
-            bronze_schema=f"dlt_meta_bronze_it_{run_id}",
+            bronze_schema=f"sdp_meta_bronze_it_{run_id}",
             silver_schema=f"sdp_meta_silver_it_{run_id}",
-            runners_nb_path=f"/Users/{self.wsi._my_username}/dlt_meta_int_tests/{run_id}",
+            runners_nb_path=f"/Users/{self.wsi._my_username}/sdp_meta_int_tests/{run_id}",
             source=self.args["source"] if "source" in self.args else None,
             onboarding_file_format=(
                 self.args["onboarding_file_format"]
@@ -314,7 +314,7 @@ class SDPMETARunner:
             ),
             # node_type_id=cloud_node_type_id_dict[self.args["cloud_provider_name"]],
             test_output_file_path=(
-                f"/Users/{self.wsi._my_username}/dlt_meta_int_tests/"
+                f"/Users/{self.wsi._my_username}/sdp_meta_int_tests/"
                 f"{run_id}/integration-test-output.csv"
             ),
             # kafka provided args
@@ -460,7 +460,7 @@ class SDPMETARunner:
         return created.pipeline_id
 
     def create_workflow_spec(self, runner_conf: SDPMetaRunnerConf):
-        """Create the Databricks Workflow Job given the DLT Meta configuration specs"""
+        """Create the Databricks Workflow Job from SDP-META configuration."""
         sdp_meta_environments = [
             jobs.JobEnvironment(
                 environment_key="dl_meta_int_env",
@@ -820,7 +820,7 @@ class SDPMETARunner:
         SchemasAPI(self.ws.api_client).create(
             catalog_name=runner_conf.uc_catalog_name,
             name=runner_conf.sdp_meta_schema,
-            comment="dlt_meta framework schema",
+            comment="sdp_meta framework schema",
         )
         SchemasAPI(self.ws.api_client).create(
             catalog_name=runner_conf.uc_catalog_name,

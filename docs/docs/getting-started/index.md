@@ -23,7 +23,13 @@ Watch the **[SDP-Meta Deep-Dive: Building Data Pipelines at Scale on Databricks]
 </div>
 
 :::tip Migrating from DLT-META?
-If you are upgrading an existing `dlt-meta` installation after the v0.1.0 rename, follow the [migration guide](../operations/migration.md) first. Your onboarding files do not need to change, but package names, CLI commands, Python imports, and some compatibility shims have a deprecation timeline.
+If you are upgrading an existing `dlt-meta` installation, follow the
+[migration guide](../operations/migration.md) first. Version 0.2.0 requires
+uninstalling `dlt-meta` before installing the canonical package and updating
+all legacy commands, imports, runner names, and task package names. The four
+persisted `dlt_meta_*` workspace keys remain readable with warnings, although
+new and saved configuration should use `sdp_meta_*`. Your onboarding specs,
+data, and checkpoints can be preserved.
 :::
 
 ## Prerequisites (all paths)
