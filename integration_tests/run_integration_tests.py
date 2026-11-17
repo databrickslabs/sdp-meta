@@ -588,7 +588,6 @@ class SDPMETARunner:
                         ),
                         "output_file_path": f"/Workspace{runner_conf.test_output_file_path}",
                         "run_id": runner_conf.run_id,
-                        "sdp_meta_schema": runner_conf.sdp_meta_schema,
                         "bronze_pipeline_id": runner_conf.bronze_pipeline_id,
                     },
                 ),
