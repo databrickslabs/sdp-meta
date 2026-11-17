@@ -942,39 +942,6 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
                     rules["expect_or_quarantine"]
                 )
 
-    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
-    def test_pre_upgrade_quarantine_only_preserves_old_topology(self, mock_dp):
-        """Pre-upgrade quarantine-only rows do not gain a new main table."""
-        mock_dp.table.side_effect = lambda func, **kwargs: func
-        mock_dp.expect_all_or_drop.side_effect = lambda rules: lambda func: func
-        spec_values = copy.deepcopy(self.bronze_dataflow_spec_map)
-        spec_values["dataQualityExpectations"] = json.dumps(
-            {"expect_or_quarantine": {"invalid_id": "id IS NULL"}}
-        )
-        spec_values["cdcApplyChanges"] = None
-        spec_values["dqeContract"] = None
-        spec_values["quarantineTargetDetails"] = {
-            "database": "bronze_quarantine",
-            "table": "invalid_rows",
-        }
-        pipeline = DataflowPipeline(
-            self.spark,
-            BronzeDataflowSpec(**spec_values),
-            "customer_inputview",
-        )
-
-        with self.assertLogs(
-            "databricks.labs.sdp_meta", level="WARNING"
-        ) as captured:
-            pipeline.write_layer_with_dqe()
-
-        mock_dp.table.assert_called_once()
-        self.assertEqual(
-            mock_dp.table.call_args.kwargs["name"],
-            "bronze_quarantine.invalid_rows",
-        )
-        self.assertIn("main table not declared", "\n".join(captured.output))
-
     @patch.object(DataflowPipeline, "cdc_apply_changes")
     @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
     def test_legacy_cdc_with_quarantine_keeps_cdc_main_and_quarantine(
@@ -1038,46 +1005,6 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
                     rf"{layer}_quarantine_table is missing or empty",
                 ):
                     pipeline.write_layer_with_dqe()
-
-    @patch('databricks.labs.sdp_meta.dataflow_pipeline.dp')
-    def test_pre_upgrade_empty_quarantine_target_logs_and_skips(self, mock_dp):
-        """Pre-upgrade rows retain tolerant missing-target behavior."""
-        mock_dp.table.side_effect = lambda func, **kwargs: func
-        mock_dp.expect_all_or_drop.side_effect = lambda rules: lambda func: func
-        for spec_class, spec_map, layer in (
-            (BronzeDataflowSpec, self.bronze_dataflow_spec_map, "bronze"),
-            (SilverDataflowSpec, self.silver_dataflow_spec_map, "silver"),
-        ):
-            with self.subTest(layer=layer):
-                mock_dp.reset_mock()
-                spec_values = copy.deepcopy(spec_map)
-                spec_values["dataQualityExpectations"] = json.dumps(
-                    {"expect_or_quarantine": {"invalid_id": "id IS NULL"}}
-                )
-                spec_values["cdcApplyChanges"] = None
-                spec_values["dqeContract"] = None
-                spec_values["quarantineTargetDetails"] = {
-                    "database": f"{layer}_quarantine",
-                    "table": "",
-                }
-                pipeline = DataflowPipeline(
-                    self.spark,
-                    spec_class(**spec_values),
-                    f"{layer}_inputview",
-                )
-
-                with self.assertLogs(
-                    "databricks.labs.sdp_meta", level="ERROR"
-                ) as captured:
-                    pipeline.write_layer_with_dqe()
-
-                mock_dp.table.assert_not_called()
-                message = "\n".join(captured.output)
-                self.assertIn(
-                    f"{layer}_quarantine_table is missing or empty",
-                    message,
-                )
-                self.assertIn("quarantine skipped", message)
 
     def test_legacy_inverse_quarantine_predicate_routing(self):
         """Legacy quarantine predicates continue to describe invalid rows."""

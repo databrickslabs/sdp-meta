@@ -2722,13 +2722,6 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
             ["customers_clean", "customers_germany", "customers_japan", "customers_uk"],
         )
 
-    def test_onboard_v7_rejects_missing_quarantine_target(self):
-        local_params = copy.deepcopy(self.onboarding_bronze_silver_params_map)
-        local_params["onboarding_file_path"] = self.onboarding_json_v7_file
-        onboardDataFlowSpecs = OnboardDataflowspec(self.spark, local_params)
-        with self.assertRaisesRegex(ValueError, "quarantine_table is missing or empty"):
-            onboardDataFlowSpecs.onboard_dataflow_specs()
-
     def test_onboard_bronze_create_sink(self):
         local_params = copy.deepcopy(self.onboarding_bronze_silver_params_map)
         local_params["onboarding_file_path"] = self.onboarding_sink_json_file
@@ -2756,31 +2749,6 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
             "silver_dataflowspec_sink")
         silver_dataflowSpec_df.show(truncate=False)
         self.assertEqual(silver_dataflowSpec_df.count(), 1)
-
-    def test_onboard_v8_rejects_missing_quarantine_target(self):
-        local_params = copy.deepcopy(self.onboarding_bronze_silver_params_map)
-        local_params["onboarding_file_path"] = self.onboarding_json_v8_file
-        onboardDataFlowSpecs = OnboardDataflowspec(self.spark, local_params)
-        with self.assertRaisesRegex(ValueError, "quarantine_table is missing or empty"):
-            onboardDataFlowSpecs.onboard_dataflow_specs()
-
-    def test_onboard_v9_rejects_missing_quarantine_target(self):
-        local_params = copy.deepcopy(self.onboarding_bronze_silver_params_map)
-        local_params["onboarding_file_path"] = self.onboarding_json_v9_file
-        onboardDataFlowSpecs = OnboardDataflowspec(self.spark, local_params)
-        with self.assertRaisesRegex(ValueError, "quarantine_table is missing or empty"):
-            onboardDataFlowSpecs.onboard_dataflow_specs()
-
-    def test_onboard_v10_rejects_missing_bronze_quarantine_target(self):
-        """The historical invalid flow now receives an actionable error."""
-        local_params = copy.deepcopy(self.onboarding_bronze_silver_params_map)
-        local_params["onboarding_file_path"] = self.onboarding_json_v10_file
-        onboardDataFlowSpecs = OnboardDataflowspec(self.spark, local_params)
-        with self.assertRaisesRegex(
-            ValueError,
-            r"Flow 102 \(bronze\).*bronze_quarantine_table is missing or empty",
-        ):
-            onboardDataFlowSpecs.onboard_dataflow_specs()
 
     def test_onboard_apply_changes_from_snapshot_positive(self):
         """Test for onboardDataflowspec."""

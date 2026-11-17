@@ -77,7 +77,7 @@ class DQXAdapterTests(TestCase):
             self.plugin.plugin_package,
             "databricks-labs-sdp-meta",
         )
-        self.assertEqual(self.plugin.plugin_version, "0.1.0")
+        self.assertEqual(self.plugin.plugin_version, "0.2.0")
         self.assertEqual(self.plugin.engine_version, "0.16.0")
         self.assertEqual(
             self.plugin.reserved_columns(),

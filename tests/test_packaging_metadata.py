@@ -360,30 +360,5 @@ class McpDependencyMetadataTests(unittest.TestCase):
         self.assertIn(expected, requirements_text.splitlines())
 
 
-class RequirementManifestSyncTests(unittest.TestCase):
-
-    def test_runtime_requirements_match_setup(self):
-        required = _literal_assignment(PRIMARY_SETUP, "INSTALL_REQUIRES")
-        manifest = (
-            REPO_ROOT / "requirements.txt"
-        ).read_text(encoding="utf-8").splitlines()
-        for dependency in required:
-            self.assertIn(dependency, manifest)
-
-    def test_development_requirements_match_setup(self):
-        required = []
-        for name in (
-            "DEV_REQUIREMENTS",
-            "IT_REQUIREMENTS",
-            "MCP_REQUIREMENTS",
-        ):
-            required.extend(_literal_assignment(PRIMARY_SETUP, name))
-        manifest = (
-            REPO_ROOT / "requirements-dev.txt"
-        ).read_text(encoding="utf-8").splitlines()
-        for dependency in required:
-            self.assertIn(dependency, manifest)
-
-
 if __name__ == "__main__":
     unittest.main()

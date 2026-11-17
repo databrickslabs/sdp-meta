@@ -49,7 +49,12 @@ IT_REQUIREMENTS = [
 ]
 
 MCP_REQUIREMENTS = ["mcp>=2.0.0,<3.0"]
-DQX_REQUIREMENTS = ["databricks-labs-dqx>=0.14,<0.17"]
+DQX_REQUIREMENTS = [
+    "databricks-labs-dqx>=0.14,<0.17",
+    # DQX imports pandas from its core checks module but 0.16 does not declare
+    # it as a runtime dependency.
+    "pandas>=2,<3",
+]
 
 
 class BuildPyWithExamples(build_py):
