@@ -3701,3 +3701,88 @@ class LegacyPublishingModeTests(SDPFrameworkTestCase):
 
         self.assertEqual(len(captured_view_names), 1)
         self.assertEqual(captured_view_names[0], "dev_bronze_gracis_actionplans_bronze_inputview")
+
+
+class PlatformPublishingModeDetectionTests(SDPFrameworkTestCase):
+    """Publishing mode comes from the platform when pipelines.id is available (issue #250).
+
+    A pipeline configured with ``target`` can report default publishing mode while
+    ``pipelines.schema`` is unset in Spark conf. Bronze tables must still be
+    qualified with their onboarding schema in that case.
+    """
+
+    def setUp(self):
+        super().setUp()
+        cache = getattr(DataflowPipeline, "_platform_publishing_mode_cache", {})
+        cache.clear()
+        self.addCleanup(cache.clear)
+        self.spark.conf.unset("pipelines.schema")
+        self.spark.conf.unset("pipelines.id")
+
+    def _set_conf(self, key, value):
+        self.spark.conf.set(key, value)
+        self.addCleanup(self.spark.conf.unset, key)
+
+    def _mock_workspace_client(self, mode=None, error=None):
+        client = MagicMock()
+        if error is not None:
+            client.pipelines.get.side_effect = error
+        else:
+            client.pipelines.get.return_value.as_dict.return_value = {"effective_publishing_mode": mode}
+        return client
+
+    def test_platform_default_mode_wins_when_schema_conf_unset(self):
+        """Default mode reported by the API is used even when pipelines.schema is unset (issue #250)."""
+        self._set_conf("pipelines.id", "pipe-default")
+        client = self._mock_workspace_client(mode="DEFAULT_PUBLISHING_MODE")
+        with patch("databricks.sdk.WorkspaceClient", return_value=client):
+            self.assertTrue(DataflowPipeline._is_dpm_enabled(self.spark))
+        client.pipelines.get.assert_called_once_with(pipeline_id="pipe-default")
+
+    def test_platform_legacy_mode_wins_over_schema_conf(self):
+        """Legacy mode reported by the API overrides a pipelines.schema value."""
+        self._set_conf("pipelines.id", "pipe-legacy")
+        self._set_conf("pipelines.schema", "some_schema")
+        client = self._mock_workspace_client(mode="LEGACY_PUBLISHING_MODE")
+        with patch("databricks.sdk.WorkspaceClient", return_value=client):
+            self.assertFalse(DataflowPipeline._is_dpm_enabled(self.spark))
+
+    def test_falls_back_to_schema_conf_when_api_fails(self):
+        """If the API call fails, detection falls back to the pipelines.schema check."""
+        self._set_conf("pipelines.id", "pipe-err")
+        self._set_conf("pipelines.schema", "some_schema")
+        client = self._mock_workspace_client(error=RuntimeError("boom"))
+        with patch("databricks.sdk.WorkspaceClient", return_value=client):
+            self.assertTrue(DataflowPipeline._is_dpm_enabled(self.spark))
+
+    def test_api_failure_without_schema_conf_is_legacy(self):
+        """No API result and no pipelines.schema keeps the existing legacy default."""
+        self._set_conf("pipelines.id", "pipe-err2")
+        client = self._mock_workspace_client(error=RuntimeError("boom"))
+        with patch("databricks.sdk.WorkspaceClient", return_value=client):
+            self.assertFalse(DataflowPipeline._is_dpm_enabled(self.spark))
+
+    def test_unrecognised_mode_falls_back_to_schema_conf(self):
+        """An unknown effective_publishing_mode value is ignored in favour of the conf check."""
+        self._set_conf("pipelines.id", "pipe-unknown")
+        self._set_conf("pipelines.schema", "some_schema")
+        client = self._mock_workspace_client(mode="SOMETHING_NEW")
+        with patch("databricks.sdk.WorkspaceClient", return_value=client):
+            self.assertTrue(DataflowPipeline._is_dpm_enabled(self.spark))
+
+    def test_no_pipeline_id_skips_api_and_uses_schema_conf(self):
+        """Outside a pipeline runtime (no pipelines.id) the API is never called."""
+        self._set_conf("pipelines.schema", "some_schema")
+        client = self._mock_workspace_client(mode="LEGACY_PUBLISHING_MODE")
+        with patch("databricks.sdk.WorkspaceClient", return_value=client):
+            self.assertTrue(DataflowPipeline._is_dpm_enabled(self.spark))
+        client.pipelines.get.assert_not_called()
+
+    def test_platform_mode_is_cached_per_pipeline_id(self):
+        """Repeated checks for the same pipeline make only one API call."""
+        self._set_conf("pipelines.id", "pipe-cache")
+        client = self._mock_workspace_client(mode="DEFAULT_PUBLISHING_MODE")
+        with patch("databricks.sdk.WorkspaceClient", return_value=client):
+            for _ in range(3):
+                self.assertTrue(DataflowPipeline._is_dpm_enabled(self.spark))
+        self.assertEqual(client.pipelines.get.call_count, 1)

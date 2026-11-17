@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+### Fixed
+- **Bronze tables in onboarding-specified schema for `target=` pipelines**: sdp-meta now reads the platform's `effective_publishing_mode` through the pipelines API (using the runtime `pipelines.id`) to decide between default and legacy publishing mode. Previously it inferred the mode only from `pipelines.schema`, which is unset for pipelines configured with `target`, so bronze tables were created in the pipeline's default schema instead of the onboarding schema. The `pipelines.schema` check remains as a fallback when the API call fails. [Issue #250](https://github.com/databrickslabs/sdp-meta/issues/250)
+
 ## [v0.1.1]
 ### Added
 - **Multiple pipeline topologies per DAB bundle**: `bundle-add-pipeline` adds independently configured bronze, silver, split, or combined pipelines with their own data-flow groups and target schemas. `bundle-validate` validates each pipeline and its job wiring independently. [Issue #446](https://github.com/databrickslabs/sdp-meta/issues/446)
