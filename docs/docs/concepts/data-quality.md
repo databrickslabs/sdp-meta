@@ -51,12 +51,13 @@ Replace `prod` with your environment tag (`dev`, `stag`, etc.) to match your `en
 
 ## Quarantine table
 
-`expect_or_quarantine` routes failing rows to the explicitly configured
-quarantine target. Configure both the quarantine schema and table name in the
-onboarding entry: `bronze_database_quarantine_{env}` and
-`bronze_quarantine_table` for Bronze, or
-`silver_database_quarantine_{env}` and `silver_quarantine_table` for Silver.
-SDP-META does not derive a `<target_table>_quarantine` name automatically.
+`expect_or_quarantine` routes failing rows to the configured quarantine
+target. Set `bronze_quarantine_table` (or `silver_quarantine_table`) in the
+onboarding entry. The quarantine schema and catalog default to the layer's
+main target (`bronze_database_{env}` / `bronze_catalog_{env}`) when
+`bronze_database_quarantine_{env}` / `bronze_catalog_quarantine_{env}` are
+omitted; the same fallback applies for Silver. SDP-META does not derive a
+`<target_table>_quarantine` name automatically.
 
 The quarantine output preserves the input schema. It does not currently add an
 `_error` column identifying the failed expectation. Liquid clustering can be

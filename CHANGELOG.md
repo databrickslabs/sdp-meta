@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+### Fixed
+- **Quarantine target details from quarantine table alone**: onboarding now populates `quarantineTargetDetails` when `bronze_quarantine_table` or `silver_quarantine_table` is set, falling back to the layer's main catalog/database when quarantine-specific catalog/database fields are omitted. Previously those rows left `quarantineTargetDetails` empty, so pipelines with `expect_or_quarantine` rules could not create the quarantine streaming table. [Issue #495](https://github.com/databrickslabs/sdp-meta/issues/495)
+
 ## [v0.1.1]
 ### Added
 - **Multiple pipeline topologies per DAB bundle**: `bundle-add-pipeline` adds independently configured bronze, silver, split, or combined pipelines with their own data-flow groups and target schemas. `bundle-validate` validates each pipeline and its job wiring independently. [Issue #446](https://github.com/databrickslabs/sdp-meta/issues/446)
