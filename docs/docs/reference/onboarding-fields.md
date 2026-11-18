@@ -128,8 +128,8 @@ Example:
 | `bronze_table_properties` | object | Declarative Pipeline table properties, e.g. `{"pipelines.autoOptimize.managed": "false", "pipelines.reset.allowed": "false"}` |
 | `bronze_sink` | object | Declarative Pipeline Sink API configuration for writing to an external Delta table or Kafka topic — see [DLT Sink guide](../guides/dlt-sink) |
 | `bronze_data_quality_expectations_json_{env}` | string | Path to the DQE rules JSON/YAML file for bronze — see [DQ Rules](./dq-rules) |
-| `bronze_catalog_quarantine_{env}` | string | Unity Catalog name for the quarantine table |
-| `bronze_database_quarantine_{env}` | string | Schema name for the quarantine table |
+| `bronze_catalog_quarantine_{env}` | string | Unity Catalog name for the quarantine table (defaults to `bronze_catalog_{env}`) |
+| `bronze_database_quarantine_{env}` | string | Schema name for the quarantine table (defaults to `bronze_database_{env}` when `bronze_quarantine_table` is set) |
 | `bronze_quarantine_table` | string | Quarantine table name (receives rows that fail `expect_or_quarantine` rules) |
 | `bronze_quarantine_table_comment` | string | Comment applied to the quarantine table |
 | `bronze_quarantine_table_path_{env}` | string | External storage path for the quarantine table |
