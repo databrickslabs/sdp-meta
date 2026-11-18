@@ -7,13 +7,15 @@ from unittest.mock import ANY, MagicMock, call, patch
 
 from databricks.labs.sdp_meta.quality.migration import (
     PendingQualityMigration,
+    _delta_spec_table,
+    _read_spec_frame,
     complete_migrations,
     find_pending_migrations,
     migration_fingerprint,
     reconcile_migration_request,
     run_managed_quality_update,
 )
-from databricks.labs.sdp_meta.quality.migration_main import parse_args
+from databricks.labs.sdp_meta.quality.migration_main import main, parse_args
 
 
 def _pending():
@@ -184,6 +186,99 @@ class ManagedQualityUpdateTests(TestCase):
         ws.pipelines.start_update.assert_called_once_with(
             pipeline_id="pipeline-1"
         )
+
+    def test_spec_references_require_paths_and_empty_layers_are_skipped(self):
+        spark = MagicMock()
+        for reader in (_read_spec_frame, _delta_spec_table):
+            with self.subTest(reader=reader.__name__):
+                with self.assertRaisesRegex(
+                    ValueError, "requires 'path'"
+                ):
+                    reader(spark, {})
+        self.assertEqual(
+            find_pending_migrations(spark, {"bronze": None}),
+            [],
+        )
+        spark.table.assert_not_called()
+
+    def test_non_migration_snapshots_are_ignored(self):
+        frame = MagicMock()
+        frame.columns = [
+            "dataFlowId",
+            "dataFlowGroup",
+            "qualityConfig",
+            "quarantineTargetDetails",
+        ]
+        frame.filter.return_value = frame
+        frame.select.return_value.where.return_value.collect.return_value = [{
+            "dataFlowId": "100",
+            "qualityConfig": json.dumps({"migration": None}),
+            "quarantineTargetDetails": {},
+        }]
+        spark = MagicMock()
+        spark.table.return_value = frame
+        with patch("databricks.labs.sdp_meta.quality.migration.f"):
+            self.assertEqual(
+                find_pending_migrations(
+                    spark,
+                    {"bronze": "main.meta.bronze_specs"},
+                    {"bronze": "A1"},
+                ),
+                [],
+            )
+
+    def test_timeout_before_normal_update_starts(self):
+        ws = self._workspace()
+        with (
+            patch(
+                "databricks.labs.sdp_meta.quality.migration."
+                "find_pending_migrations",
+                return_value=[],
+            ),
+            patch(
+                "databricks.labs.sdp_meta.quality.migration.time.monotonic",
+                side_effect=[100, 110],
+            ),
+        ):
+            with self.assertRaisesRegex(
+                TimeoutError, "before starting the next update"
+            ):
+                run_managed_quality_update(
+                    ws,
+                    MagicMock(),
+                    "pipeline-1",
+                    {},
+                    timeout_seconds=10,
+                )
+        ws.pipelines.start_update.assert_not_called()
+
+    def test_normal_update_failure_reports_completed_migration(self):
+        ws = self._workspace()
+        ws.pipelines.get_update.side_effect = [
+            SimpleNamespace(update=SimpleNamespace(state="COMPLETED")),
+            SimpleNamespace(update=SimpleNamespace(state="FAILED")),
+        ]
+        with (
+            patch(
+                "databricks.labs.sdp_meta.quality.migration."
+                "find_pending_migrations",
+                return_value=[_pending()],
+            ),
+            patch(
+                "databricks.labs.sdp_meta.quality.migration."
+                "complete_migrations"
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "quarantine migration completed"
+            ):
+                run_managed_quality_update(
+                    ws,
+                    MagicMock(),
+                    "pipeline-1",
+                    {},
+                    poll_interval_seconds=0,
+                )
 
     def test_failed_update_does_not_clear_metadata(self):
         ws = self._workspace(state="FAILED")
@@ -423,6 +518,43 @@ class ManagedQualityUpdateTests(TestCase):
             json.loads(args.spec_tables)["bronze"],
             "main.meta.bronze_specs",
         )
+
+    def test_wheel_entrypoint_runs_with_active_or_created_spark(self):
+        argv = [
+            "--pipeline_id", "pipeline-1",
+            "--spec_tables", '{"bronze":"main.meta.bronze_specs"}',
+            "--groups", '{"bronze":"A1"}',
+            "--timeout_seconds", "30",
+        ]
+        for active_spark in ("active", None):
+            with self.subTest(active_spark=active_spark):
+                spark_session = MagicMock()
+                spark_session.getActiveSession.return_value = active_spark
+                spark_session.builder.getOrCreate.return_value = "created"
+                with (
+                    patch(
+                        "databricks.sdk.WorkspaceClient",
+                        return_value="workspace",
+                    ),
+                    patch(
+                        "pyspark.sql.SparkSession",
+                        spark_session,
+                    ),
+                    patch(
+                        "databricks.labs.sdp_meta.quality.migration."
+                        "run_managed_quality_update",
+                        return_value="result",
+                    ) as run_update,
+                ):
+                    self.assertEqual(main(argv), "result")
+                run_update.assert_called_once_with(
+                    "workspace",
+                    active_spark or "created",
+                    "pipeline-1",
+                    {"bronze": "main.meta.bronze_specs"},
+                    {"bronze": "A1"},
+                    timeout_seconds=30,
+                )
 
     def test_completed_fingerprint_is_not_rearmed(self):
         current = json.loads(_pending().original_config_json)

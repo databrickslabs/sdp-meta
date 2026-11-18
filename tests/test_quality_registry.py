@@ -2,10 +2,13 @@
 
 from types import SimpleNamespace
 from unittest import TestCase
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from databricks.labs.sdp_meta.quality.registry import (
     QualityEngineNotAvailable,
+    _entry_points,
+    _instantiate,
+    available_quality_engines,
     deployable_quality_engines,
     resolve_quality_engine,
     validate_plugin_snapshot,
@@ -116,6 +119,48 @@ class OverlapRoutingPlugin(QualityEnginePlugin):
 
 
 class QualityRegistryTests(TestCase):
+    def test_entry_point_discovery_supports_new_and_legacy_apis(self):
+        modern = MagicMock()
+        modern.select.return_value = ("modern",)
+        with patch(
+            "databricks.labs.sdp_meta.quality.registry."
+            "importlib.metadata.entry_points",
+            return_value=modern,
+        ):
+            self.assertEqual(_entry_points(), ("modern",))
+
+        with patch(
+            "databricks.labs.sdp_meta.quality.registry."
+            "importlib.metadata.entry_points",
+            return_value={
+                "databricks.labs.sdp_meta.quality_engines": ("legacy",)
+            },
+        ):
+            self.assertEqual(_entry_points(), ("legacy",))
+
+    def test_available_engines_are_sorted_and_deduplicated(self):
+        entry_points = [
+            SimpleNamespace(name="zeta"),
+            SimpleNamespace(name="lakeflow"),
+            SimpleNamespace(name="alpha"),
+            SimpleNamespace(name="alpha"),
+        ]
+        with patch(
+            "databricks.labs.sdp_meta.quality.registry._entry_points",
+            return_value=entry_points,
+        ):
+            self.assertEqual(
+                available_quality_engines(),
+                ("lakeflow", "dqx", "alpha", "zeta"),
+            )
+
+    def test_instantiation_supports_classes_factories_and_instances(self):
+        spark = object()
+        self.assertIsInstance(_instantiate(SyntheticPlugin, spark), SyntheticPlugin)
+        instance = SyntheticPlugin()
+        self.assertIs(_instantiate(lambda value: instance, spark), instance)
+        self.assertIs(_instantiate(instance, spark), instance)
+
     def test_remote_plugins_require_an_explicit_dependency(self):
         self.assertEqual(
             deployable_quality_engines(), ("lakeflow", "dqx")
@@ -142,6 +187,58 @@ class QualityRegistryTests(TestCase):
             ):
                 resolve_quality_engine("missing", object())
 
+    def test_builtin_engines_resolve_without_entry_points(self):
+        self.assertEqual(
+            resolve_quality_engine("lakeflow", object()).__class__.__name__,
+            "LakeflowQualityEngine",
+        )
+        self.assertEqual(
+            resolve_quality_engine("dqx", object()).__class__.__name__,
+            "DQXQualityEngine",
+        )
+
+    def test_plugin_resolution_rejects_duplicates_invalid_type_and_spi(self):
+        duplicate = [
+            SimpleNamespace(name="custom"),
+            SimpleNamespace(name="custom"),
+        ]
+        with patch(
+            "databricks.labs.sdp_meta.quality.registry._entry_points",
+            return_value=duplicate,
+        ):
+            with self.assertRaisesRegex(
+                QualityEngineNotAvailable, "Multiple installed plugins"
+            ):
+                resolve_quality_engine("custom", object())
+
+        invalid = SimpleNamespace(
+            name="custom",
+            load=lambda: object(),
+        )
+        with patch(
+            "databricks.labs.sdp_meta.quality.registry._entry_points",
+            return_value=[invalid],
+        ):
+            with self.assertRaisesRegex(
+                QualityEngineNotAvailable, "does not implement"
+            ):
+                resolve_quality_engine("custom", object())
+
+        wrong_spi = SyntheticPlugin()
+        wrong_spi.api_version = "999"
+        incompatible = SimpleNamespace(
+            name="custom",
+            load=lambda: wrong_spi,
+        )
+        with patch(
+            "databricks.labs.sdp_meta.quality.registry._entry_points",
+            return_value=[incompatible],
+        ):
+            with self.assertRaisesRegex(
+                QualityEngineNotAvailable, "requires SPI"
+            ):
+                resolve_quality_engine("custom", object())
+
     def test_adapter_drift_warns_or_fails_in_strict_mode(self):
         plugin = SyntheticPlugin()
         snapshot = {
@@ -157,6 +254,53 @@ class QualityRegistryTests(TestCase):
             QualityEngineNotAvailable, "version drift"
         ):
             validate_plugin_snapshot(plugin, snapshot)
+
+    def test_snapshot_rejects_spi_engine_range_and_diagnostic_drift(self):
+        plugin = SyntheticPlugin()
+        base = {
+            "spi_version": plugin.api_version,
+            "plugin_version": plugin.plugin_version,
+            "engine_version": "2.0",
+            "diagnostic_schema_fingerprint": "a" * 64,
+            "engine_options": {},
+        }
+        with self.assertRaisesRegex(
+            QualityEngineNotAvailable, "Persisted SPI"
+        ):
+            validate_plugin_snapshot(
+                plugin, {**base, "spi_version": "999"}
+            )
+
+        plugin.supported_engine_versions = "<2"
+        with self.assertRaisesRegex(
+            QualityEngineNotAvailable, "outside adapter range"
+        ):
+            validate_plugin_snapshot(plugin, base)
+
+        plugin.supported_engine_versions = None
+        with self.assertRaisesRegex(
+            QualityEngineNotAvailable, "diagnostic schema differs"
+        ):
+            validate_plugin_snapshot(
+                plugin,
+                {**base, "diagnostic_schema_fingerprint": "b" * 64},
+            )
+
+    def test_snapshot_fingerprints_reserved_columns_when_not_declared(self):
+        plugin = SyntheticPlugin()
+        plugin.diagnostic_schema_fingerprint = None
+        config = build_plugin_quality_config(
+            engine="synthetic",
+            plugin=plugin,
+            rules_path="/rules.json",
+            raw_text="{}",
+            document={},
+            normalized_rules={},
+            analysis_required=False,
+            target_details={},
+            quarantine_target_details={},
+        )
+        validate_plugin_snapshot(plugin, config)
 
     def test_contract_kit_accepts_bare_result_for_schema_less_source(self):
         frame = SimpleNamespace(columns=["id"], schema=object())

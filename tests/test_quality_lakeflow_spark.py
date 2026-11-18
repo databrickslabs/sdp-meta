@@ -95,6 +95,23 @@ class LakeflowQualityEngineSparkTests(SDPFrameworkTestCase):
         errors = checked.first()["_errors"]
         self.assertEqual([error["name"] for error in errors], ["positive_id"])
 
+    def test_validation_analysis_empty_rules_and_reserved_columns(self):
+        rows = self.spark.createDataFrame([(1,)], "id int")
+        normalized, deferred = self.engine.validate(
+            {"expect": {"positive": "id > 0"}},
+            {"schema": rows.schema},
+        )
+        self.assertFalse(deferred)
+        self.assertEqual(
+            self.engine.analyze(normalized, rows.schema, {}),
+            normalized,
+        )
+
+        checked = self.engine.apply(rows, {}, {})
+        self.assertEqual(checked.first()["_errors"], [])
+        with self.assertRaisesRegex(ValueError, "reserved quality column"):
+            self.engine.apply(checked, {}, {})
+
     def test_native_bindings_use_identical_normalized_expressions(self):
         bindings = self.engine.native_expectations(self.normalized, {})
         by_action = {(binding.target, binding.action): binding.rules for binding in bindings}
