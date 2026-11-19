@@ -1547,20 +1547,18 @@ class OnboardDataflowspec:
                 "bronze_quarantine_table" in onboarding_row
                 and bool(onboarding_row["bronze_quarantine_table"])
             )
-            quarantine_database_configured = (
-                f"bronze_database_quarantine_{env}" in onboarding_row
-                and bool(onboarding_row[f"bronze_database_quarantine_{env}"])
-            )
-            if has_quarantine_expectations and not (
-                quarantine_target_configured and quarantine_database_configured
-            ):
+            # A quarantine table name is enough to build the target: missing
+            # bronze_database_quarantine_{env} / bronze_catalog_quarantine_{env}
+            # fall back to the main bronze database/catalog (issue #495).
+            if has_quarantine_expectations and not quarantine_target_configured:
                 logger.warning(
                     "Bronze DQE contains non-empty expect_or_quarantine rules "
                     "but its quarantine target is incomplete. No quarantine "
-                    "table will be created. Add "
-                    "bronze_quarantine_table and "
-                    "bronze_database_quarantine_%s. Missing targets remain "
+                    "table will be created. Add bronze_quarantine_table "
+                    "(bronze_database_quarantine_%s is optional and defaults "
+                    "to bronze_database_%s). Missing targets remain "
                     "allowed for backward compatibility.",
+                    env,
                     env,
                 )
             if has_quarantine_expectations or quarantine_target_configured:
@@ -1752,21 +1750,51 @@ class OnboardDataflowspec:
         quarantine_table_cluster_by_auto = self.__get_cluster_by_auto(
             onboarding_row, f"{layer}_quarantine_table_cluster_by_auto"
         )
-        if (
-            f"{layer}_database_quarantine_{env}" in onboarding_row
+        quarantine_table = (
+            onboarding_row[f"{layer}_quarantine_table"]
+            if f"{layer}_quarantine_table" in onboarding_row
+            and onboarding_row[f"{layer}_quarantine_table"]
+            else None
+        )
+        quarantine_database = (
+            onboarding_row[f"{layer}_database_quarantine_{env}"]
+            if f"{layer}_database_quarantine_{env}" in onboarding_row
             and onboarding_row[f"{layer}_database_quarantine_{env}"]
-        ):
-            quarantine_target_details = {"database": onboarding_row[f"{layer}_database_quarantine_{env}"],
-                                         "table": onboarding_row[f"{layer}_quarantine_table"],
-                                         "partition_columns": quarantine_table_partition_columns,
-                                         "cluster_by": quarantine_table_cluster_by,
-                                         "cluster_by_auto": quarantine_table_cluster_by_auto
-                                         }
+            else None
+        )
+        # When bronze_quarantine_table (or silver_*) is set but the
+        # quarantine-specific database/catalog fields are omitted, reuse the
+        # layer's main target identity. Users commonly configure only the
+        # quarantine table name alongside bronze_database_{env}; previously
+        # that left quarantineTargetDetails empty and the pipeline skipped
+        # quarantine creation (issue #495).
+        if quarantine_table and not quarantine_database:
+            if (
+                f"{layer}_database_{env}" in onboarding_row
+                and onboarding_row[f"{layer}_database_{env}"]
+            ):
+                quarantine_database = onboarding_row[f"{layer}_database_{env}"]
+        if quarantine_table and quarantine_database:
+            quarantine_target_details = {
+                "database": quarantine_database,
+                "table": quarantine_table,
+                "partition_columns": quarantine_table_partition_columns,
+                "cluster_by": quarantine_table_cluster_by,
+                "cluster_by_auto": quarantine_table_cluster_by_auto,
+            }
             quarantine_catalog = (
                 onboarding_row[f"{layer}_catalog_quarantine_{env}"]
                 if f"{layer}_catalog_quarantine_{env}" in onboarding_row
+                and onboarding_row[f"{layer}_catalog_quarantine_{env}"]
                 else None
             )
+            if not quarantine_catalog:
+                quarantine_catalog = (
+                    onboarding_row[f"{layer}_catalog_{env}"]
+                    if f"{layer}_catalog_{env}" in onboarding_row
+                    and onboarding_row[f"{layer}_catalog_{env}"]
+                    else None
+                )
             if quarantine_catalog:
                 quarantine_target_details["catalog"] = quarantine_catalog
             if f"{layer}_quarantine_table_comment" in onboarding_row:
@@ -2610,20 +2638,18 @@ class OnboardDataflowspec:
                 "silver_quarantine_table" in onboarding_row
                 and bool(onboarding_row["silver_quarantine_table"])
             )
-            quarantine_database_configured = (
-                f"silver_database_quarantine_{env}" in onboarding_row
-                and bool(onboarding_row[f"silver_database_quarantine_{env}"])
-            )
-            if has_quarantine_expectations and not (
-                quarantine_target_configured and quarantine_database_configured
-            ):
+            # A quarantine table name is enough to build the target: missing
+            # silver_database_quarantine_{env} / silver_catalog_quarantine_{env}
+            # fall back to the main silver database/catalog (issue #495).
+            if has_quarantine_expectations and not quarantine_target_configured:
                 logger.warning(
                     "Silver DQE contains non-empty expect_or_quarantine rules "
                     "but its quarantine target is incomplete. No quarantine "
-                    "table will be created. Add "
-                    "silver_quarantine_table and "
-                    "silver_database_quarantine_%s. Missing targets remain "
+                    "table will be created. Add silver_quarantine_table "
+                    "(silver_database_quarantine_%s is optional and defaults "
+                    "to silver_database_%s). Missing targets remain "
                     "allowed for backward compatibility.",
+                    env,
                     env,
                 )
             if has_quarantine_expectations or quarantine_target_configured:

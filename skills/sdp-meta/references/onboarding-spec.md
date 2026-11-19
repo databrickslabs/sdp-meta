@@ -55,7 +55,7 @@ kafka examples).
 | `bronze_table_properties` | Delta/pipeline table properties (e.g. `pipelines.reset.allowed`). |
 | `bronze_cluster_by` | Liquid clustering columns. |
 | `bronze_data_quality_expectations_json_*` | Path to the bronze DQ expectations file. |
-| `bronze_quarantine_table` + `bronze_catalog_quarantine_*` / `bronze_database_quarantine_*` | Where `expect_or_drop` bad rows land. |
+| `bronze_quarantine_table` (+ optional `bronze_catalog_quarantine_*` / `bronze_database_quarantine_*`) | Quarantine target for `expect_or_quarantine`. Catalog/database default to the main bronze target when omitted. |
 
 ## Silver layer fields
 

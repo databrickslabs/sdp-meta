@@ -26,6 +26,8 @@
   and pipelines in place and validate the migration in non-production.
 - Historical changelog entries and backward-compatibility test fixtures retain
   old names to describe and test their original releases.
+### Fixed
+- **Quarantine target details from quarantine table alone**: onboarding now populates `quarantineTargetDetails` when `bronze_quarantine_table` or `silver_quarantine_table` is set, falling back to the layer's main catalog/database when quarantine-specific catalog/database fields are omitted. Previously those rows left `quarantineTargetDetails` empty, so pipelines with `expect_or_quarantine` rules could not create the quarantine streaming table. [Issue #495](https://github.com/databrickslabs/sdp-meta/issues/495)
 
 ## [v0.1.1]
 ### Added

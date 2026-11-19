@@ -89,21 +89,22 @@ compatibility. A DQE file containing only `expect`, `expect_or_drop`, or
 `expect_or_fail` does not use any quarantine fields.
 
 To create an output for Bronze quarantine rules, configure
-`bronze_quarantine_table` and
-`bronze_database_quarantine_{env}`. For Silver, configure
-`silver_quarantine_table` and `silver_database_quarantine_{env}`. These fields
-identify the quarantine target persisted in the DataflowSpec. Non-Unity
-Catalog targets also use the corresponding
-`bronze_quarantine_table_path_{env}` or
+`bronze_quarantine_table`. Optionally set
+`bronze_database_quarantine_{env}` and `bronze_catalog_quarantine_{env}`;
+when omitted, they default to `bronze_database_{env}` and
+`bronze_catalog_{env}`. For Silver, configure `silver_quarantine_table` with
+the same optional database/catalog fallback. These fields identify the
+quarantine target persisted in the DataflowSpec. Non-Unity Catalog targets
+also use the corresponding `bronze_quarantine_table_path_{env}` or
 `silver_quarantine_table_path_{env}`.
 
 Legacy onboarding files with non-empty `expect_or_quarantine` rules but no
-target continue to onboard successfully. They do not produce a quarantine
-table until target metadata is supplied, and onboarding emits a warning. The
-pipeline still declares its primary output table, including when
-`expect_or_quarantine` is the only non-empty constraint block. Add the
-quarantine table and database fields to route matching rows to a quarantine
-output. Missing targets remain accepted only for backward compatibility.
+quarantine table continue to onboard successfully. They do not produce a
+quarantine table until `bronze_quarantine_table` or `silver_quarantine_table`
+is supplied, and onboarding emits a warning. The pipeline still declares its
+primary output table, including when `expect_or_quarantine` is the only
+non-empty constraint block. Missing quarantine table names remain accepted
+only for backward compatibility.
 
 Existing onboarding files may include optional quarantine metadata before
 quarantine rules are added. SDP-META preserves that metadata, but no

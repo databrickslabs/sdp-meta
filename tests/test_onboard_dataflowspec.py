@@ -836,6 +836,85 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
                 warning_output,
             )
 
+    def test_quarantine_table_falls_back_to_layer_database_and_catalog(self):
+        """Issue #495: quarantineTargetDetails must populate when only
+        bronze_quarantine_table (and silver_*) is set alongside the main
+        layer catalog/database. Quarantine-specific database/catalog fields
+        are optional and default to the layer target.
+        """
+        dqe_payload = {
+            "expect_or_quarantine": {
+                "not_null_customer": "customer IS NOT NULL",
+                "not_null_country": "country IS NOT NULL",
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with open(self.onboarding_json_file, "r") as source:
+                onboarding_row = copy.deepcopy(json.load(source)[0])
+            for field_name in list(onboarding_row):
+                if "quarantine" in field_name:
+                    del onboarding_row[field_name]
+
+            dqe_path = os.path.join(tmp_dir, "bronze_expectations.yml")
+            with open(dqe_path, "w") as target:
+                yaml.safe_dump(dqe_payload, target, sort_keys=False)
+
+            onboarding_row["bronze_catalog_dev"] = "my_catalog"
+            onboarding_row["bronze_database_dev"] = "my_schema"
+            onboarding_row["bronze_quarantine_table"] = "my_bronze_table_quarantine"
+            onboarding_row["bronze_data_quality_expectations_json_dev"] = dqe_path
+            onboarding_row["silver_catalog_dev"] = "my_catalog"
+            onboarding_row["silver_database_dev"] = "my_schema"
+            onboarding_row["silver_quarantine_table"] = "my_silver_table_quarantine"
+            onboarding_row["silver_data_quality_expectations_json_dev"] = dqe_path
+
+            onboarding_path = os.path.join(tmp_dir, "onboarding.yml")
+            with open(onboarding_path, "w") as target:
+                yaml.safe_dump([onboarding_row], target, sort_keys=False)
+
+            params = copy.deepcopy(self.onboarding_bronze_silver_params_map)
+            params["onboarding_file_path"] = onboarding_path
+            onboarder = OnboardDataflowspec(self.spark, params, uc_enabled=True)
+            onboarding_df = onboarder._OnboardDataflowspec__get_onboarding_file_dataframe(
+                onboarding_path
+            )
+
+            bronze_row = onboarder._OnboardDataflowspec__get_bronze_dataflow_spec_dataframe(
+                onboarding_df, "dev"
+            ).collect()[0]
+            silver_row = onboarder._OnboardDataflowspec__get_silver_dataflow_spec_dataframe(
+                onboarding_df, "dev"
+            ).collect()[0]
+
+            self.assertEqual(
+                json.loads(bronze_row.dataQualityExpectations),
+                dqe_payload,
+            )
+            self.assertEqual(
+                bronze_row.quarantineTargetDetails["catalog"],
+                "my_catalog",
+            )
+            self.assertEqual(
+                bronze_row.quarantineTargetDetails["database"],
+                "my_schema",
+            )
+            self.assertEqual(
+                bronze_row.quarantineTargetDetails["table"],
+                "my_bronze_table_quarantine",
+            )
+            self.assertEqual(
+                silver_row.quarantineTargetDetails["catalog"],
+                "my_catalog",
+            )
+            self.assertEqual(
+                silver_row.quarantineTargetDetails["database"],
+                "my_schema",
+            )
+            self.assertEqual(
+                silver_row.quarantineTargetDetails["table"],
+                "my_silver_table_quarantine",
+            )
+
     def test_optional_quarantine_metadata_is_preserved_without_dqe(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             with open(self.onboarding_json_file, "r") as source:
@@ -2726,6 +2805,61 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
         )
         self.assertEqual(quarantine_target_details["path"], "quarantine_path")
         self.assertEqual(quarantine_table_properties, {})
+
+    def test_get_quarantine_details_falls_back_to_layer_target(self):
+        """Quarantine-specific catalog/database are optional (issue #495)."""
+        onboarding_row = {
+            "bronze_catalog_it": "my_catalog",
+            "bronze_database_it": "my_schema",
+            "bronze_quarantine_table": "my_bronze_table_quarantine",
+        }
+        onboardDataFlowSpecs = OnboardDataflowspec(
+            self.spark, self.onboarding_bronze_silver_params_map, uc_enabled=True
+        )
+        quarantine_target_details, quarantine_table_properties = (
+            onboardDataFlowSpecs._OnboardDataflowspec__get_quarantine_details(
+                "it", "bronze", onboarding_row
+            )
+        )
+        self.assertEqual(
+            quarantine_target_details,
+            {
+                "catalog": "my_catalog",
+                "database": "my_schema",
+                "table": "my_bronze_table_quarantine",
+                "partition_columns": "",
+                "cluster_by": None,
+                "cluster_by_auto": False,
+            },
+        )
+        self.assertEqual(quarantine_table_properties, {})
+
+    def test_get_quarantine_details_prefers_explicit_quarantine_identity(self):
+        """Explicit quarantine catalog/database win over layer fallback."""
+        onboarding_row = {
+            "bronze_catalog_it": "main_catalog",
+            "bronze_database_it": "main_schema",
+            "bronze_catalog_quarantine_it": "quarantine_catalog",
+            "bronze_database_quarantine_it": "quarantine_schema",
+            "bronze_quarantine_table": "quarantine_table",
+        }
+        onboardDataFlowSpecs = OnboardDataflowspec(
+            self.spark, self.onboarding_bronze_silver_params_map, uc_enabled=True
+        )
+        quarantine_target_details, _ = (
+            onboardDataFlowSpecs._OnboardDataflowspec__get_quarantine_details(
+                "it", "bronze", onboarding_row
+            )
+        )
+        self.assertEqual(
+            quarantine_target_details["catalog"], "quarantine_catalog"
+        )
+        self.assertEqual(
+            quarantine_target_details["database"], "quarantine_schema"
+        )
+        self.assertEqual(
+            quarantine_target_details["table"], "quarantine_table"
+        )
 
     def test_get_quarantine_details_with_uc_enabled(self):
         """Test get_quarantine_details with UC enabled."""

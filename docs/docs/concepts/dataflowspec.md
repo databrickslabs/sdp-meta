@@ -44,8 +44,8 @@ These fields are required on every flow entry.
 | `bronze_cluster_by` | list | No | Liquid clustering columns. |
 | `bronze_cluster_by_auto` | boolean | No | Enable auto liquid clustering. |
 | `bronze_data_quality_expectations_json_<env>` | string | No | Path to a DQE file (JSON or YAML). |
-| `bronze_catalog_quarantine_<env>` | string | No | Catalog for the quarantine table (defaults to bronze catalog). |
-| `bronze_database_quarantine_<env>` | string | No | Schema for the quarantine table. Needed to create an output for non-empty `expect_or_quarantine` rules. |
+| `bronze_catalog_quarantine_<env>` | string | No | Catalog for the quarantine table (defaults to `bronze_catalog_<env>`). |
+| `bronze_database_quarantine_<env>` | string | No | Schema for the quarantine table (defaults to `bronze_database_<env>` when `bronze_quarantine_table` is set). |
 | `bronze_quarantine_table` | string | No | Quarantine table name. Needed to create an output for non-empty `expect_or_quarantine` rules. |
 | `bronze_quarantine_table_comment` | string | No | Quarantine table comment. |
 | `bronze_quarantine_table_path_<env>` | string | No | External path for the quarantine table (non-UC). |
@@ -68,7 +68,8 @@ These fields are required on every flow entry.
 | `silver_table_path_<env>` | string | Non-UC | External path for the Silver table (required without Unity Catalog). |
 | `silver_transformation_json_<env>` | string | Yes* | Path to a transformations file defining `select_exp` and `where_clause`. *Not required when using `silver_cdc_apply_changes_flows`. |
 | `silver_data_quality_expectations_json_<env>` | string | No | Path to a DQE file. |
-| `silver_database_quarantine_<env>` | string | No | Schema for the Silver quarantine table. Needed to create an output for non-empty `expect_or_quarantine` rules. |
+| `silver_catalog_quarantine_<env>` | string | No | Catalog for the Silver quarantine table (defaults to `silver_catalog_<env>`). |
+| `silver_database_quarantine_<env>` | string | No | Schema for the Silver quarantine table (defaults to `silver_database_<env>` when `silver_quarantine_table` is set). |
 | `silver_quarantine_table` | string | No | Silver quarantine table name. Needed to create an output for non-empty `expect_or_quarantine` rules. |
 | `silver_quarantine_table_path_<env>` | string | No | External path for the Silver quarantine table (non-UC). |
 | `silver_cdc_apply_changes` | map | No | Single-source CDC config. See [CDC](../guides/cdc.md). |
