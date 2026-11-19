@@ -100,7 +100,7 @@ class DataflowPipeline:
         self.is_legacy_publishing_mode = not self.dpm_enabled
         if self.is_legacy_publishing_mode:
             logger.info(
-                "Pipeline is using legacy publishing mode (pipelines.schema is unset). "
+                "Pipeline is using legacy publishing mode. "
                 "Table names will be unqualified to comply with LIVE schema restrictions.",
             )
         self.dataflowSpec = dataflow_spec
@@ -1163,9 +1163,70 @@ class DataflowPipeline:
             dlt_data_flow.run_dlt()
 
     # Additional optimization methods for common patterns
+    # Platform-reported publishing mode per pipeline id, so the pipelines API is
+    # called at most once per pipeline per process (see _get_platform_publishing_mode).
+    # Values are True (default), False (legacy), or None (API failure / unknown mode
+    # already observed for this pipeline — fall back to the conf check without
+    # retrying the API).
+    _platform_publishing_mode_cache = {}
+
+    @staticmethod
+    def _get_platform_publishing_mode(spark):
+        """Return True for default publishing mode, False for legacy, or None if unknown.
+
+        The Lakeflow runtime exposes the running pipeline's id as ``pipelines.id``.
+        We ask the pipelines API for ``effective_publishing_mode`` because a pipeline
+        configured with ``target`` can report default mode while ``pipelines.schema``
+        is unset in Spark conf (issue #250). Returns None when the id is missing,
+        the API call fails, or the response is not recognised, so the caller can
+        fall back to the Spark conf check. Detection must never fail a pipeline.
+
+        Successful results, API failures, and unrecognised modes are all cached
+        under the pipeline id so a single process makes at most one control-plane
+        call per pipeline, even when many dataflow specs are evaluated.
+        """
+        pipeline_id = spark.conf.get("pipelines.id", "").strip()
+        if not pipeline_id:
+            return None
+        cache = DataflowPipeline._platform_publishing_mode_cache
+        if pipeline_id in cache:
+            return cache[pipeline_id]
+        try:
+            from databricks.sdk import WorkspaceClient
+            pipeline = WorkspaceClient().pipelines.get(pipeline_id=pipeline_id)
+            mode = str(pipeline.as_dict().get("effective_publishing_mode", "")).upper()
+        except Exception as e:  # noqa: BLE001 - any failure falls back to the conf check
+            logger.warning(
+                "Could not read publishing mode for pipeline %s from the pipelines API; "
+                "falling back to pipelines.schema. Error: %s", pipeline_id, e,
+            )
+            cache[pipeline_id] = None
+            return None
+        if "DEFAULT" in mode:
+            result = True
+        elif "LEGACY" in mode:
+            result = False
+        else:
+            logger.warning(
+                "Unrecognised effective_publishing_mode=%r for pipeline %s; "
+                "falling back to pipelines.schema.", mode, pipeline_id,
+            )
+            cache[pipeline_id] = None
+            return None
+        cache[pipeline_id] = result
+        return result
+
     @staticmethod
     def _is_dpm_enabled(spark):
-        """Return True when default publishing mode exposes ``pipelines.schema``."""
+        """Return True when the pipeline publishes in default publishing mode (DPM).
+
+        The platform's effective publishing mode is used when it is available.
+        Otherwise fall back to ``pipelines.schema``, which only default-mode
+        pipelines expose through Spark conf.
+        """
+        platform_mode = DataflowPipeline._get_platform_publishing_mode(spark)
+        if platform_mode is not None:
+            return platform_mode
         return bool(spark.conf.get("pipelines.schema", "").strip())
 
     @staticmethod
