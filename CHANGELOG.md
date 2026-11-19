@@ -26,6 +26,8 @@
   and pipelines in place and validate the migration in non-production.
 - Historical changelog entries and backward-compatibility test fixtures retain
   old names to describe and test their original releases.
+### Fixed
+- **Bronze tables in onboarding-specified schema for `target=` pipelines**: sdp-meta now reads the platform's `effective_publishing_mode` through the pipelines API (using the runtime `pipelines.id`) to decide between default and legacy publishing mode. Previously it inferred the mode only from `pipelines.schema`, which is unset for pipelines configured with `target`, so bronze tables were created in the pipeline's default schema instead of the onboarding schema. Successful results, API failures, and unrecognised modes are cached per pipeline so the control plane is contacted at most once per process. The `pipelines.schema` check remains as a fallback. [Issue #250](https://github.com/databrickslabs/sdp-meta/issues/250)
 
 ## [v0.1.1]
 ### Added
