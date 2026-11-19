@@ -121,6 +121,15 @@ def parse_spec():
     fmt = body.get('format', 'json')
     spec_type = body.get('spec_type', 'onboarding')
     env = body.get('env', 'prod')
+    uc_value = body.get(
+        'uc_enabled',
+        body.get('unity_catalog_enabled', True),
+    )
+    uc_enabled = (
+        uc_value
+        if isinstance(uc_value, bool)
+        else str(uc_value).strip().lower() in {'1', 'true', 'yes'}
+    )
 
     # Layer 1 \u2014 syntax
     try:
@@ -151,7 +160,7 @@ def parse_spec():
             collect_quality_configuration_errors(
                 parsed,
                 env=env,
-                uc_enabled=True,
+                uc_enabled=uc_enabled,
                 supported_engines=deployable_quality_engines(
                     os.getenv("SDP_META_QUALITY_ENGINE_DEPENDENCY")
                 ),

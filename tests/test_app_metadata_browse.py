@@ -35,7 +35,7 @@ class QualitySpecEditorValidationTests(unittest.TestCase):
         app_mod.app.testing = True
         self.client = app_mod.app.test_client()
 
-    def _parse(self, row):
+    def _parse(self, row, *, uc_enabled=True):
         response = self.client.post(
             "/api/metadata/parse-spec",
             data=json.dumps({
@@ -43,6 +43,7 @@ class QualitySpecEditorValidationTests(unittest.TestCase):
                 "format": "json",
                 "spec_type": "onboarding",
                 "env": "dev",
+                "uc_enabled": uc_enabled,
             }),
             content_type="application/json",
         )
@@ -74,6 +75,23 @@ class QualitySpecEditorValidationTests(unittest.TestCase):
         })
         self.assertTrue(
             any("cannot combine" in error for error in body["errors"])
+        )
+
+    def test_non_uc_validation_requires_quarantine_path(self):
+        row = {
+            "data_flow_id": "100",
+            "bronze_quality_engine": "lakeflow",
+            "bronze_quality_rules_path_dev": "/rules.yml",
+            "bronze_database_quarantine_dev": "bronze",
+            "bronze_quarantine_table": "invalid_rows",
+        }
+        self.assertEqual(self._parse(row, uc_enabled=True)["errors"], [])
+        errors = self._parse(row, uc_enabled=False)["errors"]
+        self.assertTrue(
+            any(
+                "bronze_quarantine_table_path_dev" in error
+                for error in errors
+            )
         )
 
     def test_plugin_requires_configured_remote_dependency(self):

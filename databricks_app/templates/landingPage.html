@@ -4370,6 +4370,10 @@
         var specType  = document.getElementById('specType').value;
         var format    = document.getElementById('specFormat').value;
         var env       = document.getElementById('specEnv').value;
+        var ucField   = document.querySelector(
+            'input[name="unity_catalog_enabled"]'
+        );
+        var ucEnabled = !ucField || ucField.value === '1';
         var resultEl  = document.getElementById('specValidationResult');
         var previewEl = document.getElementById('specStructuredPreview');
         var runBtn    = document.getElementById('btnRunFromEditor');
@@ -4383,7 +4387,13 @@
         fetch('/api/metadata/parse-spec', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ content: content, format: format, spec_type: specType, env: env })
+            body: JSON.stringify({
+                content: content,
+                format: format,
+                spec_type: specType,
+                env: env,
+                uc_enabled: ucEnabled
+            })
         })
         .then(function(r) {
             if (r.status === 400) return _parseJSON(r).then(function(d) { throw new Error(d.error || 'Parse error'); });
