@@ -94,7 +94,7 @@ class QualityOnboardingPreflightTests(unittest.TestCase):
             [],
         )
 
-    def test_silver_snapshot_quality_is_rejected(self):
+    def test_snapshot_ingestion_does_not_reject_silver_quality(self):
         row = {
             "data_flow_id": "silver-snapshot",
             "source_format": "snapshot",
@@ -109,9 +109,7 @@ class QualityOnboardingPreflightTests(unittest.TestCase):
             uc_enabled=True,
             layers=("silver",),
         )
-        self.assertTrue(
-            any("snapshot sources" in error for error in errors)
-        )
+        self.assertEqual(errors, [])
 
     def test_silver_cluster_alias_conflict_is_rejected(self):
         row = {

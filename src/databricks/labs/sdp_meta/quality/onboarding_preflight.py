@@ -99,7 +99,10 @@ def collect_quality_configuration_errors(
                 )
 
             unsupported = []
-            if str(row.get("source_format", "")).lower() == "snapshot":
+            if (
+                layer == "bronze"
+                and str(row.get("source_format", "")).lower() == "snapshot"
+            ):
                 errors.append(
                     prefix
                     + f"{engine_field} cannot be used with snapshot sources"
