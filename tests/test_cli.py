@@ -10,6 +10,8 @@ from databricks.labs.sdp_meta.cli import (
     DeployCommand,
     OnboardCommand,
     SDPMeta,
+    _clear_completed_quality_migration_state,
+    _quality_migration_groups,
     _quality_migration_layers,
     main,
 )
@@ -67,6 +69,59 @@ class CliTests(unittest.TestCase):
                 }
             ]),
             ["bronze"],
+        )
+
+    def test_quality_migration_groups_are_scoped_by_layer(self):
+        self.assertEqual(
+            _quality_migration_groups([
+                {
+                    "data_flow_group": "B1",
+                    "bronze_quality_engine_migration": "full_refresh",
+                },
+                {
+                    "data_flow_group": "S1",
+                    "silver_quality_engine_migration": "full_refresh",
+                },
+                {
+                    "data_flow_group": "B2",
+                    "bronze_quality_engine_migration": "none",
+                },
+            ]),
+            {"bronze": ["B1"], "silver": ["S1"]},
+        )
+
+    def test_completing_one_group_keeps_other_group_pending(self):
+        state = {
+            "quality_migration_layers": ["bronze"],
+            "quality_migration_scope": {
+                "bronze": {
+                    "groups": ["A", "B"],
+                    "dataflowspec_table": "bronze_dataflowspec",
+                },
+            },
+        }
+        deploy_cmd = MagicMock()
+        deploy_cmd.onboard_bronze_group = "A"
+
+        updated = _clear_completed_quality_migration_state(
+            state, deploy_cmd, ["bronze"]
+        )
+
+        self.assertEqual(
+            updated["quality_migration_layers"], ["bronze"]
+        )
+        self.assertEqual(
+            updated["quality_migration_scope"]["bronze"]["groups"],
+            ["B"],
+        )
+
+        deploy_cmd.onboard_bronze_group = "B"
+        updated = _clear_completed_quality_migration_state(
+            updated, deploy_cmd, ["bronze"]
+        )
+        self.assertEqual(updated["quality_migration_layers"], [])
+        self.assertNotIn(
+            "bronze", updated["quality_migration_scope"]
         )
 
     deploy_cmd = DeployCommand(
@@ -495,9 +550,10 @@ class CliTests(unittest.TestCase):
             pipeline_id="pipeline_id"
         )
 
+    @patch("databricks.labs.sdp_meta.cli._complete_quality_migrations")
     @patch("databricks.labs.sdp_meta.cli.WorkspaceClient")
     def test_deploy_with_pending_migration_uses_managed_job(
-            self, mock_workspace_client):
+            self, mock_workspace_client, mock_complete_migrations):
         sdp_meta = SDPMeta(mock_workspace_client)
         sdp_meta._create_sdp_meta_pipeline = MagicMock(
             return_value="pipeline_id"
@@ -524,11 +580,15 @@ class CliTests(unittest.TestCase):
         sdp_meta._run_managed_quality_update_job.assert_called_once_with(
             deploy_cmd, "pipeline_id"
         )
+        mock_complete_migrations.assert_called_once_with(
+            deploy_cmd, ["bronze"]
+        )
         mock_workspace_client.pipelines.start_update.assert_not_called()
 
+    @patch("databricks.labs.sdp_meta.cli._complete_quality_migrations")
     @patch("databricks.labs.sdp_meta.cli.WorkspaceClient")
     def test_non_uc_deploy_with_pending_migration_uses_managed_job(
-            self, mock_workspace_client):
+            self, mock_workspace_client, mock_complete_migrations):
         sdp_meta = SDPMeta(mock_workspace_client)
         sdp_meta._create_sdp_meta_pipeline = MagicMock(
             return_value="pipeline_id"
@@ -551,6 +611,9 @@ class CliTests(unittest.TestCase):
 
         sdp_meta._run_managed_quality_update_job.assert_called_once_with(
             deploy_cmd, "pipeline_id"
+        )
+        mock_complete_migrations.assert_called_once_with(
+            deploy_cmd, ["bronze"]
         )
         mock_workspace_client.pipelines.start_update.assert_not_called()
 
@@ -2024,7 +2087,10 @@ class CliTests(unittest.TestCase):
             'version': 'v2',
             'environment': 'dev',
             'author': 'custom_author',
-            'update_paths': "1"
+            'update_paths': "1",
+            'quality_engine_dependency': (
+                "databricks-labs-dqx>=0.14,<0.17"
+            ),
         }
 
         result = sdp_meta._load_onboard_config_ui(form_data)
@@ -2047,6 +2113,10 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.env, "dev")
         self.assertEqual(result.import_author, "custom_author")
         self.assertTrue(result.update_paths)
+        self.assertEqual(
+            result.quality_engine_dependency,
+            "databricks-labs-dqx>=0.14,<0.17",
+        )
 
     @patch("databricks.labs.sdp_meta.cli.uuid.uuid4")
     @patch("builtins.open", new_callable=mock_open)
@@ -2161,7 +2231,10 @@ class CliTests(unittest.TestCase):
             "dataflowspec_bronze_path": "/bronze/path",
             "num_workers": 8,
             "pipeline_name": "test_pipeline",
-            "dlt_target_schema": "target_schema"
+            "dlt_target_schema": "target_schema",
+            "quality_engine_dependency": (
+                "databricks-labs-dqx>=0.14,<0.17"
+            ),
         }
 
         result = sdp_meta._load_deploy_config_ui(input_params)
@@ -2175,6 +2248,82 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.dataflowspec_bronze_table, "bronze_table")
         self.assertEqual(result.dataflowspec_bronze_path, "/bronze/path")
         self.assertEqual(result.num_workers, 8)
+        self.assertEqual(
+            result.quality_engine_dependency,
+            "databricks-labs-dqx>=0.14,<0.17",
+        )
+
+    @patch("os.path.isfile", return_value=True)
+    @patch("builtins.open", new_callable=mock_open)
+    def test_app_deploy_inherits_matching_quality_migration_layers(
+        self, mock_open_file, _mock_isfile
+    ):
+        mock_open_file.return_value.read.return_value = json.dumps({
+            "quality_migration_layers": ["bronze"],
+            "quality_migration_scope": {
+                "bronze": {
+                    "uc_enabled": True,
+                    "uc_catalog_name": "main",
+                    "sdp_meta_schema": "specs",
+                    "dataflowspec_table": "bronze_dataflowspec",
+                    "groups": ["B1"],
+                },
+            },
+            "quality_engine_dependency": (
+                "databricks-labs-dqx>=0.14,<0.17"
+            ),
+        })
+        sdp_meta = SDPMeta(MagicMock())
+        result = sdp_meta._load_deploy_config_ui({
+            "load_from_ojd_json": False,
+            "uc_enabled": True,
+            "uc_catalog_name": "main",
+            "layer": "bronze",
+            "onboard_bronze_group": "B1",
+            "sdp_meta_bronze_schema": "specs",
+            "dataflowspec_bronze_table": "bronze_dataflowspec",
+            "num_workers": 8,
+            "pipeline_name": "test_pipeline",
+            "dlt_target_schema": "target_schema",
+        })
+
+        self.assertEqual(result.quality_migration_layers, ["bronze"])
+        self.assertEqual(
+            result.quality_engine_dependency,
+            "databricks-labs-dqx>=0.14,<0.17",
+        )
+
+    @patch("os.path.isfile", return_value=True)
+    @patch("builtins.open", new_callable=mock_open)
+    def test_app_deploy_ignores_other_groups_migration_layers(
+        self, mock_open_file, _mock_isfile
+    ):
+        mock_open_file.return_value.read.return_value = json.dumps({
+            "quality_migration_layers": ["bronze"],
+            "quality_migration_scope": {
+                "bronze": {
+                    "uc_enabled": True,
+                    "uc_catalog_name": "main",
+                    "sdp_meta_schema": "specs",
+                    "dataflowspec_table": "bronze_dataflowspec",
+                    "groups": ["OTHER_GROUP"],
+                },
+            },
+        })
+        sdp_meta = SDPMeta(MagicMock())
+        result = sdp_meta._load_deploy_config_ui({
+            "load_from_ojd_json": False,
+            "uc_enabled": True,
+            "uc_catalog_name": "main",
+            "layer": "bronze",
+            "onboard_bronze_group": "B1",
+            "sdp_meta_bronze_schema": "specs",
+            "dataflowspec_bronze_table": "bronze_dataflowspec",
+            "pipeline_name": "test_pipeline",
+            "dlt_target_schema": "target_schema",
+        })
+
+        self.assertEqual(result.quality_migration_layers, [])
 
     @patch("os.path.isfile")
     @patch("builtins.open", new_callable=mock_open)
@@ -2844,6 +2993,26 @@ class OnboardBuildWheelFlagTests(unittest.TestCase):
         self.assertEqual(cmd.sdp_meta_dependency, whl_path)
         sdp_meta.onboard.assert_called_once_with(cmd)
 
+    def test_onboard_quality_engine_dependency_flag_is_persisted(self):
+        from databricks.labs.sdp_meta.cli import onboard as cli_onboard
+
+        sdp_meta = MagicMock()
+        cmd = self._onboard_cmd()
+        sdp_meta._load_onboard_config.return_value = cmd
+        dependency = "databricks-labs-dqx>=0.14,<0.17"
+        with patch(
+            "databricks.labs.sdp_meta.cli."
+            "_persist_quality_engine_dependency"
+        ) as persist:
+            cli_onboard(
+                sdp_meta,
+                flags={"quality-engine-dependency": dependency},
+            )
+
+        self.assertEqual(cmd.quality_engine_dependency, dependency)
+        persist.assert_called_once_with(dependency)
+        sdp_meta.onboard.assert_called_once_with(cmd)
+
     def test_onboard_whl_file_path_and_build_flag_are_mutually_exclusive(self):
         from databricks.labs.sdp_meta.cli import onboard as cli_onboard
 
@@ -3025,6 +3194,33 @@ class DeployBuildWheelFlagTests(unittest.TestCase):
         self.assertEqual(cmd.sdp_meta_dependency, whl_path)
         sdp_meta.deploy.assert_called_once_with(cmd)
 
+    def test_deploy_quality_engine_dependency_flag_overrides_persisted_value(self):
+        from databricks.labs.sdp_meta.cli import deploy as cli_deploy
+
+        sdp_meta = MagicMock()
+        cmd = self._deploy_cmd()
+        sdp_meta._load_deploy_config.return_value = cmd
+        dependency = "databricks-labs-dqx>=0.14,<0.17"
+        with (
+            patch(
+                "databricks.labs.sdp_meta.cli."
+                "_read_dependency_from_onboarding_json",
+                return_value=None,
+            ),
+            patch(
+                "databricks.labs.sdp_meta.cli."
+                "_read_quality_migration_layers_from_onboarding_json",
+                return_value=[],
+            ),
+        ):
+            cli_deploy(
+                sdp_meta,
+                flags={"quality-engine-dependency": dependency},
+            )
+
+        self.assertEqual(cmd.quality_engine_dependency, dependency)
+        sdp_meta.deploy.assert_called_once_with(cmd)
+
     def test_deploy_build_and_upload_whl_sets_dependency(self):
         from databricks.labs.sdp_meta.cli import deploy as cli_deploy
 
@@ -3130,6 +3326,9 @@ class DeployBuildWheelFlagTests(unittest.TestCase):
                 "/Volumes/main/sdp_meta_bronze/sdp_meta_bronze/"
                 "databricks_labs_sdp_meta-0.1.0-py3-none-any.whl"
             ),
+            quality_engine_dependency=(
+                "databricks-labs-dqx>=0.14,<0.17"
+            ),
         )
         ws.pipelines.create.return_value = MagicMock(pipeline_id="p1")
 
@@ -3143,6 +3342,10 @@ class DeployBuildWheelFlagTests(unittest.TestCase):
             runner_bytes,
         )
         self.assertNotIn(b"databricks-labs-sdp-meta==", runner_bytes)
+        self.assertIn(
+            b"databricks-labs-dqx>=0.14,<0.17",
+            runner_bytes,
+        )
 
     def test_deploy_runner_notebook_falls_back_to_pypi_when_dependency_absent(self):
         from databricks.labs.sdp_meta.cli import SDPMeta as SDPMetaCls

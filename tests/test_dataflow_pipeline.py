@@ -1774,6 +1774,40 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
 
         mock_sink_writer.assert_not_called()
 
+    @patch("databricks.labs.sdp_meta.dataflow_pipeline.DLTSinkWriter")
+    @patch.object(DataflowPipeline, "write_bronze")
+    def test_quality_sinks_consume_main_output(
+        self, mock_write_bronze, mock_sink_writer
+    ):
+        spec_values = copy.deepcopy(self.bronze_dataflow_spec_map)
+        spec_values["dataQualityExpectations"] = None
+        spec_values["cdcApplyChanges"] = None
+        spec_values["qualityConfig"] = json.dumps({"engine": "lakeflow"})
+        spec_values["sinks"] = json.dumps([{"name": "audit"}])
+        spec = BronzeDataflowSpec(**spec_values)
+        pipeline = DataflowPipeline(
+            self.spark, spec, f"{spec.targetDetails['table']}_inputview"
+        )
+        sink = MagicMock()
+
+        with (
+            patch.object(pipeline, "_validate_quality_preflight"),
+            patch.object(
+                DataflowSpecUtils,
+                "get_sinks",
+                return_value=[sink],
+            ),
+        ):
+            pipeline.write()
+
+        mock_write_bronze.assert_called_once_with()
+        mock_sink_writer.assert_called_once_with(
+            self.spark,
+            sink,
+            pipeline._get_target_table_info()[1],
+        )
+        mock_sink_writer.return_value.write_to_sink.assert_called_once_with()
+
     def test_quality_preflight_rejects_unsupported_topologies(self):
         """Persisted new-engine rows cannot bypass source-mode restrictions."""
         scenarios = {
@@ -1800,6 +1834,25 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
                 ):
                     with self.assertRaisesRegex(ValueError, field):
                         pipeline._validate_quality_preflight()
+
+    def test_quality_preflight_rejects_silver_snapshot_source(self):
+        spec_values = copy.deepcopy(self.silver_dataflow_spec_map)
+        spec_values["dataQualityExpectations"] = None
+        spec_values["qualityConfig"] = json.dumps({"engine": "lakeflow"})
+        spec_values["sourceFormat"] = "snapshot"
+        spec = SilverDataflowSpec(**spec_values)
+        pipeline = DataflowPipeline(
+            self.spark, spec, f"{spec.targetDetails['table']}_inputview"
+        )
+
+        with patch(
+            "databricks.labs.sdp_meta.quality.validation."
+            "validate_runtime_quality_config"
+        ):
+            with self.assertRaisesRegex(
+                ValueError, "snapshot sourceFormat"
+            ):
+                pipeline._validate_quality_preflight()
 
     def test_quality_preflight_rejects_incomplete_quarantine_target(self):
         """New engines always require a complete quarantine output target."""

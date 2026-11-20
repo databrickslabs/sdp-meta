@@ -384,16 +384,42 @@ class DataflowPipeline:
     def write(self):
         """Write DLT."""
         self._validate_quality_preflight()
-        if self.dataflowSpec.sinks:
-            dlt_sinks = DataflowSpecUtils.get_sinks(self.dataflowSpec.sinks, self.spark)
-            for dlt_sink in dlt_sinks:
-                DLTSinkWriter(self.spark, dlt_sink, self.view_name).write_to_sink()
+        quality_enabled = bool(
+            getattr(self.dataflowSpec, "qualityConfig", None)
+        )
+        if quality_enabled:
+            if isinstance(self.dataflowSpec, BronzeDataflowSpec):
+                self.write_bronze()
+            elif isinstance(self.dataflowSpec, SilverDataflowSpec):
+                self.write_silver()
+            else:
+                raise Exception(
+                    "Dataflow write not supported for type= "
+                    f"{type(self.dataflowSpec)}"
+                )
+            # Quality sinks must consume the declared main dataset, not the
+            # unchecked input view. This preserves engine routing, native
+            # drop/fail expectations, row filters, and diagnostic cleanup.
+            self._write_sinks(self._get_target_table_info()[1])
+            return
+
+        self._write_sinks(self.view_name)
         if isinstance(self.dataflowSpec, BronzeDataflowSpec):
             self.write_bronze()
         elif isinstance(self.dataflowSpec, SilverDataflowSpec):
             self.write_silver()
         else:
-            raise Exception(f"Dataflow write not supported for type= {type(self.dataflowSpec)}")
+            raise Exception(
+                f"Dataflow write not supported for type= {type(self.dataflowSpec)}"
+            )
+
+    def _write_sinks(self, source_view_name):
+        if self.dataflowSpec.sinks:
+            dlt_sinks = DataflowSpecUtils.get_sinks(self.dataflowSpec.sinks, self.spark)
+            for dlt_sink in dlt_sinks:
+                DLTSinkWriter(
+                    self.spark, dlt_sink, source_view_name
+                ).write_to_sink()
 
     def _validate_quality_preflight(self):
         """Reject invalid quality-engine rows before declaring output datasets."""
@@ -426,10 +452,9 @@ class DataflowPipeline:
             unsupported.append("applyChangesFromSnapshot")
         if getattr(self.dataflowSpec, "appendFlows", None):
             unsupported.append("appendFlows")
-        if (
-            isinstance(self.dataflowSpec, BronzeDataflowSpec)
-            and getattr(self.dataflowSpec, "sourceFormat", "").lower() == "snapshot"
-        ):
+        if getattr(
+            self.dataflowSpec, "sourceFormat", ""
+        ).lower() == "snapshot":
             unsupported.append("snapshot sourceFormat")
         if unsupported:
             raise ValueError(

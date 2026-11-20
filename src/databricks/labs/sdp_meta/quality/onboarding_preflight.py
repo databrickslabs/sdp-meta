@@ -35,21 +35,32 @@ def collect_quality_configuration_errors(
     env: Optional[str],
     uc_enabled: bool,
     supported_engines: Optional[Sequence[str]] = None,
+    layers: Optional[Sequence[str]] = None,
 ) -> List[str]:
     """Return all static quality configuration errors in onboarding rows."""
     errors = []
-    supported = set(supported_engines) if supported_engines is not None else None
+    supported = (
+        {str(engine).lower() for engine in supported_engines}
+        if supported_engines is not None
+        else None
+    )
+    selected_layers = tuple(layers or ("bronze", "silver"))
     for index, row in enumerate(rows):
         if not isinstance(row, Mapping):
             continue
         flow_id = row.get("data_flow_id", index)
         prefix = f"Flow {flow_id}: "
-        for layer in ("bronze", "silver"):
+        for layer in selected_layers:
             engine_field = quality_engine_field(layer)
             migration_field = quality_migration_field(layer)
             rules_prefix = quality_rules_path_field(layer, "").rstrip("_")
             legacy_prefix = f"{layer}_data_quality_expectations_json"
-            engine = _value(row, engine_field)
+            configured_engine = _value(row, engine_field)
+            engine = (
+                str(configured_engine).lower()
+                if configured_engine is not None
+                else None
+            )
             rules_path = _matching_value(row, rules_prefix, env)
             legacy_rules = _matching_value(row, legacy_prefix, env)
             migration = _value(row, migration_field)
@@ -67,7 +78,7 @@ def collect_quality_configuration_errors(
                 errors.append(
                     prefix
                     + f"{engine_field} must be one of "
-                    f"{sorted(supported)}, got {engine!r}"
+                    f"{sorted(supported)}, got {configured_engine!r}"
                 )
             if not rules_path:
                 suffix = env if env is not None else "<env>"
@@ -88,10 +99,7 @@ def collect_quality_configuration_errors(
                 )
 
             unsupported = []
-            if (
-                layer == "bronze"
-                and str(row.get("source_format", "")).lower() == "snapshot"
-            ):
+            if str(row.get("source_format", "")).lower() == "snapshot":
                 errors.append(
                     prefix
                     + f"{engine_field} cannot be used with snapshot sources"

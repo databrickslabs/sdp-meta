@@ -688,7 +688,7 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
                 self.assertEqual(json.loads(actual), golden["profiles"][profile_name])
 
     def test_validate_legacy_quarantine_target_for_bronze_and_silver(self):
-        """Quarantine rules require a non-empty layer-specific table."""
+        """Quarantine rules require complete UC and path-based targets."""
         rules = json.dumps(
             {"expect_or_quarantine": {"invalid_id": "id IS NULL"}}
         )
@@ -696,22 +696,68 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
 
         for layer in ("bronze", "silver"):
             field = f"{layer}_quarantine_table"
+            database_field = f"{layer}_database_quarantine_dev"
             for missing_value in (None, "", "   "):
                 with self.subTest(layer=layer, value=missing_value):
                     with self.assertRaisesRegex(
                         ValueError,
-                        rf"Flow 42 \({layer}\).*{field} is missing or empty",
+                        rf"Flow 42 \({layer}\).*{field}",
                     ):
                         validate(
                             layer,
-                            {"data_flow_id": "42", field: missing_value},
+                            "dev",
+                            {
+                                "data_flow_id": "42",
+                                field: missing_value,
+                                database_field: "quarantine",
+                            },
                             rules,
+                            True,
                         )
 
             validate(
                 layer,
-                {"data_flow_id": "42", field: "invalid_rows"},
+                "dev",
+                {
+                    "data_flow_id": "42",
+                    field: "invalid_rows",
+                    database_field: "quarantine",
+                },
                 rules,
+                True,
+            )
+            with self.assertRaisesRegex(ValueError, database_field):
+                validate(
+                    layer,
+                    "dev",
+                    {"data_flow_id": "42", field: "invalid_rows"},
+                    rules,
+                    True,
+                )
+            path_field = f"{layer}_quarantine_table_path_dev"
+            with self.assertRaisesRegex(ValueError, path_field):
+                validate(
+                    layer,
+                    "dev",
+                    {
+                        "data_flow_id": "42",
+                        field: "invalid_rows",
+                        database_field: "quarantine",
+                    },
+                    rules,
+                    False,
+                )
+            validate(
+                layer,
+                "dev",
+                {
+                    "data_flow_id": "42",
+                    field: "invalid_rows",
+                    database_field: "quarantine",
+                    path_field: "/tmp/quarantine",
+                },
+                rules,
+                False,
             )
 
     def test_validate_legacy_quarantine_target_ignores_other_rule_groups(self):
@@ -719,8 +765,10 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
         validate = OnboardDataflowspec._OnboardDataflowspec__validate_quarantine_target
         validate(
             "bronze",
+            "dev",
             {"data_flow_id": "42", "bronze_quarantine_table": ""},
             json.dumps({"expect_or_drop": {"valid_id": "id IS NOT NULL"}}),
+            True,
         )
 
     def test_onboard_bronze_persists_lakeflow_quality_snapshot(self):
@@ -951,7 +999,7 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
                             silver_row.quarantineTargetDetails
                         )
 
-    def test_legacy_quarantine_rules_without_targets_remain_compatible(self):
+    def test_reonboarded_legacy_quarantine_requires_complete_target(self):
         dqe_payload = {
             "expect_or_quarantine": {"valid_id": "id IS NOT NULL"}
         }
@@ -968,39 +1016,18 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
                 onboarding_path
             )
 
-            with self.assertLogs(
-                "databricks.labs.sdp_meta", level="WARNING"
-            ) as captured:
-                bronze_row = onboarder._OnboardDataflowspec__get_bronze_dataflow_spec_dataframe(
-                    onboarding_df, "dev"
-                ).collect()[0]
-                silver_row = onboarder._OnboardDataflowspec__get_silver_dataflow_spec_dataframe(
-                    onboarding_df, "dev"
-                ).collect()[0]
-
-            self.assertEqual(
-                json.loads(bronze_row.dataQualityExpectations),
-                dqe_payload,
-            )
-            self.assertEqual(
-                json.loads(silver_row.dataQualityExpectations),
-                dqe_payload,
-            )
-            self.assertEqual(bronze_row.quarantineTargetDetails, {})
-            self.assertEqual(silver_row.quarantineTargetDetails, {})
-            warning_output = "\n".join(captured.output)
-            self.assertIn(
-                "Bronze DQE contains non-empty expect_or_quarantine rules",
-                warning_output,
-            )
-            self.assertIn(
-                "Silver DQE contains non-empty expect_or_quarantine rules",
-                warning_output,
-            )
-            self.assertIn(
-                "Missing targets remain allowed for backward compatibility",
-                warning_output,
-            )
+            for layer in ("bronze", "silver"):
+                build_specs = getattr(
+                    onboarder,
+                    "_OnboardDataflowspec__get_"
+                    f"{layer}_dataflow_spec_dataframe",
+                )
+                with self.subTest(layer=layer):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        f"{layer}_quarantine_table",
+                    ):
+                        build_specs(onboarding_df, "dev")
 
     def test_optional_quarantine_metadata_is_preserved_without_dqe(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

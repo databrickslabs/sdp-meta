@@ -24,6 +24,17 @@ sidebar_position: 99
   `databricks-labs-sdp-meta==0.2.0` to remove the old distribution and its
   potentially stale `dlt_meta.pth` startup hook. Use the canonical runner,
   `sdp_meta_whl` key, and `databricks_labs_sdp_meta` task package.
+- **Legacy quarantine targets are required** — every legacy
+  `expect_or_quarantine` configuration must provide its layer's quarantine
+  table and environment-specific quarantine database. Invalid configurations
+  that previously onboarded with a warning now fail before dataflow-spec
+  metadata is updated.
+
+### New Features
+
+- **Quality-engine dependency flag** — `onboard` and `deploy` accept
+  `--quality-engine-dependency` so DQX or another engine package/wheel is
+  installed in the remote onboarding and pipeline environments.
 
 Existing onboarding specs, dataflow-spec tables, output data, pipeline IDs,
 storage, and checkpoints can be preserved through an in-place resource update.

@@ -68,6 +68,51 @@ class QualityOnboardingPreflightTests(unittest.TestCase):
         )
         self.assertIn("must be one of", restricted)
 
+    def test_engine_names_are_case_insensitive(self):
+        row = self._row(bronze_quality_engine="DQX")
+        self.assertEqual(
+            self._errors(row, supported=("lakeflow", "dqx")),
+            [],
+        )
+
+    def test_layer_scope_ignores_unselected_layer_errors(self):
+        row = self._row(
+            silver_quality_engine="lakeflow",
+            silver_quality_rules_path_dev=None,
+        )
+        self.assertTrue(
+            any("silver_quality_rules_path" in error
+                for error in self._errors(row))
+        )
+        self.assertEqual(
+            collect_quality_configuration_errors(
+                [row],
+                env="dev",
+                uc_enabled=True,
+                layers=("bronze",),
+            ),
+            [],
+        )
+
+    def test_silver_snapshot_quality_is_rejected(self):
+        row = {
+            "data_flow_id": "silver-snapshot",
+            "source_format": "snapshot",
+            "silver_quality_engine": "lakeflow",
+            "silver_quality_rules_path_dev": "rules.yml",
+            "silver_database_quarantine_dev": "silver",
+            "silver_quarantine_table": "invalid_rows",
+        }
+        errors = collect_quality_configuration_errors(
+            [row],
+            env="dev",
+            uc_enabled=True,
+            layers=("silver",),
+        )
+        self.assertTrue(
+            any("snapshot sources" in error for error in errors)
+        )
+
     def test_silver_cluster_alias_conflict_is_rejected(self):
         row = {
             "data_flow_id": "quality-1",

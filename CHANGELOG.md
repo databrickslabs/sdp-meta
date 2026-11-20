@@ -19,6 +19,12 @@
   `dlt_meta.pth` startup hook. Update runner notebooks to
   `init_sdp_meta_pipeline.py`, wheel configuration to `sdp_meta_whl`, and
   `PythonWheelTask.package_name` to `databricks_labs_sdp_meta`.
+- **Legacy quarantine targets are now required**: an existing
+  `expect_or_quarantine` configuration must define both its layer's
+  `*_quarantine_table` and environment-specific
+  `*_database_quarantine_<env>`. Earlier releases warned and onboarded an
+  unusable configuration; v0.2.0 rejects it before updating the dataflow-spec
+  table.
 
 ### Migration
 - Existing onboarding JSON/YAML, dataflow-spec tables, pipeline output data,
@@ -38,6 +44,9 @@
 - Added built-in optional DQX support through
   `pip install "databricks-labs-sdp-meta[dqx]"`, plus DAB/App preflight and
   same-pipeline JSON/YAML integration scenarios.
+- Added `--quality-engine-dependency` to `onboard` and `deploy`, allowing DQX
+  or another quality-engine package/wheel to be installed in remote
+  onboarding and pipeline environments.
 - Added managed selective quarantine full-refresh migrations with
   compare-and-swap completion fingerprints.
 

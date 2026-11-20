@@ -13,6 +13,8 @@ commands:
         description: "Build the local sdp-meta wheel, upload it to a UC volume, and use that wheel for the onboarding job. Requires UC onboarding. Invoke with the '=' syntax (e.g. --build-and-upload-whl=true) so the labs CLI string-flag parser does not consume the next CLI token as its value."
       - name: whl-file-path
         description: Existing wheel path to use for the onboarding job, such as /Volumes/<catalog>/<schema>/<volume>/<wheel>.whl. Mutually exclusive with --build-and-upload-whl.
+      - name: quality-engine-dependency
+        description: Optional pip-installable quality-engine package for the onboarding job, for example databricks-labs-dqx>=0.14,<0.17. Persisted for the subsequent deploy command.
       - name: git-branch
         description: Git branch to build a wheel from when --build-and-upload-whl is set. Defaults to the databrickslabs/sdp-meta repository when --git-url is omitted.
       - name: git-url
@@ -42,6 +44,8 @@ commands:
         description: "Build the local sdp-meta wheel, upload it to a UC volume, and bake the wheel path into the SDP runner notebook's `%pip install` (avoids needing PyPI access on the pipeline cluster). Requires UC. Invoke with the '=' syntax (e.g. --build-and-upload-whl=true) so the labs CLI string-flag parser does not consume the next CLI token as its value."
       - name: whl-file-path
         description: "Existing wheel path to bake into the SDP runner notebook's `%pip install` (e.g. /Volumes/<catalog>/<schema>/<volume>/<wheel>.whl). Mutually exclusive with --build-and-upload-whl."
+      - name: quality-engine-dependency
+        description: Optional pip-installable quality-engine package for the pipeline and managed migration job, for example databricks-labs-dqx>=0.14,<0.17.
       - name: git-branch
         description: Git branch to build a wheel from when --build-and-upload-whl is set. Defaults to the databrickslabs/sdp-meta repository when --git-url is omitted.
       - name: git-url

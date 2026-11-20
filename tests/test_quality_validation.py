@@ -520,17 +520,22 @@ class QualityValidationTests(SDPFrameworkTestCase):
         config = json.loads(row["qualityConfig"])
         self.assertFalse(config["engine_options"]["analysis_required"])
 
-    def test_silver_onboarding_rejects_rule_missing_after_select_transformation(self):
+    def test_silver_onboarding_defers_rule_for_custom_transform_column(self):
         params = self._silver_quality_onboarding_params(
-            "raw_email IS NOT NULL"
+            "is_active = true"
         )
 
-        with self.assertRaisesRegex(
-            InvalidQualityConfiguration, "cannot be analyzed"
+        with self.assertLogs(
+            "databricks.labs.sdp_meta", level="WARNING"
         ):
             OnboardDataflowspec(
                 self.spark, params
             ).onboard_silver_dataflow_spec()
+        row = self.spark.read.format("delta").load(
+            params["silver_dataflowspec_path"]
+        ).first()
+        config = json.loads(row["qualityConfig"])
+        self.assertTrue(config["engine_options"]["analysis_required"])
 
     def test_silver_onboarding_defers_analysis_when_delta_source_is_unavailable(self):
         params = self._silver_quality_onboarding_params(
@@ -852,7 +857,13 @@ class QualityValidationTests(SDPFrameworkTestCase):
             self.spark, self.onboarding_bronze_silver_params_map
         )
         new_specs = MagicMock()
-        new_specs.where.return_value.limit.return_value.count.return_value = 0
+        new_specs.collect.return_value = [
+            Row(
+                dataFlowId="quality-1",
+                qualityConfig=None,
+                dataQualityExpectations=None,
+            )
+        ]
         read_existing = (
             "_OnboardDataflowspec__read_existing_dataflow_specs"
         )
@@ -868,4 +879,65 @@ class QualityValidationTests(SDPFrameworkTestCase):
 
         self.assertIs(result, new_specs)
         existing.assert_not_called()
-        new_specs.collect.assert_not_called()
+        new_specs.collect.assert_called_once()
+
+    def test_switch_from_engine_to_legacy_requires_new_quarantine_target(self):
+        onboarder = OnboardDataflowspec(
+            self.spark, self.onboarding_bronze_silver_params_map
+        )
+        existing = MagicMock()
+        existing.collect.return_value = [
+            Row(
+                dataFlowId="quality-1",
+                qualityConfig=json.dumps({
+                    "engine": "dqx",
+                    "diagnostic_schema_fingerprint": "old",
+                }),
+                quarantineTargetDetails={
+                    "database": "quality",
+                    "table": "quarantine",
+                },
+            )
+        ]
+
+        def legacy_specs(table):
+            specs = MagicMock()
+            specs.collect.return_value = [
+                Row(
+                    dataFlowId="quality-1",
+                    qualityConfig=None,
+                    dataQualityExpectations=json.dumps({
+                        "expect_or_quarantine": {
+                            "bad_id": "id IS NULL"
+                        }
+                    }),
+                    quarantineTargetDetails={
+                        "database": "quality",
+                        "table": table,
+                    },
+                )
+            ]
+            return specs
+
+        read_existing = (
+            "_OnboardDataflowspec__read_existing_dataflow_specs"
+        )
+        validate_switch = (
+            onboarder._OnboardDataflowspec__validate_quality_engine_switch
+        )
+        with patch.object(
+            onboarder, read_existing, return_value=existing
+        ):
+            with self.assertRaisesRegex(
+                InvalidQualityConfiguration, "configure a new table"
+            ):
+                validate_switch(
+                    legacy_specs("quarantine"),
+                    self.onboarding_bronze_silver_params_map,
+                    "bronze",
+                )
+            validate_switch(
+                legacy_specs("legacy_quarantine"),
+                self.onboarding_bronze_silver_params_map,
+                "bronze",
+            )

@@ -152,6 +152,76 @@ def _quality_migration_layers(onboarding):
     })
 
 
+def _quality_migration_groups(onboarding):
+    """Return affected data-flow groups per full-refresh migration layer."""
+    if not isinstance(onboarding, list):
+        return {}
+    groups = {}
+    for row in onboarding:
+        if not isinstance(row, dict):
+            continue
+        group = row.get("data_flow_group")
+        if not group:
+            continue
+        for layer in ("bronze", "silver"):
+            if (
+                row.get(f"{layer}_quality_engine_migration")
+                == "full_refresh"
+            ):
+                groups.setdefault(layer, set()).add(group)
+    return {
+        layer: sorted(layer_groups)
+        for layer, layer_groups in groups.items()
+    }
+
+
+def _app_quality_migration_layers(input_params, persisted):
+    """Return only migration intent matching this App deploy target."""
+    if "quality_migration_layers" in input_params:
+        return input_params.get("quality_migration_layers") or []
+    if not isinstance(persisted, dict):
+        return []
+    layers = persisted.get("quality_migration_layers", [])
+    scope = persisted.get("quality_migration_scope")
+    if not isinstance(layers, list) or not isinstance(scope, dict):
+        return []
+
+    selected = input_params.get("layer")
+    selected_layers = (
+        ("bronze", "silver")
+        if selected == "bronze_silver"
+        else (selected,)
+    )
+    matched = []
+    for layer in selected_layers:
+        target = scope.get(layer)
+        if layer not in layers or not isinstance(target, dict):
+            continue
+        group = input_params.get(f"onboard_{layer}_group")
+        if group not in target.get("groups", []):
+            continue
+        uc_enabled = _coerce_bool(input_params.get("uc_enabled", False))
+        if uc_enabled != target.get("uc_enabled"):
+            continue
+        if uc_enabled:
+            matches_target = (
+                input_params.get("uc_catalog_name")
+                == target.get("uc_catalog_name")
+                and input_params.get(f"sdp_meta_{layer}_schema")
+                == target.get("sdp_meta_schema")
+                and input_params.get(f"dataflowspec_{layer}_table")
+                == target.get("dataflowspec_table")
+            )
+        else:
+            matches_target = (
+                input_params.get(f"dataflowspec_{layer}_path")
+                == target.get("dataflowspec_path")
+            )
+        if matches_target:
+            matched.append(layer)
+    return matched
+
+
 def _recover_swallowed_flag(flags: dict, bool_flag_name: str) -> None:
     """Undo the labs CLI string-flag parser eating a boolean flag's neighbor.
 
@@ -318,6 +388,7 @@ class OnboardCommand:
     sdp_meta_dependency: str = None
     quality_engine_dependency: str = None
     quality_migration_layers: List[str] = None
+    quality_migration_groups: dict = None
 
     def __post_init__(self):
         if not self.onboarding_file_path or self.onboarding_file_path == "":
@@ -705,7 +776,10 @@ class SDPMeta:
             self.update_ws_onboarding_paths(cmd)
             self.copy_to_dbfs(cmd.onboarding_files_dir_path, cmd.dbfs_path + "/sdp_meta_conf/")
             logger.info(f"uploading to  {cmd.dbfs_path}/sdp_meta_conf complete!!!")
-        _persist_quality_migration_layers(cmd.quality_migration_layers or [])
+        _persist_quality_migration_layers(
+            cmd.quality_migration_layers or [],
+            onboarding_cmd=cmd,
+        )
         created_job = self.create_onnboarding_job(cmd)
         run = self._ws.jobs.run_now(job_id=created_job.job_id)
         msg = (
@@ -1053,8 +1127,8 @@ class SDPMeta:
                 cmd, pipeline_id
             )
             update_id = getattr(update_response, "run_id", "<managed-job>")
-            _persist_quality_migration_layers(
-                sorted(migration_layers - pending_migration_layers)
+            _complete_quality_migrations(
+                cmd, sorted(pending_migration_layers)
             )
         else:
             update_response = self._ws.pipelines.start_update(
@@ -1167,6 +1241,12 @@ class SDPMeta:
             oc_job_details_json = json.loads(oc_job_details_json)
             deploy_cmd_dict["quality_migration_layers"] = (
                 oc_job_details_json.get("quality_migration_layers", [])
+            )
+            deploy_cmd_dict["quality_engine_dependency"] = (
+                oc_job_details_json.get("quality_engine_dependency")
+            )
+            deploy_cmd_dict["sdp_meta_dependency"] = (
+                oc_job_details_json.get("sdp_meta_dependency")
             )
             deploy_cmd_dict["uc_enabled"] = self._wsi._choice(
                 "Deploy SDP-META with unity catalog enabled?", ["True", "False"])
@@ -1311,6 +1391,9 @@ class SDPMeta:
         onboard_cmd_dict["env"] = form_data.get('environment', 'prod')
         onboard_cmd_dict["import_author"] = form_data.get('author', self._wsi._short_name)
         onboard_cmd_dict["update_paths"] = True if form_data.get('update_paths') == "1" else False
+        onboard_cmd_dict["quality_engine_dependency"] = form_data.get(
+            "quality_engine_dependency"
+        )
 
         # Save to file
         with open("onboarding_job_details.json", "w") as oc_file:
@@ -1323,16 +1406,47 @@ class SDPMeta:
         oc_job_details_json = None
         if os.path.isfile("onboarding_job_details.json"):
             with open("onboarding_job_details.json") as f:
-                oc_job_details_json = f.read()
+                try:
+                    oc_job_details_json = json.loads(f.read())
+                except (TypeError, ValueError):
+                    oc_job_details_json = None
 
         load_from_ojd_json = _coerce_bool(input_params.get("load_from_ojd_json", False))
-        deploy_cmd_dict = {}
+        deploy_cmd_dict = {
+            "quality_engine_dependency": input_params.get(
+                "quality_engine_dependency"
+            )
+            or (
+                oc_job_details_json.get("quality_engine_dependency")
+                if oc_job_details_json
+                else None
+            ),
+            "sdp_meta_dependency": input_params.get("sdp_meta_dependency")
+            or (
+                oc_job_details_json.get("sdp_meta_dependency")
+                if oc_job_details_json
+                else None
+            ),
+            # App processes share one local onboarding details file. Only
+            # inherit migration intent when its spec target and data-flow
+            # group match this deployment; otherwise one user's onboarding
+            # could force an unrelated user's pipeline through full refresh.
+            "quality_migration_layers": (
+                input_params.get("quality_migration_layers") or []
+                if "quality_migration_layers" in input_params
+                else (
+                    oc_job_details_json.get(
+                        "quality_migration_layers", []
+                    )
+                    if load_from_ojd_json and oc_job_details_json
+                    else _app_quality_migration_layers(
+                        input_params, oc_job_details_json
+                    )
+                )
+            ),
+        }
 
         if load_from_ojd_json and oc_job_details_json:
-            oc_job_details_json = json.loads(oc_job_details_json)
-            deploy_cmd_dict["quality_migration_layers"] = (
-                oc_job_details_json.get("quality_migration_layers", [])
-            )
             # The App envelope sends ``uc_enabled`` / ``serverless`` as the
             # STRINGS "1" / "0" (HTML radio button values). Python truthy-
             # checks accept both as True, but downstream ``self._ws.pipelines.
@@ -1463,6 +1577,7 @@ class SDPMeta:
             content, src_ext, string_subs
         )
         cmd.quality_migration_layers = _quality_migration_layers(parsed)
+        cmd.quality_migration_groups = _quality_migration_groups(parsed)
 
         if src_ext in (".yml", ".yaml"):
             rendered_basename = f"onboarding{src_ext}"
@@ -1559,6 +1674,13 @@ def onboard(sdp_meta: SDPMeta, flags: dict = None):
         if not cmd.uc_enabled:
             raise ValueError("--build-and-upload-whl requires onboarding with unity catalog enabled")
         cmd.sdp_meta_dependency = _build_and_upload_onboard_wheel(sdp_meta, cmd, flags)
+    quality_engine_dependency = _flag_value(
+        flags,
+        "quality-engine-dependency",
+        "quality_engine_dependency",
+    )
+    if quality_engine_dependency:
+        cmd.quality_engine_dependency = quality_engine_dependency
     # Only act on a real, non-empty string dependency. The isinstance() guard
     # keeps us safe in unit tests where ``cmd`` is a MagicMock (its attributes
     # auto-create truthy MagicMock values that aren't JSON-serializable).
@@ -1571,6 +1693,17 @@ def onboard(sdp_meta: SDPMeta, flags: dict = None):
         # silently fall back to `databricks-labs-sdp-meta==<version>` on PyPI
         # — exactly the failure mode that motivated this whole feature.
         _persist_dependency_to_onboarding_json(cmd.sdp_meta_dependency)
+    if (
+        isinstance(cmd.quality_engine_dependency, str)
+        and cmd.quality_engine_dependency
+    ):
+        print(
+            "Using quality-engine dependency for onboarding job: "
+            f"{cmd.quality_engine_dependency}"
+        )
+        _persist_quality_engine_dependency(
+            cmd.quality_engine_dependency
+        )
     sdp_meta.onboard(cmd)
 
 
@@ -1631,6 +1764,24 @@ def deploy(sdp_meta: SDPMeta, flags: dict = None):
         # The isinstance() check keeps unit tests with MagicMock cmd objects
         # from accidentally short-circuiting the auto-pickup path.
         cmd.sdp_meta_dependency = _read_dependency_from_onboarding_json()
+    quality_engine_dependency = _flag_value(
+        flags,
+        "quality-engine-dependency",
+        "quality_engine_dependency",
+    )
+    if quality_engine_dependency:
+        cmd.quality_engine_dependency = quality_engine_dependency
+    elif not (
+        isinstance(cmd.quality_engine_dependency, str)
+        and cmd.quality_engine_dependency
+    ):
+        cmd.quality_engine_dependency = (
+            _read_quality_engine_dependency_from_onboarding_json()
+        )
+    if not cmd.quality_migration_layers:
+        cmd.quality_migration_layers = (
+            _read_quality_migration_layers_from_onboarding_json()
+        )
     if isinstance(cmd.sdp_meta_dependency, str) and cmd.sdp_meta_dependency:
         print(
             "Using sdp-meta dependency for SDP runner notebook "
@@ -1668,20 +1819,140 @@ def _persist_dependency_to_onboarding_json(dependency: str) -> None:
         logger.warning("Unable to update %s with sdp_meta_dependency: %s", path, exc)
 
 
-def _persist_quality_migration_layers(layers) -> None:
-    """Persist pending migration intent for the next local deploy."""
+def _persist_quality_engine_dependency(dependency: str) -> None:
+    """Persist an optional engine package for onboarding and deployment."""
     path = "onboarding_job_details.json"
     if not os.path.isfile(path):
         return
     try:
         with open(path) as fh:
             data = json.load(fh)
-        data["quality_migration_layers"] = sorted(set(layers or []))
+        if not isinstance(data, dict):
+            return
+        data["quality_engine_dependency"] = dependency
+        with open(path, "w") as fh:
+            json.dump(data, fh, indent=4)
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning(
+            "Unable to update %s with quality_engine_dependency: %s",
+            path,
+            exc,
+        )
+
+
+def _quality_migration_scope(onboarding_cmd, layers):
+    """Bind pending migration layers to their spec target and groups."""
+    groups = getattr(onboarding_cmd, "quality_migration_groups", {}) or {}
+    scope = {}
+    for layer in layers:
+        scope[layer] = {
+            "uc_enabled": bool(onboarding_cmd.uc_enabled),
+            "uc_catalog_name": onboarding_cmd.uc_catalog_name,
+            "sdp_meta_schema": onboarding_cmd.sdp_meta_schema,
+            "dataflowspec_table": getattr(
+                onboarding_cmd, f"{layer}_dataflowspec_table"
+            ),
+            "dataflowspec_path": getattr(
+                onboarding_cmd, f"{layer}_dataflowspec_path"
+            ),
+            "groups": groups.get(layer, []),
+        }
+    return scope
+
+
+def _persist_quality_migration_layers(
+    layers, onboarding_cmd=None
+) -> None:
+    """Persist pending migration intent scoped to its spec target."""
+    path = "onboarding_job_details.json"
+    if not os.path.isfile(path):
+        return
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+        normalized_layers = sorted(set(layers or []))
+        data["quality_migration_layers"] = normalized_layers
+        if onboarding_cmd is not None:
+            data["quality_migration_scope"] = _quality_migration_scope(
+                onboarding_cmd, normalized_layers
+            )
+        elif isinstance(data.get("quality_migration_scope"), dict):
+            data["quality_migration_scope"] = {
+                layer: target
+                for layer, target in data["quality_migration_scope"].items()
+                if layer in normalized_layers
+            }
         with open(path, "w") as fh:
             json.dump(data, fh, indent=4)
     except (OSError, ValueError, TypeError) as exc:
         logger.warning(
             "Unable to update %s with quality migration layers: %s",
+            path,
+            exc,
+        )
+
+
+def _clear_completed_quality_migration_state(
+    data, deploy_cmd, completed_layers
+):
+    """Remove only the deployed groups from persisted migration intent."""
+    layers = set(data.get("quality_migration_layers", []))
+    scope = data.get("quality_migration_scope")
+    if not isinstance(scope, dict):
+        data["quality_migration_layers"] = sorted(
+            layers - set(completed_layers)
+        )
+        return data
+
+    for layer in completed_layers:
+        target = scope.get(layer)
+        if not isinstance(target, dict):
+            layers.discard(layer)
+            continue
+        groups = target.get("groups")
+        deployed_group = getattr(
+            deploy_cmd, f"onboard_{layer}_group", None
+        )
+        if not isinstance(groups, list) or not groups:
+            layers.discard(layer)
+            scope.pop(layer, None)
+            continue
+        if deployed_group not in groups:
+            # The persisted scope belongs to a different deployment. Keep it
+            # pending instead of clearing another group's migration.
+            continue
+        remaining_groups = [
+            group for group in groups if group != deployed_group
+        ]
+        if remaining_groups:
+            target["groups"] = remaining_groups
+        else:
+            layers.discard(layer)
+            scope.pop(layer, None)
+
+    data["quality_migration_layers"] = sorted(layers)
+    data["quality_migration_scope"] = scope
+    return data
+
+
+def _complete_quality_migrations(deploy_cmd, completed_layers) -> None:
+    """Persist completion for the groups handled by one deployment."""
+    path = "onboarding_job_details.json"
+    if not os.path.isfile(path):
+        return
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            return
+        data = _clear_completed_quality_migration_state(
+            data, deploy_cmd, completed_layers
+        )
+        with open(path, "w") as fh:
+            json.dump(data, fh, indent=4)
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning(
+            "Unable to clear completed quality migrations in %s: %s",
             path,
             exc,
         )
@@ -1704,6 +1975,34 @@ def _read_dependency_from_onboarding_json() -> str:
     if isinstance(dep, str) and dep.strip():
         return dep
     return None
+
+
+def _read_quality_engine_dependency_from_onboarding_json() -> str:
+    """Read the persisted optional quality-engine package."""
+    return _read_onboarding_json_value("quality_engine_dependency")
+
+
+def _read_quality_migration_layers_from_onboarding_json():
+    """Read pending managed-migration layers persisted by onboarding."""
+    value = _read_onboarding_json_value("quality_migration_layers")
+    return value if isinstance(value, list) else []
+
+
+def _read_onboarding_json_value(key):
+    path = "onboarding_job_details.json"
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = data.get(key)
+    if isinstance(value, str):
+        return value if value.strip() else None
+    return value
 
 
 def _build_and_upload_wheel(sdp_meta: SDPMeta, *, uc_catalog: str,

@@ -36,6 +36,17 @@ databricks labs sdp-meta onboard
 
 Prompts for: Databricks profile, onboarding file path, Bronze/silver dataflowspec table names, environment name, catalog, and schema. After completion, prints and opens the onboarding job URL.
 
+To onboard DQX rules, install DQX in the remote onboarding environment:
+
+```bash
+databricks labs sdp-meta onboard \
+  --quality-engine-dependency="databricks-labs-dqx==0.16.0"
+```
+
+The dependency is persisted in `onboarding_job_details.json` for a subsequent
+`deploy`. The value may also be a wheel path when the workspace cannot install
+DQX from PyPI.
+
 :::note
 If you have cloned the sdp-meta repository, pressing Enter at each prompt accepts the default demo values from the `demo/` directory.
 :::
@@ -54,6 +65,14 @@ Managed quality migrations accept
 `--quality-migration-timeout-seconds` (default: `10800`). The timeout is one
 shared budget for the selective quarantine refresh and the normal pipeline
 update.
+
+If deployment is run separately from onboarding, provide the quality-engine
+dependency explicitly:
+
+```bash
+databricks labs sdp-meta deploy \
+  --quality-engine-dependency="databricks-labs-dqx==0.16.0"
+```
 
 ## `bundle-init`
 

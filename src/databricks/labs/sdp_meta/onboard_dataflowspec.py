@@ -321,12 +321,24 @@ class OnboardDataflowspec:
 
     def __validate_quality_engine_switch(self, new_specs, dict_obj, layer):
         """Reject incompatible diagnostic reuse before overwrite or MERGE."""
-        has_current_quality = (
-            new_specs.where(f.col("qualityConfig").isNotNull())
-            .limit(1)
-            .count()
-        )
-        if not has_current_quality:
+        current_rows = [
+            row.asDict(recursive=True) for row in new_specs.collect()
+        ]
+
+        def legacy_has_quarantine(raw):
+            if not raw:
+                return False
+            try:
+                document = json.loads(raw)
+            except (TypeError, json.JSONDecodeError):
+                return False
+            return bool(document.get("expect_or_quarantine"))
+
+        if not any(
+            row.get("qualityConfig")
+            or legacy_has_quarantine(row.get("dataQualityExpectations"))
+            for row in current_rows
+        ):
             return new_specs
         existing = self.__read_existing_dataflow_specs(dict_obj, layer)
         if existing is None:
@@ -335,9 +347,6 @@ class OnboardDataflowspec:
             row["dataFlowId"]: row.asDict(recursive=True)
             for row in existing.collect()
         }
-        current_rows = [
-            row.asDict(recursive=True) for row in new_specs.collect()
-        ]
 
         def target_identity(spec_row):
             details = spec_row.get("quarantineTargetDetails") or {}
@@ -352,29 +361,38 @@ class OnboardDataflowspec:
 
         for current in current_rows:
             current_config_json = current.get("qualityConfig")
+            current_legacy_quarantine = legacy_has_quarantine(
+                current.get("dataQualityExpectations")
+            )
             previous = previous_rows.get(current["dataFlowId"])
-            if not current_config_json or not previous:
+            if (
+                not previous
+                or not (current_config_json or current_legacy_quarantine)
+            ):
                 continue
-            current_config = json.loads(current_config_json)
             previous_config_json = previous.get("qualityConfig")
-            if previous_config_json:
+            current_config = (
+                json.loads(current_config_json)
+                if current_config_json
+                else None
+            )
+            if current_config is None:
+                changed = bool(previous_config_json)
+            elif previous_config_json:
                 previous_config = json.loads(previous_config_json)
                 changed = (
                     current_config.get("engine")
                     != previous_config.get("engine")
-                    or current_config.get("diagnostic_schema_fingerprint")
-                    != previous_config.get("diagnostic_schema_fingerprint")
+                    or current_config.get(
+                        "diagnostic_schema_fingerprint"
+                    )
+                    != previous_config.get(
+                        "diagnostic_schema_fingerprint"
+                    )
                 )
             else:
-                legacy_quality = previous.get("dataQualityExpectations")
-                if not legacy_quality:
-                    continue
-                try:
-                    legacy_document = json.loads(legacy_quality)
-                except (TypeError, json.JSONDecodeError):
-                    legacy_document = {}
-                changed = bool(
-                    legacy_document.get("expect_or_quarantine")
+                changed = legacy_has_quarantine(
+                    previous.get("dataQualityExpectations")
                 )
             if not changed:
                 continue
@@ -382,13 +400,23 @@ class OnboardDataflowspec:
             new_target = target_identity(current)
             if (
                 old_target == new_target
-                and current_config.get("migration") != "full_refresh"
+                and (
+                    current_config is None
+                    or current_config.get("migration") != "full_refresh"
+                )
             ):
+                migration_guidance = (
+                    "configure a new table"
+                    if current_config is None
+                    else (
+                        "configure a new table or set quality engine "
+                        "migration to 'full_refresh'"
+                    )
+                )
                 raise InvalidQualityConfiguration(
                     f"Flow {current['dataFlowId']} changes quality engine or "
                     "diagnostic schema while reusing its quarantine table; "
-                    "configure a new table or set quality engine migration "
-                    "to 'full_refresh'"
+                    + migration_guidance
                 )
         previous_configs = {
             flow_id: (
@@ -1729,22 +1757,6 @@ class OnboardDataflowspec:
                 "bronze_quarantine_table" in onboarding_row
                 and bool(onboarding_row["bronze_quarantine_table"])
             )
-            quarantine_database_configured = (
-                f"bronze_database_quarantine_{env}" in onboarding_row
-                and bool(onboarding_row[f"bronze_database_quarantine_{env}"])
-            )
-            if has_quarantine_expectations and not (
-                quarantine_target_configured and quarantine_database_configured
-            ):
-                logger.warning(
-                    "Bronze DQE contains non-empty expect_or_quarantine rules "
-                    "but its quarantine target is incomplete. No quarantine "
-                    "table will be created. Add "
-                    "bronze_quarantine_table and "
-                    "bronze_database_quarantine_%s. Missing targets remain "
-                    "allowed for backward compatibility.",
-                    env,
-                )
             if has_quarantine_expectations or quarantine_target_configured:
                 quarantine_target_details, quarantine_table_properties = self.__get_quarantine_details(
                     env, "bronze", onboarding_row
@@ -1772,6 +1784,13 @@ class OnboardDataflowspec:
             )
             self.__validate_cdc_flows_quarantine_expectations(
                 data_quality_expectations, cdc_apply_changes_flows, "bronze"
+            )
+            self.__validate_quarantine_target(
+                "bronze",
+                env,
+                onboarding_row,
+                data_quality_expectations,
+                self.uc_enabled,
             )
             bronze_row_filter = (
                 onboarding_row["bronze_row_filter"]
@@ -1924,20 +1943,42 @@ class OnboardDataflowspec:
         )
 
     @staticmethod
-    def __validate_quarantine_target(layer, onboarding_row, data_quality_expectations):
-        """Require a quarantine table when legacy quarantine rules are configured."""
+    def __validate_quarantine_target(
+        layer,
+        env,
+        onboarding_row,
+        data_quality_expectations,
+        uc_enabled,
+    ):
+        """Require a complete target for legacy quarantine rules."""
         if not data_quality_expectations:
             return
         expectations = json.loads(data_quality_expectations)
         if not expectations.get("expect_or_quarantine"):
             return
-        field = f"{layer}_quarantine_table"
-        value = onboarding_row[field] if field in onboarding_row else None
-        if not value or not str(value).strip():
+        required_fields = [
+            f"{layer}_quarantine_table",
+            f"{layer}_database_quarantine_{env}",
+        ]
+        if not uc_enabled:
+            required_fields.append(
+                f"{layer}_quarantine_table_path_{env}"
+            )
+        missing_fields = [
+            field
+            for field in required_fields
+            if (
+                field not in onboarding_row
+                or not onboarding_row[field]
+                or not str(onboarding_row[field]).strip()
+            )
+        ]
+        if missing_fields:
             flow_id = onboarding_row["data_flow_id"] if "data_flow_id" in onboarding_row else "<unknown>"
             raise ValueError(
                 f"Flow {flow_id} ({layer}) has expect_or_quarantine rules but "
-                f"{field} is missing or empty"
+                f"required quarantine target fields are missing or empty: "
+                f"{', '.join(missing_fields)}"
             )
 
     @staticmethod
@@ -2043,6 +2084,7 @@ class OnboardDataflowspec:
             [row_values],
             env=env,
             uc_enabled=self.uc_enabled,
+            layers=(layer,),
         )
         if preflight_errors:
             raise InvalidQualityConfiguration("\n".join(preflight_errors))
@@ -2075,9 +2117,28 @@ class OnboardDataflowspec:
                 f"reserved quality columns: {', '.join(conflicts)}"
             )
         if engine == "lakeflow":
-            normalized, analysis_required = validate_lakeflow_rules(
-                self.spark, document, schema
-            )
+            try:
+                normalized, analysis_required = validate_lakeflow_rules(
+                    self.spark, document, schema
+                )
+            except InvalidQualityConfiguration as err:
+                if (
+                    schema is None
+                    or "cannot be analyzed against the source schema"
+                    not in str(err)
+                ):
+                    raise
+                logger.warning(
+                    "Flow %s (%s) quality rules reference columns that are "
+                    "not present in the onboarding schema. Deferring schema "
+                    "analysis until runtime so custom transformations can "
+                    "supply them.",
+                    onboarding_row["data_flow_id"],
+                    layer,
+                )
+                normalized, analysis_required = validate_lakeflow_rules(
+                    self.spark, document
+                )
             quality_config = build_lakeflow_quality_config(
                 rules_path=rules_path,
                 raw_text=raw_text,
@@ -3001,22 +3062,6 @@ class OnboardDataflowspec:
                 "silver_quarantine_table" in onboarding_row
                 and bool(onboarding_row["silver_quarantine_table"])
             )
-            quarantine_database_configured = (
-                f"silver_database_quarantine_{env}" in onboarding_row
-                and bool(onboarding_row[f"silver_database_quarantine_{env}"])
-            )
-            if has_quarantine_expectations and not (
-                quarantine_target_configured and quarantine_database_configured
-            ):
-                logger.warning(
-                    "Silver DQE contains non-empty expect_or_quarantine rules "
-                    "but its quarantine target is incomplete. No quarantine "
-                    "table will be created. Add "
-                    "silver_quarantine_table and "
-                    "silver_database_quarantine_%s. Missing targets remain "
-                    "allowed for backward compatibility.",
-                    env,
-                )
             if has_quarantine_expectations or quarantine_target_configured:
                 (
                     silver_quarantine_target_details,
@@ -3065,6 +3110,13 @@ class OnboardDataflowspec:
             )
             self.__validate_cdc_flows_quarantine_expectations(
                 data_quality_expectations, silver_cdc_apply_changes_flows, "silver"
+            )
+            self.__validate_quarantine_target(
+                "silver",
+                env,
+                onboarding_row,
+                data_quality_expectations,
+                self.uc_enabled,
             )
             apply_changes_from_snapshot = None
             source_format = "delta"
