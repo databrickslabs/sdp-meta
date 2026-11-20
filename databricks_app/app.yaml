@@ -36,3 +36,6 @@ env:
   # Maximum demo launcher subprocesses allowed at the same time.
   - name: SDP_META_MAX_ACTIVE_DEMOS
     value: "8"
+  # DQX runtime installed into App-created onboarding and pipeline environments.
+  - name: SDP_META_QUALITY_ENGINE_DEPENDENCY
+    value: "databricks-labs-dqx>=0.14,<0.17"

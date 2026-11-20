@@ -31,7 +31,8 @@ long_description = content
 INSTALL_REQUIRES = [
     "setuptools>=65,<85",
     "databricks-sdk>=0.138.0,<1",
-    "PyYAML>=6.0,<7",
+    "packaging>=24.0,<27",
+    "PyYAML>=6.0.3,<7",
 ]
 
 DEV_REQUIREMENTS = [
@@ -48,6 +49,12 @@ IT_REQUIREMENTS = [
 ]
 
 MCP_REQUIREMENTS = ["mcp>=2.0.0,<3.0"]
+DQX_REQUIREMENTS = [
+    "databricks-labs-dqx>=0.14,<0.17",
+    # DQX imports pandas from its core checks module but 0.16 does not declare
+    # it as a runtime dependency.
+    "pandas>=2,<3",
+]
 
 
 class BuildPyWithExamples(build_py):
@@ -116,7 +123,12 @@ setup(
     # (nothing may be fetched at build time). Build deps are supplied by
     # .github/requirements-build.txt instead.
     install_requires=INSTALL_REQUIRES,
-    extras_require={"dev": DEV_REQUIREMENTS, "IT": IT_REQUIREMENTS, "mcp": MCP_REQUIREMENTS},
+    extras_require={
+        "dev": DEV_REQUIREMENTS,
+        "IT": IT_REQUIREMENTS,
+        "mcp": MCP_REQUIREMENTS,
+        "dqx": DQX_REQUIREMENTS,
+    },
     cmdclass={"build_py": BuildPyWithExamples},
     author="Ravi Gawai",
     author_email="databrickslabs@databricks.com",
@@ -140,10 +152,12 @@ setup(
             # (python_wheel_task entry_point: stage_conf) to copy conf/ onto a
             # UC Volume so serverless Spark can read it.
             "stage_conf=databricks.labs.sdp_meta.stage_conf:main",
+            "quality_migrate=databricks.labs.sdp_meta.quality.migration_main:main",
         ],
         "group_1": [
             "run=databricks.labs.sdp_meta.__main__:main",
             "stage_conf=databricks.labs.sdp_meta.stage_conf:main",
+            "quality_migrate=databricks.labs.sdp_meta.quality.migration_main:main",
         ],
     },
     # Per-version classifiers must cover exactly the range declared in

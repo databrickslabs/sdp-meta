@@ -12,4 +12,5 @@
 
 setuptools>=84.0.0,<85
 databricks-sdk>=0.138.0,<1
+packaging>=24.0,<27
 PyYAML>=6.0.3,<7

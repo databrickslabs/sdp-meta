@@ -40,7 +40,10 @@
         },
         "silver_table_path_dev": "tests/resources/delta/silver/products",
         "silver_transformation_json_dev": "tests/resources/silver_transformations_ac_type2.json",
-        "silver_data_quality_expectations_json_dev": "tests/resources/dqe/product/silver_data_quality_expectations.json"
+        "silver_data_quality_expectations_json_dev": "tests/resources/dqe/product/silver_data_quality_expectations.json",
+        "silver_database_quarantine_dev": "uc_catalog_name.silver",
+        "silver_quarantine_table": "products_quarantine",
+        "silver_quarantine_table_path_dev": "tests/resources/delta/silver/products_quarantine"
      },
      {
         "data_flow_id": "202",

@@ -34,7 +34,8 @@ def _extract_required_files(parsed_spec, substitutions: dict):
       * Anything whose key starts with ``source_path`` (raw or env-suffixed).
       * Anything whose key is ``source_schema_path``.
       * Anything whose key starts with ``bronze_data_quality_expectations_json``,
-        ``silver_data_quality_expectations_json``, or
+        ``silver_data_quality_expectations_json``,
+        ``bronze_quality_rules_path``, ``silver_quality_rules_path``, or
         ``silver_transformation_json`` (raw or env-suffixed).
       * Anything inside ``source_details`` for ``bronze_append_flows`` or
         ``silver_append_flows`` that follows the same naming.
@@ -59,6 +60,8 @@ def _extract_required_files(parsed_spec, substitutions: dict):
         "source_schema_path",
         "bronze_data_quality_expectations_json",
         "silver_data_quality_expectations_json",
+        "bronze_quality_rules_path",
+        "silver_quality_rules_path",
         "silver_transformation_json",
     )
 

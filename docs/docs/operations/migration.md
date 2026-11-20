@@ -56,6 +56,13 @@ can downgrade a newer installation. Remove `dlt-meta` from requirements and
 install `databricks-labs-sdp-meta>=0.2.0` directly.
 :::
 
+:::warning
+Before re-onboarding, add a complete quarantine target to every legacy flow
+that uses `expect_or_quarantine`: set the layer's `*_quarantine_table` and
+`*_database_quarantine_<env>`. Version 0.2.0 rejects missing targets instead
+of preserving the earlier warning-only behavior.
+:::
+
 ## Step-by-step migration
 
 ### 1. Update installation
@@ -82,6 +89,15 @@ databricks labs dlt-meta deploy
 
 # After
 databricks labs sdp-meta onboard
+databricks labs sdp-meta deploy
+```
+
+When the selected quality engine needs an additional package, provide it to
+both remote environments (the onboarding value is persisted for deployment):
+
+```bash
+databricks labs sdp-meta onboard \
+  --quality-engine-dependency="databricks-labs-dqx==0.16.0"
 databricks labs sdp-meta deploy
 ```
 

@@ -40,6 +40,20 @@ def _setup_kwargs(setup_py: Path) -> dict:
     raise AssertionError(f"no setup() call found in {setup_py}")
 
 
+def _literal_assignment(setup_py: Path, name: str):
+    tree = ast.parse(setup_py.read_text(encoding="utf-8"), str(setup_py))
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == name
+                for target in node.targets
+            )
+        ):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"{name} is not assigned in {setup_py}")
+
+
 class PythonSupportMetadataTests(unittest.TestCase):
 
     def setUp(self):

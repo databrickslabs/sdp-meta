@@ -31,11 +31,14 @@ The Bronze layer ingests raw data from source systems into Delta tables with min
 | `snapshot` | Snapshot-based CDC using `create_auto_cdc_from_snapshot_flow` |
 
 For data quality expectations, `expect_or_drop` excludes failing rows from the
-target table. To preserve failed rows, use `expect_or_quarantine` and configure
-an explicit quarantine schema and table in the onboarding entry. SDP-META does
-not automatically create a `<target_table>_quarantine` table or add an
-`_error` column to the quarantine output. Liquid clustering is supported on
-both target and configured quarantine tables.
+target table and is never written to quarantine. To preserve failed rows, use
+`expect_or_quarantine`.
+Quarantine routing requires `expect_or_quarantine` plus an explicitly
+configured quarantine catalog/schema/table (and path for non-UC pipelines);
+SDP-META never derives the quarantine table name. The opt-in Lakeflow quality
+engine retains structured `_errors` diagnostics in quarantine, while the
+legacy path adds no diagnostic column. Liquid clustering is supported on both
+main and quarantine tables.
 
 ## Silver layer
 

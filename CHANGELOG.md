@@ -19,6 +19,12 @@
   `dlt_meta.pth` startup hook. Update runner notebooks to
   `init_sdp_meta_pipeline.py`, wheel configuration to `sdp_meta_whl`, and
   `PythonWheelTask.package_name` to `databricks_labs_sdp_meta`.
+- **Legacy quarantine targets are now required**: an existing
+  `expect_or_quarantine` configuration must define both its layer's
+  `*_quarantine_table` and environment-specific
+  `*_database_quarantine_<env>`. Earlier releases warned and onboarded an
+  unusable configuration; v0.2.0 rejects it before updating the dataflow-spec
+  table.
 
 ### Migration
 - Existing onboarding JSON/YAML, dataflow-spec tables, pipeline output data,
@@ -26,6 +32,30 @@
   and pipelines in place and validate the migration in non-production.
 - Historical changelog entries and backward-compatibility test fixtures retain
   old names to describe and test their original releases.
+
+### Added
+- Added an opt-in built-in Lakeflow quality engine with valid-rule semantics,
+  disjoint main/quarantine routing, native expectation metrics, and structured
+  `_errors` diagnostics.
+- Added immutable `qualityConfig` snapshots and JSON/YAML onboarding fields
+  for engine selection and rules paths.
+- Added the experimental quality-engine SPI, installed entry-point discovery,
+  adapter drift checks, and a reusable plugin contract test kit.
+- Added built-in optional DQX support through
+  `pip install "databricks-labs-sdp-meta[dqx]"`, plus DAB/App preflight and
+  same-pipeline JSON/YAML integration scenarios.
+- Added `--quality-engine-dependency` to `onboard` and `deploy`, allowing DQX
+  or another quality-engine package/wheel to be installed in remote
+  onboarding and pipeline environments.
+- Added managed selective quarantine full-refresh migrations with
+  compare-and-swap completion fingerprints.
+
+### Changed
+- DAB pipeline jobs use native `pipeline_task` entries by default; managed
+  quality migrations require the explicit `managed_quality_migrations`
+  scaffold option.
+- Managed quality migrations support both UC spec tables and path-based
+  Delta spec tables.
 
 ## [v0.1.1]
 ### Added

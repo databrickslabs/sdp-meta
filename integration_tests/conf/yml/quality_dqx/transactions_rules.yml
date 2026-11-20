@@ -1,0 +1,22 @@
+- name: transaction_id_required
+  criticality: error
+  check:
+    function: is_not_null
+    arguments:
+      column: transaction_id
+- name: non_negative_amount
+  criticality: error
+  check:
+    function: is_not_less_than
+    arguments:
+      column: amount
+      limit: 0
+- name: transaction_status_warning
+  criticality: warn
+  check:
+    function: is_in_list
+    arguments:
+      column: status
+      allowed:
+        - "'completed'"
+        - "'refunded'"

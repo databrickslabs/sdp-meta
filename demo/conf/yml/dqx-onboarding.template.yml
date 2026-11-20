@@ -1,0 +1,21 @@
+- data_flow_id: "435"
+  data_flow_group: A1
+  source_system: dqx_demo
+  source_format: cloudFiles
+  source_details:
+    source_path_demo: "{uc_volume_path}/demo/resources/data/dqx_demo/data/customers"
+    source_schema_path: "{uc_volume_path}/demo/resources/data/dqx_demo/ddl/customers.ddl"
+  bronze_catalog_demo: "{uc_catalog_name}"
+  bronze_database_demo: "{bronze_schema}"
+  bronze_table: customers_valid
+  bronze_table_comment: DQX-valid customers produced inside the SDP-META pipeline
+  bronze_reader_options:
+    cloudFiles.format: csv
+    cloudFiles.rescuedDataColumn: _rescued_data
+    header: "true"
+  bronze_cluster_by_auto: true
+  bronze_quality_engine: dqx
+  bronze_quality_rules_path_demo: "{uc_volume_path}/demo/conf/yml/dqx/customers_checks.yml"
+  bronze_catalog_quarantine_demo: "{uc_catalog_name}"
+  bronze_database_quarantine_demo: "{bronze_schema}"
+  bronze_quarantine_table: customers_quarantine
