@@ -3343,7 +3343,26 @@ class DeployBuildWheelFlagTests(unittest.TestCase):
         )
         self.assertNotIn(b"databricks-labs-sdp-meta==", runner_bytes)
         self.assertIn(
-            b"databricks-labs-dqx>=0.14,<0.17",
+            b"'databricks-labs-dqx>=0.14,<0.17'",
+            runner_bytes,
+        )
+
+    def test_deploy_runner_notebook_quotes_dependency_with_spaces(self):
+        from databricks.labs.sdp_meta.cli import SDPMeta as SDPMetaCls
+
+        ws = MagicMock()
+        sdp_meta = SDPMetaCls(ws)
+        sdp_meta._my_username = MagicMock(return_value="me")
+        cmd = self._deploy_cmd(
+            sdp_meta_dependency="/Volumes/main/wheels/my package.whl",
+        )
+        ws.pipelines.create.return_value = MagicMock(pipeline_id="p1")
+
+        sdp_meta._create_sdp_meta_pipeline(cmd)
+
+        runner_bytes = ws.workspace.upload.call_args[0][1]
+        self.assertIn(
+            b"%pip install '/Volumes/main/wheels/my package.whl'",
             runner_bytes,
         )
 

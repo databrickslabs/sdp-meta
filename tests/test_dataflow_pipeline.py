@@ -1880,6 +1880,28 @@ class DataflowPipelineTests(SDPFrameworkTestCase):
             ):
                 pipeline._validate_quality_preflight()
 
+    def test_quality_preflight_rejects_pending_full_refresh_migration(self):
+        spec_values = copy.deepcopy(self.bronze_dataflow_spec_map)
+        spec_values["dataQualityExpectations"] = None
+        spec_values["cdcApplyChanges"] = None
+        spec_values["qualityConfig"] = json.dumps({
+            "engine": "lakeflow",
+            "migration": "full_refresh",
+        })
+        spec = BronzeDataflowSpec(**spec_values)
+        pipeline = DataflowPipeline(
+            self.spark, spec, f"{spec.targetDetails['table']}_inputview"
+        )
+
+        with patch(
+            "databricks.labs.sdp_meta.quality.validation."
+            "validate_runtime_quality_config"
+        ):
+            with self.assertRaisesRegex(
+                ValueError, "pending quality migration"
+            ):
+                pipeline._validate_quality_preflight()
+
     def test_quality_preflight_rejects_snapshot_target_divergence(self):
         """Runtime output targets must match the immutable snapshot."""
         spec_values = copy.deepcopy(self.bronze_dataflow_spec_map)

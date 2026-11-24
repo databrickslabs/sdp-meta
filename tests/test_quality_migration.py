@@ -39,6 +39,10 @@ def _pending():
         "migration_fingerprint": None,
         "completed_migration_fingerprint": "fingerprint",
     }
+    active = {
+        **config,
+        "migration": "managed_full_refresh",
+    }
     return PendingQualityMigration(
         spec_table="main.meta.bronze_specs",
         dataflow_id="100",
@@ -46,10 +50,25 @@ def _pending():
         completed_config_json=json.dumps(completed),
         fingerprint="fingerprint",
         quarantine_target=config["output_targets"]["quarantine"],
+        active_config_json=json.dumps(active),
     )
 
 
 class ManagedQualityUpdateTests(TestCase):
+    def setUp(self):
+        self.activate_patch = patch(
+            "databricks.labs.sdp_meta.quality.migration."
+            "activate_migrations"
+        )
+        self.restore_patch = patch(
+            "databricks.labs.sdp_meta.quality.migration."
+            "restore_migrations"
+        )
+        self.activate = self.activate_patch.start()
+        self.restore = self.restore_patch.start()
+        self.addCleanup(self.activate_patch.stop)
+        self.addCleanup(self.restore_patch.stop)
+
     def _workspace(self, *, direct=True, state="COMPLETED"):
         ws = MagicMock()
         ws.pipelines.get.return_value = SimpleNamespace(
@@ -102,6 +121,8 @@ class ManagedQualityUpdateTests(TestCase):
             ],
         )
         complete.assert_called_once_with(ANY, pending)
+        self.activate.assert_called_once_with(ANY, pending)
+        self.restore.assert_not_called()
 
     def test_timeout_deadline_is_shared_across_both_updates(self):
         ws = self._workspace()
@@ -227,6 +248,41 @@ class ManagedQualityUpdateTests(TestCase):
                 [],
             )
 
+    def test_interrupted_managed_migration_is_recovered_as_pending(self):
+        migration = _pending()
+        frame = MagicMock()
+        frame.columns = [
+            "dataFlowId",
+            "dataFlowGroup",
+            "qualityConfig",
+            "quarantineTargetDetails",
+        ]
+        frame.filter.return_value = frame
+        frame.select.return_value.where.return_value.collect.return_value = [{
+            "dataFlowId": migration.dataflow_id,
+            "qualityConfig": migration.active_config_json,
+            "quarantineTargetDetails": migration.quarantine_target,
+        }]
+        spark = MagicMock()
+        spark.table.return_value = frame
+
+        with patch("databricks.labs.sdp_meta.quality.migration.f"):
+            recovered = find_pending_migrations(
+                spark,
+                {"bronze": migration.spec_table},
+                {"bronze": "A1"},
+            )
+
+        self.assertEqual(len(recovered), 1)
+        self.assertEqual(
+            json.loads(recovered[0].original_config_json)["migration"],
+            "full_refresh",
+        )
+        self.assertEqual(
+            recovered[0].activation_expected_config_json,
+            migration.active_config_json,
+        )
+
     def test_timeout_before_normal_update_starts(self):
         ws = self._workspace()
         with (
@@ -304,6 +360,7 @@ class ManagedQualityUpdateTests(TestCase):
                     poll_interval_seconds=0,
                 )
         complete.assert_not_called()
+        self.restore.assert_called_once_with(ANY, ANY)
 
     def test_completion_failure_stops_before_normal_update(self):
         ws = self._workspace()

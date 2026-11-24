@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass
 
 from pyspark.sql import functions as f
+from databricks.labs.sdp_meta.quality.targets import target_identity
 
 
 TERMINAL_SUCCESS_STATES = {"COMPLETED"}
@@ -60,6 +61,8 @@ class PendingQualityMigration:
     completed_config_json: str
     fingerprint: str
     quarantine_target: dict
+    active_config_json: str = None
+    activation_expected_config_json: str = None
 
 
 def _state_value(update):
@@ -76,13 +79,6 @@ def _quarantine_dataset(target, direct_publishing):
         target.get("table"),
     ]
     return ".".join(str(part) for part in parts if part)
-
-
-def _target_identity(target):
-    return tuple(
-        (target or {}).get(field) or None
-        for field in ("catalog", "database", "table", "path")
-    )
 
 
 def _read_spec_frame(spark, reference):
@@ -134,14 +130,23 @@ def find_pending_migrations(spark, spec_tables, groups=None):
         ).where(f.col("qualityConfig").isNotNull()).collect():
             raw = row["qualityConfig"]
             config = json.loads(raw)
-            if config.get("migration") != "full_refresh":
+            migration_state = config.get("migration")
+            if migration_state not in (
+                "full_refresh",
+                "managed_full_refresh",
+            ):
                 continue
+            pending_config = dict(config)
+            pending_config["migration"] = "full_refresh"
             snapshot_target = config["output_targets"]["quarantine"]
             configured_target = dict(
                 row["quarantineTargetDetails"] or {}
             )
-            if _target_identity(configured_target) != _target_identity(
-                snapshot_target
+            include_path = isinstance(table_name, dict)
+            if target_identity(
+                configured_target, include_path=include_path
+            ) != target_identity(
+                snapshot_target, include_path=include_path
             ):
                 raise RuntimeError(
                     f"Flow {row['dataFlowId']} quarantineTargetDetails "
@@ -149,61 +154,102 @@ def find_pending_migrations(spark, spec_tables, groups=None):
                     "refusing to run a selective full refresh"
                 )
             fingerprint = (
-                config.get("migration_fingerprint")
-                or migration_fingerprint(config)
+                pending_config.get("migration_fingerprint")
+                or migration_fingerprint(pending_config)
             )
-            completed = dict(config)
+            completed = dict(pending_config)
             completed["migration"] = None
             completed["migration_fingerprint"] = None
             completed["completed_migration_fingerprint"] = fingerprint
+            active = dict(pending_config)
+            active["migration"] = "managed_full_refresh"
             pending.append(
                 PendingQualityMigration(
                     spec_table=table_name,
                     dataflow_id=row["dataFlowId"],
-                    original_config_json=raw,
+                    original_config_json=json.dumps(pending_config),
                     completed_config_json=json.dumps(completed),
                     fingerprint=fingerprint,
                     quarantine_target=dict(snapshot_target),
+                    active_config_json=json.dumps(active),
+                    activation_expected_config_json=raw,
                 )
             )
     return pending
 
 
-def complete_migrations(spark, pending):
-    """Clear completed migrations only if metadata is unchanged."""
+def _replace_migration_config(spark, migration, expected, replacement):
+    target = _delta_spec_table(spark, migration.spec_table)
+    target.update(
+        condition=(
+            (f.col("dataFlowId") == migration.dataflow_id)
+            & (f.col("qualityConfig") == expected)
+        ),
+        set={"qualityConfig": f.lit(replacement)},
+    )
+    matched_count = (
+        _read_spec_frame(spark, migration.spec_table)
+        .where(
+            (f.col("dataFlowId") == migration.dataflow_id)
+            & (f.col("qualityConfig") == replacement)
+        )
+        .count()
+    )
+    if matched_count != 1:
+        raise RuntimeError(
+            "Quality migration metadata compare-and-swap failed for "
+            f"flow {migration.dataflow_id} in {migration.spec_table}"
+        )
+
+
+def activate_migrations(spark, pending):
+    """Mark pending rows as owned by the managed selective refresh."""
+    activated = []
+    try:
+        for migration in pending:
+            active = migration.active_config_json
+            if not active:
+                config = json.loads(migration.original_config_json)
+                config["migration"] = "managed_full_refresh"
+                active = json.dumps(config)
+            _replace_migration_config(
+                spark,
+                migration,
+                (
+                    migration.activation_expected_config_json
+                    or migration.original_config_json
+                ),
+                active,
+            )
+            activated.append(migration)
+    except Exception:
+        restore_migrations(spark, activated)
+        raise
+
+
+def restore_migrations(spark, pending):
+    """Restore pending metadata after a managed refresh failure."""
     for migration in pending:
-        target = _delta_spec_table(spark, migration.spec_table)
-        target.update(
-            condition=(
-                (f.col("dataFlowId") == migration.dataflow_id)
-                & (
-                    f.col("qualityConfig")
-                    == migration.original_config_json
-                )
-            ),
-            set={
-                "qualityConfig": f.lit(
-                    migration.completed_config_json
-                )
-            },
+        active = migration.active_config_json
+        if not active:
+            config = json.loads(migration.original_config_json)
+            config["migration"] = "managed_full_refresh"
+            active = json.dumps(config)
+        _replace_migration_config(
+            spark, migration, active, migration.original_config_json
         )
-        completed_count = (
-            _read_spec_frame(spark, migration.spec_table)
-            .where(
-                (f.col("dataFlowId") == migration.dataflow_id)
-                & (
-                    f.col("qualityConfig")
-                    == migration.completed_config_json
-                )
-            )
-            .count()
+
+
+def complete_migrations(spark, pending):
+    """Clear completed migrations only if managed metadata is unchanged."""
+    for migration in pending:
+        expected = (
+            migration.active_config_json
+            or migration.original_config_json
         )
-        if completed_count != 1:
-            raise RuntimeError(
-                f"Quality migration metadata compare-and-swap failed for "
-                f"flow {migration.dataflow_id} in {migration.spec_table}; "
-                "refusing to start the normal pipeline update"
-            )
+        _replace_migration_config(
+            spark, migration, expected, migration.completed_config_json
+        )
 
 
 def run_managed_quality_update(
@@ -264,12 +310,16 @@ def run_managed_quality_update(
             )
             for migration in pending
         })
+        activate_migrations(spark, pending)
         try:
             run_update(full_refresh_selection=quarantine_datasets)
-        except (RuntimeError, TimeoutError) as err:
-            raise type(err)(
-                f"{err}; quality migration remains pending"
-            ) from err
+        except Exception as err:
+            restore_migrations(spark, pending)
+            if isinstance(err, (RuntimeError, TimeoutError)):
+                raise type(err)(
+                    f"{err}; quality migration remains pending"
+                ) from err
+            raise
         try:
             complete_migrations(spark, pending)
         except Exception:

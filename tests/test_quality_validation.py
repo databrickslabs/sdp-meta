@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 from databricks.labs.sdp_meta.onboard_dataflowspec import OnboardDataflowspec
 from databricks.labs.sdp_meta.quality.fields import QUALITY_CONFIG_KEYS
 from databricks.labs.sdp_meta.quality.rules_loader import load_rule_document
+from databricks.labs.sdp_meta.quality.registry import resolve_quality_engine
 from databricks.labs.sdp_meta.quality.validation import (
     InvalidQualityConfiguration,
     analyze_lakeflow_normalized_rules,
@@ -397,6 +398,27 @@ class QualityValidationTests(SDPFrameworkTestCase):
         self.assertEqual(quarantine_details["table"], "customers_quarantine")
         self.assertFalse(config["engine_options"]["analysis_required"])
 
+    def test_onboarding_reuses_quality_engine_plugin(self):
+        onboarder = OnboardDataflowspec(
+            self.spark, self.onboarding_bronze_silver_params_map
+        )
+        get_config = onboarder._OnboardDataflowspec__get_quality_config
+        with patch(
+            "databricks.labs.sdp_meta.onboard_dataflowspec."
+            "resolve_quality_engine",
+            wraps=resolve_quality_engine,
+        ) as resolve:
+            for _ in range(2):
+                get_config(
+                    "dev",
+                    "bronze",
+                    self._quality_row(),
+                    {"database": "bronze", "table": "customers"},
+                    json.dumps(self.schema.jsonValue()),
+                )
+
+        resolve.assert_called_once_with("lakeflow", self.spark)
+
     def test_onboarding_reads_existing_specs_by_table_or_path(self):
         spark = MagicMock()
         onboarder = OnboardDataflowspec(
@@ -745,8 +767,12 @@ class QualityValidationTests(SDPFrameworkTestCase):
             }
         )
         existing = MagicMock()
-        existing.columns = ["qualityConfig"]
-        existing.collect.return_value = [
+        existing.columns = [
+            "dataFlowId",
+            "qualityConfig",
+            "quarantineTargetDetails",
+        ]
+        existing.filter.return_value.select.return_value.collect.return_value = [
             Row(
                 dataFlowId="quality-1",
                 qualityConfig=previous_config,
@@ -763,7 +789,7 @@ class QualityValidationTests(SDPFrameworkTestCase):
             database="quality_old",
         ):
             current = MagicMock()
-            current.collect.return_value = [
+            current.select.return_value.collect.return_value = [
                 Row(
                     dataFlowId="quality-1",
                     qualityConfig=json.dumps(
@@ -821,8 +847,15 @@ class QualityValidationTests(SDPFrameworkTestCase):
             )
 
         legacy_existing = MagicMock()
-        legacy_existing.columns = ["dataQualityExpectations"]
-        legacy_existing.collect.return_value = [
+        legacy_existing.columns = [
+            "dataFlowId",
+            "dataQualityExpectations",
+            "quarantineTargetDetails",
+        ]
+        (
+            legacy_existing.filter.return_value.select.return_value
+            .collect.return_value
+        ) = [
             Row(
                 dataFlowId="quality-1",
                 dataQualityExpectations=json.dumps({
@@ -857,7 +890,7 @@ class QualityValidationTests(SDPFrameworkTestCase):
             self.spark, self.onboarding_bronze_silver_params_map
         )
         new_specs = MagicMock()
-        new_specs.collect.return_value = [
+        new_specs.select.return_value.collect.return_value = [
             Row(
                 dataFlowId="quality-1",
                 qualityConfig=None,
@@ -879,14 +912,19 @@ class QualityValidationTests(SDPFrameworkTestCase):
 
         self.assertIs(result, new_specs)
         existing.assert_not_called()
-        new_specs.collect.assert_called_once()
+        new_specs.select.return_value.collect.assert_called_once()
 
     def test_switch_from_engine_to_legacy_requires_new_quarantine_target(self):
         onboarder = OnboardDataflowspec(
             self.spark, self.onboarding_bronze_silver_params_map
         )
         existing = MagicMock()
-        existing.collect.return_value = [
+        existing.columns = [
+            "dataFlowId",
+            "qualityConfig",
+            "quarantineTargetDetails",
+        ]
+        existing.filter.return_value.select.return_value.collect.return_value = [
             Row(
                 dataFlowId="quality-1",
                 qualityConfig=json.dumps({
@@ -902,7 +940,7 @@ class QualityValidationTests(SDPFrameworkTestCase):
 
         def legacy_specs(table):
             specs = MagicMock()
-            specs.collect.return_value = [
+            specs.select.return_value.collect.return_value = [
                 Row(
                     dataFlowId="quality-1",
                     qualityConfig=None,

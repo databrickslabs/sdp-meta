@@ -17,6 +17,7 @@ from databricks.labs.sdp_meta.dataflow_spec import (
 from databricks.labs.sdp_meta.pipeline_writers import AppendFlowWriter, DLTSinkWriter
 from databricks.labs.sdp_meta.__about__ import __version__
 from databricks.labs.sdp_meta.pipeline_readers import PipelineReaders
+from databricks.labs.sdp_meta.quality.targets import target_identity
 
 logger = logging.getLogger('databricks.labs.sdp_meta')
 logger.setLevel(logging.INFO)
@@ -442,6 +443,12 @@ class DataflowPipeline:
             validate_runtime_quality_config,
         )
         validate_runtime_quality_config(quality_config)
+        if quality_config.get("migration") == "full_refresh":
+            raise ValueError(
+                f"Flow {self.dataflowSpec.dataFlowId} has a pending quality "
+                "migration; run the managed selective full refresh before "
+                "starting this pipeline"
+            )
 
         unsupported = []
         if getattr(self.dataflowSpec, "cdcApplyChanges", None):
@@ -474,16 +481,6 @@ class DataflowPipeline:
                 f"Flow {self.dataflowSpec.dataFlowId} quality engine requires complete "
                 f"quarantineTargetDetails; missing: {', '.join(missing)}"
             )
-        identity_fields = ["catalog", "database", "table"]
-        if not self.uc_enabled:
-            identity_fields.append("path")
-
-        def target_identity(details):
-            return tuple(
-                details.get(field) or None
-                for field in identity_fields
-            )
-
         configured_targets = {
             "main": self._get_target_details(),
             "quarantine": quarantine_target,
@@ -492,8 +489,13 @@ class DataflowPipeline:
         mismatches = [
             name
             for name, configured in configured_targets.items()
-            if target_identity(configured)
-            != target_identity(snapshot_targets[name])
+            if target_identity(
+                configured, include_path=not self.uc_enabled
+            )
+            != target_identity(
+                snapshot_targets[name],
+                include_path=not self.uc_enabled,
+            )
         ]
         if mismatches:
             raise ValueError(

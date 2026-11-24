@@ -48,8 +48,9 @@ from databricks.labs.sdp_meta.quality.spi import (
     unpack_validation_result,
 )
 from databricks.labs.sdp_meta.quality.registry import resolve_quality_engine
+from databricks.labs.sdp_meta.quality.errors import InvalidQualityConfiguration
+from databricks.labs.sdp_meta.quality.targets import target_identity
 from databricks.labs.sdp_meta.quality.validation import (
-    InvalidQualityConfiguration,
     build_lakeflow_quality_config,
     build_plugin_quality_config,
     schema_from_json,
@@ -128,6 +129,7 @@ class OnboardDataflowspec:
         self.deltaPipelinesInternalTableOps = DeltaPipelinesInternalTableOps(self.spark)
         self.onboard_file_type = None
         self._onboarding_files_processed: set = set()
+        self._quality_engine_cache = {}
 
     def __initialize_paths(self, uc_enabled):
         if "silver_dataflowspec_table" in self.bronze_dict_obj:
@@ -322,7 +324,13 @@ class OnboardDataflowspec:
     def __validate_quality_engine_switch(self, new_specs, dict_obj, layer):
         """Reject incompatible diagnostic reuse before overwrite or MERGE."""
         current_rows = [
-            row.asDict(recursive=True) for row in new_specs.collect()
+            row.asDict(recursive=True)
+            for row in new_specs.select(
+                "dataFlowId",
+                "qualityConfig",
+                "dataQualityExpectations",
+                "quarantineTargetDetails",
+            ).collect()
         ]
 
         def legacy_has_quarantine(raw):
@@ -343,21 +351,30 @@ class OnboardDataflowspec:
         existing = self.__read_existing_dataflow_specs(dict_obj, layer)
         if existing is None:
             return new_specs
+        incoming_ids = [row["dataFlowId"] for row in current_rows]
+        existing_columns = [
+            column
+            for column in (
+                "dataFlowId",
+                "qualityConfig",
+                "dataQualityExpectations",
+                "quarantineTargetDetails",
+            )
+            if column in existing.columns
+        ]
+        existing = existing.filter(
+            f.col("dataFlowId").isin(incoming_ids)
+        ).select(*existing_columns)
         previous_rows = {
             row["dataFlowId"]: row.asDict(recursive=True)
             for row in existing.collect()
         }
 
-        def target_identity(spec_row):
+        def spec_target_identity(spec_row):
             details = spec_row.get("quarantineTargetDetails") or {}
-            identity = (
-                details.get("catalog"),
-                details.get("database"),
-                details.get("table"),
+            return target_identity(
+                details, include_path=not self.uc_enabled
             )
-            if not self.uc_enabled:
-                identity += (details.get("path"),)
-            return identity
 
         for current in current_rows:
             current_config_json = current.get("qualityConfig")
@@ -396,8 +413,8 @@ class OnboardDataflowspec:
                 )
             if not changed:
                 continue
-            old_target = target_identity(previous)
-            new_target = target_identity(current)
+            old_target = spec_target_identity(previous)
+            new_target = spec_target_identity(current)
             if (
                 old_target == new_target
                 and (
@@ -436,34 +453,21 @@ class OnboardDataflowspec:
             )
             return json.dumps(reconciled)
 
-        changed = False
+        reconciled_configs = {}
         for current in current_rows:
             reconciled = reconcile_config(
                 current["dataFlowId"], current.get("qualityConfig")
             )
             if reconciled != current.get("qualityConfig"):
-                current["qualityConfig"] = reconciled
-                changed = True
-        if not changed:
+                reconciled_configs[current["dataFlowId"]] = reconciled
+        if not reconciled_configs:
             return new_specs
-        return self.spark.createDataFrame(
-            current_rows, schema=new_specs.schema
-        )
-
-    def __ensure_quality_config_column(self, table_name, existing_columns):
-        """Add release metadata columns before a schema-preserving MERGE."""
-        columns = list(existing_columns)
-        if "qualityConfig" not in columns:
-            self.spark.sql(
-                f"ALTER TABLE {table_name} ADD COLUMNS (`qualityConfig` STRING)"
-            )
-            columns.append("qualityConfig")
-        if "dqeContract" not in columns:
-            self.spark.sql(
-                f"ALTER TABLE {table_name} ADD COLUMNS (`dqeContract` STRING)"
-            )
-            columns.append("dqeContract")
-        return columns
+        quality_config = f.col("qualityConfig")
+        for flow_id, reconciled in reconciled_configs.items():
+            quality_config = f.when(
+                f.col("dataFlowId") == flow_id, f.lit(reconciled)
+            ).otherwise(quality_config)
+        return new_specs.withColumn("qualityConfig", quality_config)
 
     def __pre_validate_onboarding_uc_names(self, layers=("bronze", "silver")):
         """Pre-flight validate every UC identifier in the onboarding file.
@@ -1149,14 +1153,11 @@ class OnboardDataflowspec:
                     dict_obj["silver_dataflowspec_path"]
                 )
             logger.info("In Merge block for Silver")
-            merge_columns = self.__ensure_quality_config_column(
-                f"{database}.{table}", original_dataflow_df.columns
-            )
             self.deltaPipelinesInternalTableOps.merge(
                 silver_dataflow_spec_df,
                 f"{database}.{table}",
                 ["dataFlowId"],
-                merge_columns,
+                original_dataflow_df.columns,
             )
         if not self.uc_enabled:
             self.register_silver_dataflow_spec_tables()
@@ -1259,14 +1260,11 @@ class OnboardDataflowspec:
                 )
 
             logger.info("In Merge block for Bronze")
-            merge_columns = self.__ensure_quality_config_column(
-                f"{database}.{table}", original_dataflow_df.columns
-            )
             self.deltaPipelinesInternalTableOps.merge(
                 bronze_dataflow_spec_df,
                 f"{database}.{table}",
                 ["dataFlowId"],
-                merge_columns,
+                original_dataflow_df.columns,
             )
         if not self.uc_enabled:
             self.register_bronze_dataflow_spec_tables()
@@ -1950,7 +1948,7 @@ class OnboardDataflowspec:
         data_quality_expectations,
         uc_enabled,
     ):
-        """Require a complete target for legacy quarantine rules."""
+        """Warn for incomplete legacy targets without breaking upgrades."""
         if not data_quality_expectations:
             return
         expectations = json.loads(data_quality_expectations)
@@ -1960,10 +1958,6 @@ class OnboardDataflowspec:
             f"{layer}_quarantine_table",
             f"{layer}_database_quarantine_{env}",
         ]
-        if not uc_enabled:
-            required_fields.append(
-                f"{layer}_quarantine_table_path_{env}"
-            )
         missing_fields = [
             field
             for field in required_fields
@@ -1975,10 +1969,12 @@ class OnboardDataflowspec:
         ]
         if missing_fields:
             flow_id = onboarding_row["data_flow_id"] if "data_flow_id" in onboarding_row else "<unknown>"
-            raise ValueError(
+            logger.warning(
                 f"Flow {flow_id} ({layer}) has expect_or_quarantine rules but "
-                f"required quarantine target fields are missing or empty: "
-                f"{', '.join(missing_fields)}"
+                "legacy quarantine target fields are missing or empty: "
+                f"{', '.join(missing_fields)}. This remains allowed for "
+                "backward compatibility; configure both fields before "
+                "switching to a v2 quality engine."
             )
 
     @staticmethod
@@ -2104,7 +2100,11 @@ class OnboardDataflowspec:
         )
         document, raw_text = load_rule_document(self.spark, rules_path)
         schema = schema_from_json(source_schema)
-        plugin = resolve_quality_engine(engine, self.spark)
+        plugin_key = engine.casefold()
+        plugin = self._quality_engine_cache.get(plugin_key)
+        if plugin is None:
+            plugin = resolve_quality_engine(engine, self.spark)
+            self._quality_engine_cache[plugin_key] = plugin
         reserved_columns = plugin.reserved_columns()
         conflicts = (
             sorted(set(schema.fieldNames()) & set(reserved_columns))

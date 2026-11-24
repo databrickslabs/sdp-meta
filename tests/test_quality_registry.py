@@ -189,13 +189,41 @@ class QualityRegistryTests(TestCase):
 
     def test_builtin_engines_resolve_without_entry_points(self):
         self.assertEqual(
-            resolve_quality_engine("lakeflow", object()).__class__.__name__,
+            resolve_quality_engine("LAKEFLOW", object()).__class__.__name__,
             "LakeflowQualityEngine",
         )
         self.assertEqual(
             resolve_quality_engine("dqx", object()).__class__.__name__,
             "DQXQualityEngine",
         )
+
+    def test_external_engine_lookup_is_case_insensitive(self):
+        entry_point = SimpleNamespace(
+            name="MyEngine",
+            load=lambda: SyntheticPlugin,
+        )
+        with patch(
+            "databricks.labs.sdp_meta.quality.registry._entry_points",
+            return_value=[entry_point],
+        ):
+            self.assertIsInstance(
+                resolve_quality_engine("myengine", object()),
+                SyntheticPlugin,
+            )
+
+    def test_case_insensitive_entry_point_collision_is_rejected(self):
+        entry_points = [
+            SimpleNamespace(name="MyEngine"),
+            SimpleNamespace(name="myengine"),
+        ]
+        with patch(
+            "databricks.labs.sdp_meta.quality.registry._entry_points",
+            return_value=entry_points,
+        ):
+            with self.assertRaisesRegex(
+                QualityEngineNotAvailable, "Multiple installed plugins"
+            ):
+                resolve_quality_engine("MYENGINE", object())
 
     def test_plugin_resolution_rejects_duplicates_invalid_type_and_spi(self):
         duplicate = [
@@ -284,6 +312,42 @@ class QualityRegistryTests(TestCase):
             validate_plugin_snapshot(
                 plugin,
                 {**base, "diagnostic_schema_fingerprint": "b" * 64},
+            )
+
+    def test_resolution_rejects_unsupported_installed_engine_version(self):
+        plugin = SyntheticPlugin()
+        plugin.supported_engine_versions = "<1"
+        entry_point = SimpleNamespace(
+            name="synthetic",
+            load=lambda: plugin,
+        )
+        with patch(
+            "databricks.labs.sdp_meta.quality.registry._entry_points",
+            return_value=[entry_point],
+        ):
+            with self.assertRaisesRegex(
+                QualityEngineNotAvailable, "Installed quality engine version"
+            ):
+                resolve_quality_engine("synthetic", object())
+
+    def test_snapshot_requires_and_validates_engine_versions(self):
+        plugin = SyntheticPlugin()
+        plugin.supported_engine_versions = ">=1,<2"
+        base = {
+            "spi_version": plugin.api_version,
+            "plugin_version": plugin.plugin_version,
+            "diagnostic_schema_fingerprint": "a" * 64,
+            "engine_options": {},
+        }
+        with self.assertRaisesRegex(
+            QualityEngineNotAvailable, "Persisted quality engine version is missing"
+        ):
+            validate_plugin_snapshot(plugin, base)
+        with self.assertRaisesRegex(
+            QualityEngineNotAvailable, "Cannot validate persisted"
+        ):
+            validate_plugin_snapshot(
+                plugin, {**base, "engine_version": "not-a-version"}
             )
 
     def test_snapshot_fingerprints_reserved_columns_when_not_declared(self):

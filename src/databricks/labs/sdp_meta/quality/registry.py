@@ -4,20 +4,17 @@ from __future__ import annotations
 
 import importlib.metadata
 import inspect
-import hashlib
-import json
 import warnings
-from packaging.specifiers import SpecifierSet
-from packaging.version import Version
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.version import InvalidVersion, Version
 
 from databricks.labs.sdp_meta.quality.spi import (
     QUALITY_ENGINE_ENTRY_POINT_GROUP,
     SPI_API_VERSION,
     QualityEnginePlugin,
+    plugin_diagnostic_schema_fingerprint,
 )
-from databricks.labs.sdp_meta.quality.validation import (
-    InvalidQualityConfiguration,
-)
+from databricks.labs.sdp_meta.quality.errors import InvalidQualityConfiguration
 
 
 class QualityEngineNotAvailable(InvalidQualityConfiguration):
@@ -33,14 +30,14 @@ def _entry_points():
 
 def available_quality_engines():
     """Return built-in and installed plugin engine names."""
-    return ("lakeflow", "dqx") + tuple(
-        sorted(
-            {
-                ep.name
-                for ep in _entry_points()
-                if ep.name not in ("lakeflow", "dqx")
-            }
-        )
+    builtins = ("lakeflow", "dqx")
+    discovered = {
+        ep.name.casefold(): ep.name
+        for ep in _entry_points()
+        if ep.name.casefold() not in builtins
+    }
+    return builtins + tuple(
+        discovered[name] for name in sorted(discovered)
     )
 
 
@@ -59,21 +56,52 @@ def _instantiate(target, spark):
     return target
 
 
+def _validate_supported_engine_version(plugin, version, source):
+    supported = getattr(plugin, "supported_engine_versions", None)
+    if not supported:
+        return
+    if not version:
+        raise QualityEngineNotAvailable(
+            f"{source} quality engine version is missing; adapter requires "
+            f"{supported}"
+        )
+    try:
+        compatible = Version(str(version)) in SpecifierSet(str(supported))
+    except (InvalidVersion, InvalidSpecifier) as err:
+        raise QualityEngineNotAvailable(
+            f"Cannot validate {source.lower()} quality engine version "
+            f"{version!r} against adapter range {supported!r}"
+        ) from err
+    if not compatible:
+        raise QualityEngineNotAvailable(
+            f"{source} quality engine version {version} is outside adapter "
+            f"range {supported}"
+        )
+
+
 def resolve_quality_engine(name, spark):
     """Resolve a built-in or installed quality-engine implementation."""
-    if name == "lakeflow":
+    canonical_name = str(name).casefold()
+    if canonical_name == "lakeflow":
         from databricks.labs.sdp_meta.quality.lakeflow_engine import (
             LakeflowQualityEngine,
         )
 
         return LakeflowQualityEngine(spark)
-    if name == "dqx":
+    if canonical_name == "dqx":
         from databricks.labs.sdp_meta.quality.dqx_engine import (
             DQXQualityEngine,
         )
 
-        return DQXQualityEngine(spark)
-    matches = [ep for ep in _entry_points() if ep.name == name]
+        plugin = DQXQualityEngine(spark)
+        _validate_supported_engine_version(
+            plugin, getattr(plugin, "engine_version", None), "Installed"
+        )
+        return plugin
+    matches = [
+        ep for ep in _entry_points()
+        if ep.name.casefold() == canonical_name
+    ]
     if not matches:
         raise QualityEngineNotAvailable(
             f"Quality engine '{name}' is not installed. Available engines: "
@@ -93,6 +121,9 @@ def resolve_quality_engine(name, spark):
             f"Quality engine '{name}' requires SPI {plugin.api_version}; "
             f"SDP-META provides {SPI_API_VERSION}"
         )
+    _validate_supported_engine_version(
+        plugin, getattr(plugin, "engine_version", None), "Installed"
+    )
     return plugin
 
 
@@ -119,21 +150,13 @@ def validate_plugin_snapshot(plugin, config):
         if strict:
             raise QualityEngineNotAvailable(message)
         warnings.warn(message, RuntimeWarning, stacklevel=2)
-    supported = getattr(plugin, "supported_engine_versions", None)
-    engine_version = config.get("engine_version")
-    if supported and engine_version:
-        if Version(engine_version) not in SpecifierSet(supported):
-            raise QualityEngineNotAvailable(
-                f"Quality engine version {engine_version} is outside adapter "
-                f"range {supported}"
-            )
-    current_fingerprint = getattr(
-        plugin, "diagnostic_schema_fingerprint", None
-    ) or hashlib.sha256(
-        json.dumps(
-            sorted(plugin.reserved_columns()), separators=(",", ":")
-        ).encode("utf-8")
-    ).hexdigest()
+    _validate_supported_engine_version(
+        plugin, config.get("engine_version"), "Persisted"
+    )
+    _validate_supported_engine_version(
+        plugin, getattr(plugin, "engine_version", None), "Installed"
+    )
+    current_fingerprint = plugin_diagnostic_schema_fingerprint(plugin)
     if config.get("diagnostic_schema_fingerprint") != current_fingerprint:
         raise QualityEngineNotAvailable(
             "Installed quality engine diagnostic schema differs from the "

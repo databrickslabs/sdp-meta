@@ -1,5 +1,7 @@
 """Experimental public service-provider interface for quality engines."""
 
+import hashlib
+import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Dict, Literal
@@ -57,6 +59,18 @@ class QualityEnginePlugin(ABC):
     @abstractmethod
     def reserved_columns(self):
         """Return diagnostic columns owned by this engine."""
+
+
+def plugin_diagnostic_schema_fingerprint(plugin):
+    """Return the plugin's explicit or reserved-column schema fingerprint."""
+    explicit = getattr(plugin, "diagnostic_schema_fingerprint", None)
+    if explicit:
+        return explicit
+    return hashlib.sha256(
+        json.dumps(
+            sorted(plugin.reserved_columns()), separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def unpack_validation_result(result):

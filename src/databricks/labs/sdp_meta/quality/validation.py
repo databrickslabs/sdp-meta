@@ -12,8 +12,12 @@ from databricks.labs.sdp_meta.quality.fields import (
     QUALITY_CONFIG_KEYS,
     SUPPORTED_LAKEFLOW_GROUPS,
 )
+from databricks.labs.sdp_meta.quality.errors import InvalidQualityConfiguration
 from databricks.labs.sdp_meta.quality.migration import migration_fingerprint
-from databricks.labs.sdp_meta.quality.spi import SPI_API_VERSION
+from databricks.labs.sdp_meta.quality.spi import (
+    SPI_API_VERSION,
+    plugin_diagnostic_schema_fingerprint,
+)
 
 
 logger = logging.getLogger("databricks.labs.sdp_meta")
@@ -33,10 +37,6 @@ LAKEFLOW_DIAGNOSTIC_SCHEMA = "array<struct<name:string,expression:string>>"
 LAKEFLOW_DIAGNOSTIC_SCHEMA_FINGERPRINT = hashlib.sha256(
     LAKEFLOW_DIAGNOSTIC_SCHEMA.encode("utf-8")
 ).hexdigest()
-
-
-class InvalidQualityConfiguration(ValueError):
-    """Raised when onboarding or runtime quality configuration is invalid."""
 
 
 def normalize_expression(expression):
@@ -211,16 +211,7 @@ def build_plugin_quality_config(
 ):
     """Build an immutable snapshot for an externally installed engine."""
     _validate_migration_value(migration)
-    diagnostic_fingerprint = getattr(
-        plugin, "diagnostic_schema_fingerprint", None
-    )
-    if not diagnostic_fingerprint:
-        diagnostic_fingerprint = hashlib.sha256(
-            json.dumps(
-                sorted(plugin.reserved_columns()),
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
+    diagnostic_fingerprint = plugin_diagnostic_schema_fingerprint(plugin)
     config = {
         "engine": engine,
         "spi_version": SPI_API_VERSION,
@@ -287,12 +278,17 @@ def validate_runtime_quality_config(config):
             "qualityConfig.output_targets is missing: "
             f"{', '.join(sorted(missing_targets))}"
         )
-    if config["migration"] not in (None, "full_refresh"):
+    if config["migration"] not in (
+        None,
+        "full_refresh",
+        "managed_full_refresh",
+    ):
         raise InvalidQualityConfiguration(
-            "qualityConfig.migration must be null or 'full_refresh'"
+            "qualityConfig.migration must be null or 'full_refresh' "
+            "(managed runs may use internal 'managed_full_refresh')"
         )
     if (
-        config["migration"] == "full_refresh"
+        config["migration"] in ("full_refresh", "managed_full_refresh")
         and config["migration_fingerprint"] != migration_fingerprint(config)
     ):
         raise InvalidQualityConfiguration(

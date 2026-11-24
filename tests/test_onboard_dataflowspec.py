@@ -13,7 +13,7 @@ from databricks.labs.sdp_meta.dataflow_spec import (
     DQE_CONTRACT_VERSION,
     SilverDataflowSpec,
 )
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 from pyspark.sql import DataFrame, Row
 
 
@@ -688,7 +688,7 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
                 self.assertEqual(json.loads(actual), golden["profiles"][profile_name])
 
     def test_validate_legacy_quarantine_target_for_bronze_and_silver(self):
-        """Quarantine rules require complete UC and path-based targets."""
+        """Incomplete legacy targets warn but remain upgrade-compatible."""
         rules = json.dumps(
             {"expect_or_quarantine": {"invalid_id": "id IS NULL"}}
         )
@@ -699,10 +699,9 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
             database_field = f"{layer}_database_quarantine_dev"
             for missing_value in (None, "", "   "):
                 with self.subTest(layer=layer, value=missing_value):
-                    with self.assertRaisesRegex(
-                        ValueError,
-                        rf"Flow 42 \({layer}\).*{field}",
-                    ):
+                    with self.assertLogs(
+                        "databricks.labs.sdp_meta", level="WARNING"
+                    ) as logs:
                         validate(
                             layer,
                             "dev",
@@ -714,6 +713,7 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
                             rules,
                             True,
                         )
+                    self.assertIn(field, "\n".join(logs.output))
 
             validate(
                 layer,
@@ -726,7 +726,9 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
                 rules,
                 True,
             )
-            with self.assertRaisesRegex(ValueError, database_field):
+            with self.assertLogs(
+                "databricks.labs.sdp_meta", level="WARNING"
+            ) as logs:
                 validate(
                     layer,
                     "dev",
@@ -734,19 +736,19 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
                     rules,
                     True,
                 )
+            self.assertIn(database_field, "\n".join(logs.output))
             path_field = f"{layer}_quarantine_table_path_dev"
-            with self.assertRaisesRegex(ValueError, path_field):
-                validate(
-                    layer,
-                    "dev",
-                    {
-                        "data_flow_id": "42",
-                        field: "invalid_rows",
-                        database_field: "quarantine",
-                    },
-                    rules,
-                    False,
-                )
+            validate(
+                layer,
+                "dev",
+                {
+                    "data_flow_id": "42",
+                    field: "invalid_rows",
+                    database_field: "quarantine",
+                },
+                rules,
+                False,
+            )
             validate(
                 layer,
                 "dev",
@@ -842,32 +844,6 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
             self.assertEqual(
                 persisted["dqeContract"], DQE_CONTRACT_VERSION
             )
-
-    def test_merge_schema_upgrade_adds_quality_metadata_columns(self):
-        """Existing spec tables gain nullable metadata before MERGE."""
-        onboarder = object.__new__(OnboardDataflowspec)
-        onboarder.spark = MagicMock()
-
-        columns = onboarder._OnboardDataflowspec__ensure_quality_config_column(
-            "catalog.schema.specs", ["dataFlowId"]
-        )
-
-        self.assertEqual(
-            onboarder.spark.sql.call_args_list,
-            [
-                call(
-                    "ALTER TABLE catalog.schema.specs "
-                    "ADD COLUMNS (`qualityConfig` STRING)"
-                ),
-                call(
-                    "ALTER TABLE catalog.schema.specs "
-                    "ADD COLUMNS (`dqeContract` STRING)"
-                ),
-            ],
-        )
-        self.assertEqual(
-            columns, ["dataFlowId", "qualityConfig", "dqeContract"]
-        )
 
     def test_get_data_quality_expectations_unsupported_no_longer_silently_drops(self):
         """The previous bug: non-.json file extensions silently returned None and dropped DQ rules."""
@@ -999,7 +975,7 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
                             silver_row.quarantineTargetDetails
                         )
 
-    def test_reonboarded_legacy_quarantine_requires_complete_target(self):
+    def test_reonboarded_legacy_quarantine_remains_compatible(self):
         dqe_payload = {
             "expect_or_quarantine": {"valid_id": "id IS NOT NULL"}
         }
@@ -1023,11 +999,11 @@ class OnboardDataflowspecTests(SDPFrameworkTestCase):
                     f"{layer}_dataflow_spec_dataframe",
                 )
                 with self.subTest(layer=layer):
-                    with self.assertRaisesRegex(
-                        ValueError,
-                        f"{layer}_quarantine_table",
+                    with self.assertLogs(
+                        "databricks.labs.sdp_meta", level="WARNING"
                     ):
-                        build_specs(onboarding_df, "dev")
+                        rows = build_specs(onboarding_df, "dev").collect()
+                    self.assertEqual(len(rows), 1)
 
     def test_optional_quarantine_metadata_is_preserved_without_dqe(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

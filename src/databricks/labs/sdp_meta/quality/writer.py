@@ -13,9 +13,7 @@ from databricks.labs.sdp_meta.quality.registry import (
     resolve_quality_engine,
     validate_plugin_snapshot,
 )
-from databricks.labs.sdp_meta.quality.validation import (
-    InvalidQualityConfiguration,
-)
+from databricks.labs.sdp_meta.quality.errors import InvalidQualityConfiguration
 
 
 class QualityEngineWriter:

@@ -4,6 +4,7 @@ import io
 import logging
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -931,7 +932,7 @@ class SDPMeta:
         # resolution order (CLI flag > onboarding_job_details.json > PyPI).
         dependency = cmd.sdp_meta_dependency or f"databricks-labs-sdp-meta=={self.version}"
         install_dependencies = " ".join(
-            item
+            shlex.quote(item)
             for item in (dependency, cmd.quality_engine_dependency)
             if item
         )
