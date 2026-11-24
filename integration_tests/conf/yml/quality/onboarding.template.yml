@@ -1,0 +1,21 @@
+- data_flow_id: release_a_quality
+  data_flow_group: A1
+  source_system: INTEGRATION_TEST
+  source_format: cloudFiles
+  source_details:
+    source_path_it: '{uc_volume_path}integration_tests/resources/data/quality'
+    source_schema_path: '{uc_volume_path}integration_tests/resources/quality_customers.ddl'
+  bronze_catalog_it: '{uc_catalog_name}'
+  bronze_database_it: '{bronze_schema}'
+  bronze_table: quality_customers
+  bronze_reader_options:
+    cloudFiles.format: json
+    cloudFiles.inferColumnTypes: 'false'
+    cloudFiles.rescuedDataColumn: _rescued_data
+  bronze_table_path_it: '{uc_volume_path}data/bronze/quality_customers'
+  bronze_quality_engine: lakeflow
+  bronze_quality_rules_path_it: '{uc_volume_path}integration_tests/conf/yml/quality/rules.yml'
+  bronze_catalog_quarantine_it: '{uc_catalog_name}'
+  bronze_database_quarantine_it: '{bronze_schema}'
+  bronze_quarantine_table: quality_customers_quarantine
+  bronze_quarantine_table_path_it: '{uc_volume_path}data/bronze/quality_customers_quarantine'

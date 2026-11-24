@@ -1,0 +1,8 @@
+{"row_key":"valid_1","id":1,"email":"one@example.com","status":"active"}
+{"row_key":"valid_2","id":2,"email":"two@example.com","status":"inactive"}
+{"row_key":"valid_3","id":3,"email":"three@example.com","status":"active"}
+{"row_key":"valid_4","id":4,"email":"four@example.com","status":"inactive"}
+{"row_key":"valid_5","id":5,"email":"five@example.com","status":"active"}
+{"row_key":"missing_email","id":6,"email":null,"status":"active"}
+{"row_key":"missing_id_and_email","id":null,"email":null,"status":"inactive"}
+{"row_key":"negative_id","id":-1,"email":"negative@example.com","status":"active"}

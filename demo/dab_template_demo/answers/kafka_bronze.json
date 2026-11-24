@@ -9,6 +9,8 @@
   "pipeline_mode": "split",
   "source_format": "kafka",
   "onboarding_file_format": "json",
+  "quality_engine": "none",
+  "managed_quality_migrations": false,
   "dataflow_group": "dab_demo_kafka_group",
   "wheel_source": "volume_path",
   "sdp_meta_dependency": "__SET_ME__",

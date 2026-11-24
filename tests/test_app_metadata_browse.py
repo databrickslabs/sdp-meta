@@ -20,6 +20,7 @@ import sys
 import unittest
 from types import SimpleNamespace
 from unittest import mock
+from unittest.mock import patch
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _APP_DIR = os.path.join(_REPO_ROOT, "databricks_app")
@@ -27,6 +28,92 @@ if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
 import app as app_mod  # noqa: E402  (deliberate post-sys.path-insert import)
+
+
+class QualitySpecEditorValidationTests(unittest.TestCase):
+    def setUp(self):
+        app_mod.app.testing = True
+        self.client = app_mod.app.test_client()
+
+    def _parse(self, row, *, uc_enabled=True):
+        response = self.client.post(
+            "/api/metadata/parse-spec",
+            data=json.dumps({
+                "content": json.dumps([row]),
+                "format": "json",
+                "spec_type": "onboarding",
+                "env": "dev",
+                "uc_enabled": uc_enabled,
+            }),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        return response.get_json()
+
+    def test_lakeflow_fields_are_exposed_and_rules_path_is_warned(self):
+        body = self._parse({
+            "data_flow_id": "100",
+            "bronze_quality_engine": "lakeflow",
+            "bronze_quality_rules_path_dev": "/Volumes/c/s/v/rules.yml",
+            "bronze_database_quarantine_dev": "bronze",
+            "bronze_quarantine_table": "invalid_rows",
+        })
+        self.assertEqual(body["errors"], [])
+        self.assertTrue(
+            any("bronze_quality_rules_path_dev" in warning
+                for warning in body["warnings"])
+        )
+
+    def test_lakeflow_rejects_legacy_conflict(self):
+        body = self._parse({
+            "data_flow_id": "100",
+            "bronze_quality_engine": "lakeflow",
+            "bronze_quality_rules_path_dev": "/Volumes/c/s/v/rules.yml",
+            "bronze_data_quality_expectations_json_dev": "/Volumes/c/s/v/legacy.yml",
+            "bronze_database_quarantine_dev": "bronze",
+            "bronze_quarantine_table": "invalid_rows",
+        })
+        self.assertTrue(
+            any("cannot combine" in error for error in body["errors"])
+        )
+
+    def test_non_uc_validation_requires_quarantine_path(self):
+        row = {
+            "data_flow_id": "100",
+            "bronze_quality_engine": "lakeflow",
+            "bronze_quality_rules_path_dev": "/rules.yml",
+            "bronze_database_quarantine_dev": "bronze",
+            "bronze_quarantine_table": "invalid_rows",
+        }
+        self.assertEqual(self._parse(row, uc_enabled=True)["errors"], [])
+        errors = self._parse(row, uc_enabled=False)["errors"]
+        self.assertTrue(
+            any(
+                "bronze_quarantine_table_path_dev" in error
+                for error in errors
+            )
+        )
+
+    def test_plugin_requires_configured_remote_dependency(self):
+        with (
+            patch.dict(
+                os.environ,
+                {"SDP_META_QUALITY_ENGINE_DEPENDENCY": ""},
+            ),
+            patch(
+                "routes.spec_editor.deployable_quality_engines",
+                return_value=("lakeflow", "dqx"),
+            ) as deployable,
+        ):
+            body = self._parse({
+                "data_flow_id": "100",
+                "bronze_quality_engine": "synthetic",
+            })
+
+        deployable.assert_called_once_with("")
+        self.assertTrue(
+            any("must be one of" in error for error in body["errors"])
+        )
 
 
 class TableDataLimitValidationTests(unittest.TestCase):

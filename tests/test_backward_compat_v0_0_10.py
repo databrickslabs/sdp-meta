@@ -15,9 +15,9 @@ side:
    must backfill the missing columns with ``None`` so the dataclass
    instantiation succeeds.
 
-2. **v0.0.10-format onboarding files.** A customer who re-runs
-   onboarding with their old onboarding JSON (no new fields) must end
-   up with a persisted spec where every v0.1.0-new field is ``None``.
+2. **v0.0.10-format onboarding files.** After applying the documented
+   migration for the intentionally corrected missing-quarantine-target case,
+   re-onboarding must persist every unrelated new field with its safe default.
 
 3. **DataflowPipeline runtime.** A pipeline constructed from a legacy
    v0.0.10 spec (new fields ``None``) must take the legacy code paths
@@ -50,6 +50,7 @@ which is exactly what we want.
 import copy
 import json
 import sys
+import tempfile
 import unittest
 from datetime import datetime
 from unittest.mock import MagicMock, patch
@@ -65,6 +66,7 @@ from databricks.labs.sdp_meta.dataflow_pipeline import DataflowPipeline  # noqa:
 from databricks.labs.sdp_meta.dataflow_spec import (  # noqa: E402
     BronzeDataflowSpec,
     DataflowSpecUtils,
+    DQE_CONTRACT_VERSION,
     SilverDataflowSpec,
 )
 from databricks.labs.sdp_meta.onboard_dataflowspec import OnboardDataflowspec  # noqa: E402
@@ -145,7 +147,7 @@ V0_0_10_SILVER_ROW = {
     "sinks": [],
 }
 
-# Fields added in v0.1.0. The expected default per field depends on the
+# Fields added after v0.0.10. The expected default per field depends on the
 # upgrade path:
 #
 #   - Read-time path (persisted Delta dataflowspec table missing these
@@ -167,12 +169,16 @@ NEW_BRONZE_FIELDS_AT_READ = [
     "cdcApplyChangesFlowsSchemas",
     "rowFilter",
     "quarantineRowFilter",
+    "qualityConfig",
+    "dqeContract",
 ]
 NEW_SILVER_FIELDS_AT_READ = [
     "clusterByAuto",
     "cdcApplyChangesFlows",
     "rowFilter",
     "quarantineRowFilter",
+    "qualityConfig",
+    "dqeContract",
 ]
 # ``cdcApplyChangesFlowsSchemas`` defaults to ``{}`` (empty map), not
 # ``None``, because :meth:`OnboardDataflowspec.get_cdc_apply_changes_flows_json`
@@ -188,12 +194,16 @@ EXPECTED_BRONZE_DEFAULTS_AT_ONBOARDING = {
     "cdcApplyChangesFlowsSchemas": {},
     "rowFilter": None,
     "quarantineRowFilter": None,
+    "qualityConfig": None,
+    "dqeContract": DQE_CONTRACT_VERSION,
 }
 EXPECTED_SILVER_DEFAULTS_AT_ONBOARDING = {
     "clusterByAuto": False,
     "cdcApplyChangesFlows": None,
     "rowFilter": None,
     "quarantineRowFilter": None,
+    "qualityConfig": None,
+    "dqeContract": DQE_CONTRACT_VERSION,
 }
 
 
@@ -295,17 +305,45 @@ class TestV010OnboardingFileCompatibility(SDPFrameworkTestCase):
 
     The existing ``test_onboard_bronze_silver_with_v10`` in
     ``tests/test_onboard_dataflowspec.py`` only asserts row count.
-    Here we round-trip through the real Delta read path and verify
-    every persisted spec has the v0.1.0-new fields defaulted to
-    ``None`` — proving an upgrading customer who re-runs onboarding
-    against their old JSON file doesn't accidentally pick up unintended
-    values for the new fields.
+    Here we round-trip through the real Delta read path and verify every
+    persisted spec has safe defaults for new fields. Re-onboarding stamps
+    ``dqeContract`` with the current contract; unrelated fields remain
+    disabled.
     """
 
     def _onboard_v0_0_10(self):
         params = copy.deepcopy(self.onboarding_bronze_silver_params_map)
-        params["onboarding_file_path"] = self.onboarding_json_v10_file
-        OnboardDataflowspec(self.spark, params).onboard_dataflow_specs()
+        with open(self.onboarding_json_v10_file, encoding="utf-8") as handle:
+            onboarding = json.load(handle)
+        # Release A intentionally rejects historical rows that configured
+        # expect_or_quarantine without a target. Supply the documented
+        # migration so this test can isolate defaults for unrelated fields.
+        for flow in onboarding:
+            for layer in ("bronze", "silver"):
+                rules_path = flow.get(
+                    f"{layer}_data_quality_expectations_json_dev"
+                )
+                if not rules_path or flow.get(f"{layer}_quarantine_table"):
+                    continue
+                with open(rules_path, encoding="utf-8") as rules_file:
+                    rules = json.load(rules_file)
+                if not rules.get("expect_or_quarantine"):
+                    continue
+                table = flow[f"{layer}_table"]
+                flow[f"{layer}_database_quarantine_dev"] = flow[
+                    f"{layer}_database_dev"
+                ]
+                flow[f"{layer}_quarantine_table"] = f"{table}_quarantine"
+                flow[f"{layer}_quarantine_table_path_dev"] = (
+                    f"tests/resources/data/{layer}/{table}_quarantine"
+                )
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", encoding="utf-8"
+        ) as migrated:
+            json.dump(onboarding, migrated)
+            migrated.flush()
+            params["onboarding_file_path"] = migrated.name
+            OnboardDataflowspec(self.spark, params).onboard_dataflow_specs()
         return params
 
     def _read_specs(self, params, layer, spec_class, additional_cols):
@@ -414,6 +452,7 @@ class TestV010DataflowPipelineRuntimeCompatibility(SDPFrameworkTestCase):
 
         self.assertIsNone(pipeline._get_row_filter())
         self.assertIsNone(pipeline._get_quarantine_row_filter())
+        self.assertFalse(pipeline._legacy_dqe_strict())
         # Multi-source AUTO CDC parsed-attribute is None on legacy specs.
         self.assertIsNone(pipeline.cdcApplyChangesFlows)
         # Single-source CDC default is also None.

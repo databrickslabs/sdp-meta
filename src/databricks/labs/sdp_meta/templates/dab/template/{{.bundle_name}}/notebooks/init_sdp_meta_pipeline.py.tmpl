@@ -14,6 +14,9 @@
 # `resources/sdp_meta_pipelines.yml` either -- it has to happen here.
 sdp_meta_dependency = spark.conf.get("sdp_meta_dependency")
 %pip install --force-reinstall --no-deps $sdp_meta_dependency  # noqa: E999
+{{- if eq .quality_engine "dqx"}}
+%pip install "databricks-labs-dqx>=0.14,<0.17"  # noqa: E999
+{{- end}}
 
 # COMMAND ----------
 

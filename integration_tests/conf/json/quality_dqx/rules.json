@@ -1,0 +1,34 @@
+[
+  {
+    "name": "id_required",
+    "criticality": "error",
+    "check": {
+      "function": "is_not_null",
+      "arguments": {"column": "id"}
+    }
+  },
+  {
+    "name": "email_required",
+    "criticality": "error",
+    "check": {
+      "function": "is_not_null_and_not_empty",
+      "arguments": {"column": "email"}
+    }
+  },
+  {
+    "name": "positive_id",
+    "criticality": "error",
+    "check": {
+      "function": "is_not_less_than",
+      "arguments": {"column": "id", "limit": 1}
+    }
+  },
+  {
+    "name": "active_status_warning",
+    "criticality": "warn",
+    "check": {
+      "function": "is_in_list",
+      "arguments": {"column": "status", "allowed": ["'inactive'"]}
+    }
+  }
+]

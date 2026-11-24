@@ -1,0 +1,9 @@
+customer_id,email,status
+1,ada@example.com,ACTIVE
+2,grace@example.com,INACTIVE
+,missing-id@example.com,ACTIVE
+4,,ACTIVE
+5,warning@example.com,UNKNOWN
+6,linus@example.com,ACTIVE
+7,margaret@example.com,INACTIVE
+8,barbara@example.com,ACTIVE
